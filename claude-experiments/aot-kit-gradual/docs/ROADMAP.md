@@ -27,7 +27,7 @@ tuples.
 `isa` is reflexive and transitive; `x isa ALL` and `ANY isa x` for all `x`; every ascending
 chain terminates.
 
-**Status: DONE.** `src/ty.coil`, gated by `tests/ty-test.coil`: 25 tests, laws checked
+**Status: DONE.** `src/ty.coil`, gated by `tests/ty-test.coil`: 26 tests, laws checked
 exhaustively over 32 hand-listed types plus all 32 of their duals (every pair for the binary
 laws, every triple for associativity and `isa` transitivity). The sample set was 28 until the M3
 review found that no tuple in it had a tuple MEMBER, which is the one shape that made `meet` stop
@@ -55,8 +55,11 @@ the worklist with explicit dependency tracking, global value numbering. Ops: `St
 program optimises to an identical graph under many worklist seeds; no node leaks (every
 unreachable node is dead).
 
-**Status: DONE.** `src/node.coil`, gated by `tests/node-test.coil`: 16 tests. Ops through
-`Return`, plus an opaque `Arg` node standing in until `Proj` arrives in M2.
+**Status: DONE.** `src/node.coil`, gated by `tests/node-test.coil`: 27 tests. Ops through
+`Return`, plus an opaque `Arg` node standing in until `Proj` arrives in M2. (Every count in this
+file is the suite's size TODAY, not its size when the milestone closed: this one was 16 at M1 and
+grew as M3's two reviews added the proof-and-provisionality gates to the same file. A count that
+records history rather than the present is a number nobody can check.)
 
 The seed test is doubled up, because the obvious version of it is nearly vacuous. Peepholing
 eagerly during construction leaves only 5 nodes on the worklist, so seeds barely explore
@@ -89,7 +92,7 @@ elimination. JavaScript truthiness deciding reachability.
 unreachable code provably removed; a `Phi` never survives with a dead input; a loop phi reaches
 a fixpoint, identically under every worklist seed.
 
-**Status: DONE.** `tests/control-test.coil`, 17 tests. Reachability is not a separate pass: an
+**Status: DONE.** `tests/control-test.coil`, 19 tests. Reachability is not a separate pass: an
 `If`'s type is a tuple of its two control outputs, so an untaken branch is `~ctrl` in one slot
 and dead-code elimination falls out of type propagation. `Cast` is in, which is the mechanism
 [D4](DECISIONS.md#d4-guards-are-control-flow-not-a-node-kind) rests on, and a guard with an
@@ -141,12 +144,50 @@ the corpus and *red* on a set of deliberately corrupted graphs (a verifier that 
 not a verifier); the interpreter agrees with expected results on the corpus, before and after
 `Opto`.
 
-**Status: DONE**, all four slices (`tools/gate.sh`). M3 stayed open through 3a on purpose, because
+**Status: DONE**, all four slices. **138 tests green across eight suites** (`tools/gate.sh`):
+ty 26, node 27, control 19, loop-tree 5, verify 19, eval 23, text 12, gtext 7, plus 19 diagram
+fixtures rendered and the gallery page rebuilt. M3 stayed open through 3a on purpose, because
 the milestone's gate says "`print` then `parse` is the identity on the whole corpus" and 3a proved
 that for types only; slice 3b is the clause itself, and `src/gtext.coil` gated by
-`tests/gtext-test.coil` closes it. Two items are still open and are carried forward at the end of
-this entry rather than dropped: the type format's one spelling wart, and `region-dead-path` acting
-on a provisional `~ctrl`, which is now formally M7's.
+`tests/gtext-test.coil` closes it. Four items are still open; they are listed together below and
+written up in full in the slice they came from, rather than dropped.
+
+**What M3 taught**, four things, because the detail below is long and these are the parts that
+outlive it:
+
+- **ANY is the ABSENCE of information; every other high type is a CLAIM someone computed.** M2 had
+  already produced "an analysis may act on a provisional type, a transformation may not", and M3
+  found that six rewrites were satisfying it with a test that proved nothing (`= (t-xctrl)`, on an
+  axis whose high element IS XCtrl). The durable form is `n-ty-proven?`: transitive, and a FIXPOINT
+  test rather than a "not ANY" test, because a stale LOW type is exactly as provisional as ANY.
+- **A tool is only a tool if it can FAIL.** A verifier that never reports, a printer whose text
+  cannot be told apart from a shorter one, and a round trip that would pass for a printer emitting
+  only op names are all worth nothing. Every check in this milestone therefore has a NAMED code and
+  a test asserting that specific code fires, and every identity claim has a counted floor under it
+  saying how much text or how many nodes it actually compared.
+- **The oracle has to RUN the program.** Golden strings and `g-verify` both stayed green through a
+  merge deleted from a diamond, a Return dropped from Stop, and a discharged type check; the
+  interpreter is what noticed, because a graph missing an arm is still a structurally valid graph.
+- **A fixture can be correct by accident, and its CONSTRUCTION ORDER is part of it.** The flat
+  `if (0)` passed while the same construct one level down miscompiled; the first raw diamond
+  reproduced nothing on 200 seeds until it was built the way the witness was built. So a gate says
+  which shape and which order it needs, and reverting each fix one at a time is the only way to
+  learn whether the gate tests what it claims.
+
+**Open at M3's close**, collected here so M4 does not have to find them at the bottom of a long
+entry. All four are written up in full further down; nothing is red.
+
+1. **`g-analyze!` then `iterate!` deleted a whole If on 15 of 200 seeds** on the nested-guard
+   fixture, from a FULLY ANALYSED graph, and does not reproduce now. It is the only item on this
+   list that is a suspected live miscompile rather than a design decision, and it is not an instance
+   of the law above. **A gate for it is the first thing to write when it is picked up**; "it does not
+   reproduce" means only that no current gate covers that phase order.
+2. **`region-dead-path` acting on a provisional `~ctrl`**, now formally M7's phase structure.
+3. **A dead node can be wired as an input** and nothing says so at the wiring site. The named panic
+   in `n-add-def!` was written and reverted, because one existing test reuses an Arg the peephole
+   under test has already killed; closing it means fixing that test's hygiene.
+4. **The `int=[min..max]` versus `w0` spelling wart** in the type format: a decision to make, not a
+   fix, and the graph format inherits whichever way it goes.
 
 **Slice 1, the verifier: DONE** (`src/verify.coil`, `src/corpus.coil`, 19 tests). One named code
 per check, which is what stops the corrupted-graph half from being vacuous: "verify returned
@@ -156,7 +197,8 @@ reports `VERR-PHI-ARITY`" is a claim about a specific check noticing. It runs `c
 deletes edges, `stop-idealize` deletes an input), so a reducibility check would silently transform
 the graph it was verifying.
 
-**Slice 2, the IR interpreter: DONE** (`src/eval.coil`, 12 tests). The differential oracle is live:
+**Slice 2, the IR interpreter: DONE** (`src/eval.coil`, `tests/eval-test.coil`, 23 tests; 12 when
+the slice closed, and the two reviews put their differential witnesses here). The oracle is live:
 every corpus program that exists in both a raw and an optimised build produces the same observable
 result, over 12 argument bindings. From here on that is the gate for every optimisation.
 
@@ -180,7 +222,7 @@ against `ty-can-be-truthy?`, because an interpreter that takes a different branc
 predicted is worse than no oracle at all.
 
 **Slice 3a, the exact textual TYPE form: DONE** (`src/text.coil`, gated by
-`tests/text-test.coil`: 12 tests; the whole gate is 114). Printer and parser live in one
+`tests/text-test.coil`: 12 tests; the whole gate was 114 then and is 138 now). Printer and parser live in one
 file because they are one format. `ty-print-exact` decides every axis BY FIELD VALUE, `ty-parse`
 rebuilds through `val-make`/`ty-intern` so no second canonicalisation exists, `ty-render` writes to
 a caller buffer, and `ty-injective?` answers "does this type's text decode back to it" — which
@@ -513,7 +555,7 @@ gate's word "identity" rather than an implementation detail. `n<k>` is a PRINT I
 position in the listing, because the arena ids of DEAD nodes cannot be recreated (nothing recreates
 a node in order to kill it again). Consistent with [D5](DECISIONS.md#d5-written-in-coil-node-and-type-handles-are-integer-ids),
 which already says ids are dense arena indices and not identities, so no amendment was needed. It
-is not a vacuous distinction: 6 of the 15 corpus fixtures have live nodes whose arena ids are not
+is not a vacuous distinction: 6 of the 18 corpus fixtures have live nodes whose arena ids are not
 their print indices (`02-fold-after` prints 4 lines out of a 10-node arena), so the renumbering is
 exercised by the identity clause itself. A listing whose indices are not dense and ascending is
 `GERR-INDEX-ORDER` and not a text the parser renumbers for you: a parser that quietly accepted `n7`
@@ -552,12 +594,32 @@ down here rather than something to paper over. `keeps` is the one that is assert
 dropped: `g-write` refuses to print a graph with a pin anywhere but the roots, because a live pin
 means a construction window is still open and the caller is printing a half-built graph.
 
-**What the gate proves.** The corpus round trip (text identity, live-count equality, `g-verify`
-clean on every reparsed graph, with a counted floor on lines round-tripped); the differential
-oracle across the reparse for 12 argument seeds per fixture; the field-sensitivity table; the
-malformed-text table, one named code each plus a distinct-code floor; that `g-parse` aborts in a
-forked child rather than handing back a partial graph; the "the parser optimises nothing" fixture;
-and the structural loop check (region and phi arity equal, back edge in slot 2).
+**What the gate proves, with the numbers it measures** (`tests/gtext-test.coil`, 7 tests, and every
+number below is printed by the run rather than asserted in prose):
+
+- the corpus round trip, text identity plus live-count equality plus `g-verify` clean on every
+  reparsed graph: **207 node lines across 18 fixtures**, floor 130, fixture floor 15;
+- the differential oracle across the reparse: **216 paired runs** (18 fixtures x 12 argument seeds)
+  agreeing on both status and value, with each fixture's Arg-type signature compared across the
+  renumbering first, because `ev-bind-args!` keys bindings by declared type and position;
+- the field-sensitivity table: **10 one-field-apart pairs** that must render to different text, over
+  **14 hand-shaped graphs**;
+- the malformed-text table: 24 texts reaching **19 distinct named codes**, tied to
+  `gtext-err-count`;
+- that `g-parse` aborts (signal 6, observed in a forked child) rather than handing back a partial
+  graph;
+- the "the parser optimises nothing" fixture, kept by the parser and deleted by the eager builder in
+  the same test;
+- and the structural loop check: **9 reparsed Phis in lockstep with their merge**, back edge in
+  slot 2, plus a short-phi text whose expected outcome is `VERR-PHI-ARITY`.
+
+**A gallery specimen with no builder.** `19-text-only-add` in `tools/dot-dump.coil` is the first
+fixture that arrives as TEXT: the `Add(x, 0)` graph the eager builder deletes on sight, parsed and
+then drawn. Every fixture's listing now travels in its `.dot` file as a block comment written by
+`g-render`, so the page shows the printer's own output beside the diagram for the same reason the
+node counts come from the compiler: a listing typed into the page by hand is a claim nothing
+re-checks. It also puts the 3a wart on screen, since the diagram's debug label reads
+`int=[min..max]` where the exact listing reads `int w0` for the one type.
 
 **What the gate deliberately does NOT assert.**
 
@@ -570,10 +632,41 @@ and the structural loop check (region and phi arity equal, back edge in slot 2).
 - **"Reparse, `iterate!` to a fixpoint, get the same text" is NOT gated**, and is the most
   attractive property that was left out. It is exactly the shape that trips the open
   `region-dead-path` item, so it waits for M7's phase structure rather than being half-attempted.
-- **`GRT-DIFFERENT-TEXT` is provoked only by a hand-written text, never by a printed one.** Like
+- **`GRT-DIFFERENT-TEXT` is never provoked, and neither is `GRT-PARSE-FAILED`.** Like
   `ty-injective?` returning false in 3a, the branch that says "the format is ambiguous" has no
   reachable witness among graphs the project builds, which is the property being gated rather than
-  a hole in it.
+  a hole in it. `g-round-trip-check` takes a GRAPH and not a text, so reaching either cause needs a
+  graph whose print-parse-print differs, which IS the defect the check exists to report; only
+  `GRT-OK` is ever observed.
+- **"A malformed text must come back as the NO-GRAPH SENTINEL" is not assertable against this API,
+  and was not faked.** `g-try-parse` returns a CODE, not a graph handle, and `src/gtext.coil` says
+  outright that a failed parse leaves the graph in an unspecified partial state, because rolling
+  back would be a second implementation of `graph-reset!`. Nor is "the graph after a failed parse is
+  invalid" a true property: a text that fails on its third line can leave a perfectly legal
+  Start+Stop graph behind. What is asserted instead is the guarantee a caller can actually rely on:
+  no malformed text ever returns `GERR-NONE`, the code is the specific named first failure, and the
+  strict entry point `g-parse` ABORTS, so a partial graph is never handed onward.
+- **The differential clause has no witnessed catch of its own.** Every wiring defect that was
+  injected while writing the gate is also visible to text identity, because every input is printed
+  in slot order. Its unique territory is the part of the format that carries nothing (`outs` order,
+  `deps`, `hash`, the GVN table), where an order-sensitive reader would only be observable by
+  RUNNING the program. So the order-insensitivity of the five current `outs` readers stays an
+  argument, and this clause is the measurement standing behind the argument rather than a catch.
+- **The input-ORDER pair catches order-INSENSITIVITY, not a systematic REVERSAL.** A printer that
+  sorted its inputs is what it was injected against and what it finds. Reversing every input list
+  instead is caught by the identity clause, because reprinting an already-reversed parse yields a
+  different text. Written down because the pair's name could be read as the stronger claim.
+- **`GERR-COUNT`'s own self-check is exercised only in the passing direction.** `gtext-err-count`
+  panics when the code table and the count disagree, and making that fire needs a source edit rather
+  than an input, the same shape as `ty-injective?` in 3a. What the gate does instead is tie the
+  distinct-code count to `gtext-err-count`, which is what turns a newly added code that nothing
+  provokes into a red test.
+- **Six printer-side panics are unreachable from any text or corpus graph**, and are gated in
+  neither direction: `op-aux-kind`'s and `gaux-write`'s hard-error defaults (a new op), `g-write`'s
+  "fewer than two live nodes" and "Start/Stop are not the first two live nodes", `g-render`'s
+  truncation panic, and `gtext-check-pins`'s open-window panic. Each needs either a new op or a
+  deliberately corrupted graph handed straight to the printer, which is precisely the input they
+  exist to refuse. They stay because LAW 2 wants the refusal to exist before the op does.
 
 **Why the identity clause is not self-fulfilling**, which is LAW 8 and is the whole reason this
 slice is as large as it is. A print-then-parse-then-print identity would pass for a printer that
@@ -595,7 +688,9 @@ paid for once. Printing a type goes through the CHECKED `ty-print-exact`, so a t
 form is not injective aborts by name rather than putting an ambiguous string into a graph line and
 having the ambiguity attributed to this file.
 
-**Twenty named failure codes, all twenty provoked and distinct**, including
+**Nineteen named failure codes plus `GERR-NONE`, and all nineteen are provoked and distinct** (the
+table is 24 malformed texts reaching 19 codes; `GERR-NONE` is the one a malformed text never
+reaches, and it is asserted separately on the two-line minimum graph), including
 `GERR-NO-NEWLINE` for a truncated text and `GERR-ROOT-DUP` for a second Start or Stop (without
 which the parser would `n-new` a root that `g-start` does not name: a Start nothing anchors
 constants to). The two type codes, `GERR-BAD-TYPE` and `GERR-BAD-AUX-TYPE`, leave `text-err`

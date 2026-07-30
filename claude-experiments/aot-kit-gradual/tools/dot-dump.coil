@@ -15,18 +15,42 @@
 (import "fmt.coil"       :use *)
 (import "slice.coil"     :use *)
 (import "../src/ty.coil"     :use *)
+(import "../src/text.coil"   :use *)
 (import "../src/node.coil"   :use *)
 (import "../src/dot.coil"    :use *)
 (import "../src/corpus.coil" :use *)
+(import "../src/gtext.coil"  :use *)
+
+;; Every fixture also carries its TEXTUAL form, from `g-render`, inside a DOT block comment. The
+;; page shows it next to the diagram, and it comes from the printer rather than from a hand-copied
+;; listing for the same reason the stats line does: a number or a listing typed into the page by
+;; hand is a claim about the compiler that nothing re-checks. `g-render` panics rather than
+;; truncating, so a text too large for the buffer fails here instead of appearing shortened.
+(defn emit-text [(w (ptr Writer))] (-> i64)
+  (let [b (alloc-stack (array u8 32768))]
+    (ps w "/* text\n")
+    (ps w (g-render (cast (ptr i8) b) 32768))
+    (ps w "*/\n")
+    0))
 
 (defn emit [(w (ptr Writer)) (name (slice u8))] (-> i64)
   (ps w "=== FIXTURE ") (ps w name) (ps w "\n")
   ; counts come from the compiler, not from counting lines in the output afterwards
   (fmt w "// stats live={d} created={d} leaked={d}\n"
        (g-live-count) (n-count) (g-leaked-count))
+  (emit-text w)
   (g-print-dot w)
   (ps w "=== END\n")
   0)
+
+;; The one fixture with no builder: a graph that arrives as TEXT and nothing else. `Add(x, 0)` on
+;; an int-typed argument is a node `add-idealize` deletes on sight, so the eager builder cannot
+;; hand it to you, and that is exactly why the parser has to. A parsed graph is the INPUT to a
+;; debugging session, so a parser that peepholed would hand back a different reduction than the
+;; one that was filed. Same text as `raw-add-text` in tests/gtext-test.coil, where the property is
+;; gated; here it is the picture of what came back.
+(defn text-only-add [] (-> (slice u8))
+  "n0: Start <- : ctrl\nn1: Stop <- n5 : ALL\nn2: Arg int <- n0 : int\nn3: Const int=0 <- n0 : int=0\nn4: Add <- _ n2 n3 : int w0\nn5: Return <- n0 n4 : [ctrl,int w0]\n")
 
 (defn main [] (-> i64)
   (let [w (stdout) n (corpus-count) (mut i) 0]
@@ -35,5 +59,9 @@
         (do (corpus-build! (load i))
             (emit w (corpus-name (load i)))
             (store! i (+ (load i) 1))
-            0))))
+            0)))
+    ; `g-parse` and not `g-try-parse`: a text written into this file that does not parse is a bug
+    ; in this file, and a diagram of a partially wired graph would be a picture of nothing.
+    (g-parse (text-only-add))
+    (emit w "19-text-only-add"))
   0)

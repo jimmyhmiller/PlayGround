@@ -42,6 +42,23 @@ def stats(name):
     return {k: int(v) for k, v in zip(("live", "created", "leaked"), m.groups())}
 
 
+def listing(name):
+    """The fixture's textual IR, as `g-render` printed it into the .dot block comment.
+
+    Read out of the dump rather than typed into this file: a listing copied by hand is a claim
+    about the printer that nothing re-checks, and it would drift the first time the format moves.
+    """
+    lines = (DOT / f"{name}.dot").read_text().splitlines()
+    try:
+        start = lines.index("/* text") + 1
+        end = lines.index("*/", start)
+    except ValueError:
+        raise SystemExit(f"{name}.dot has no /* text */ block; re-run tools/render-dot.sh")
+    if end == start:
+        raise SystemExit(f"{name}.dot has an EMPTY text block, which no graph has")
+    return html.escape("\n".join(lines[start:end]))
+
+
 def chips(name):
     s = stats(name)
     return (
@@ -85,6 +102,32 @@ def single(name, title, source, lead, look):
   <div class="compare compare-one">
     <figure>
       <figcaption><span class="eyebrow">analysed and optimised</span> {chips(name)}</figcaption>
+      <div class="well">{svg(name)}</div>
+    </figure>
+  </div>
+  <p class="note"><span class="note-key">Look for</span>{look}</p>
+</section>"""
+
+
+def text_and_graph(name, title, source, lead, look):
+    """The textual IR beside the diagram it parses back into.
+
+    The pairing is the point: the text is the INPUT here, not a report about the graph.
+    """
+    return f"""
+<section class="specimen">
+  <header class="spec-head">
+    <h2>{title}</h2>
+    <pre class="source"><code>{html.escape(source)}</code></pre>
+  </header>
+  <p class="lead">{lead}</p>
+  <div class="compare">
+    <figure>
+      <figcaption><span class="eyebrow">the text, one line per live node</span></figcaption>
+      <pre class="listing"><code>{listing(name)}</code></pre>
+    </figure>
+    <figure>
+      <figcaption><span class="eyebrow">the graph it parsed back into</span> {chips(name)}</figcaption>
       <div class="well">{svg(name)}</div>
     </figure>
   </div>
@@ -172,6 +215,12 @@ figcaption { display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
         padding:1rem; overflow-x:auto; display:flex; justify-content:center; }
 .well svg { max-width:100%; height:auto; }
 
+/* A listing is text, so unlike a diagram well it follows the theme. It scrolls in its own box:
+   a graph line is long and the page body must never scroll sideways. */
+.listing { margin:0; background:var(--surface); border:1px solid var(--rule); border-radius:4px;
+           padding:1rem; overflow-x:auto; font-family:var(--mono); font-size:.78rem;
+           line-height:1.55; color:var(--ink); }
+
 .note { margin:0; font-size:.92rem; max-width:74ch;
         border-left:3px solid var(--accent); padding:.1rem 0 .1rem .85rem; }
 .note-key { font-family:var(--mono); font-size:.68rem; font-weight:700; letter-spacing:.12em;
@@ -189,19 +238,20 @@ footer { border-top:1px solid var(--rule); padding-top:1rem; color:var(--muted);
 """
 
 BODY = f"""
-<title>Reading the graph: aot-kit-gradual M1</title>
+<title>Reading the graph: aot-kit-gradual M1&ndash;M3</title>
 {CSS}
 <div class="page">
 
 <header class="masthead">
-  <span class="eyebrow">aot-kit-gradual &middot; milestones M1&ndash;M2 &middot; node engine and control flow</span>
+  <span class="eyebrow">aot-kit-gradual &middot; milestones M1&ndash;M3 &middot; node engine, control flow, textual IR</span>
   <h1>Reading the graph</h1>
   <p class="standfirst">The IR is a sea of nodes, so there is no line-by-line listing to read.
   These are the compiler's own Graphviz dumps, before and after peepholes, from
   <code>src/dot.coil</code>. Every node is labelled with <strong>what the lattice concluded
-  about it</strong>, because that is the question this compiler is mostly about. The last
-  specimen is the one the whole design is aimed at: a guard, with an unboxed fast path and a
-  generic fallback, both real code in the same binary.</p>
+  about it</strong>, because that is the question this compiler is mostly about. The guard
+  specimen is the one the whole design is aimed at: an unboxed fast path and a generic fallback,
+  both real code in the same binary. The last one is a graph that <strong>arrived as text</strong>,
+  which is M3's round-trip format doing the job it exists for.</p>
 </header>
 
 <div class="panel legend">
@@ -344,6 +394,21 @@ BODY = f"""
         "Both are real, both are reachable, and the <code>Phi</code> merges them. Every "
         "mechanism in that picture already existed for other reasons, which is exactly why "
         "guards are not a node kind.")}
+
+{text_and_graph("19-text-only-add",
+      "A graph with no builder", "return x + 0;   // as TEXT, not as a program",
+      "Every other specimen on this page was built by calling into the node engine. This one was "
+      "written as text and parsed, which is the only way to get it: <code>Add(x, 0)</code> on an "
+      "int-typed argument is a node the eager builder deletes on sight.",
+      "The <code>Add</code> is still there. A parsed graph is the INPUT to a debugging session, so "
+      "a parser that peepholed would hand back a different reduction than the one that was filed, "
+      "and the format would be useless for reporting an optimiser bug. Note the two spellings of "
+      "one type: the diagram says <code>int=[min..max]</code> and the listing says "
+      "<code>int w0</code>, because the diagram uses the DEBUG printer and the text uses the exact "
+      "one. Note also <code>_</code> in slot 0, the absent control input of a data node, which is "
+      "the format spells a null input. There is no placeholder node id anywhere in the grammar, "
+      "which is deliberate: a plausible-looking id standing in for \"nothing here\" is the stub "
+      "that turns a missing edge into a miscompile hunt.")}
 
 <div class="panel finding">
   <h2>What the pictures showed that the tests did not</h2>
