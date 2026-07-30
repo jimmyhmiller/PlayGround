@@ -1,0 +1,349 @@
+;; The shared fixture corpus: the programs every later gate runs over.
+;;
+;; M3's gate says "on the whole corpus" three times (print/parse round-trip is the identity,
+;; the verifier is green, the interpreter agrees before and after Opto), so the corpus has to
+;; be a THING that can be indexed, not a list of functions copied into whichever tool needs
+;; them. It lived in tools/dot-dump.coil and was partly duplicated in tests/; it lives here
+;; now, and the diagram gallery is one consumer of it rather than its owner.
+;;
+;; It is in src/ and not tests/ because from M3 onwards it is a product artifact: the
+;; differential oracle, the verifier and the textual round-trip all range over it.
+;;
+;; MODE IS PART OF THE CORPUS. A fixture built raw and merely ANALYSED is legitimately not
+;; where a peepholed graph would be: nothing has been rewritten, so a foldable constant is
+;; still an Add whose type happens to be a constant. That is the whole point of the
+;; before/after pictures. A checker therefore has to be told which contract a fixture claims
+;; to satisfy, which is what `corpus-mode` is for.
+;;
+;; Three tables are keyed by the SAME named index constants: name, mode, and builder. Keying
+;; them by literal 0..13 is how inserting a fixture at position 3 silently renames four
+;; diagrams and re-points every mode.
+(module corpus)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "ty.coil"        :use *)
+(import "node.coil"      :use *)
+
+; ============================================================================
+; The index
+; ============================================================================
+(const CX-FOLD-BEFORE i64 0)
+(const CX-FOLD-AFTER  i64 1)
+(const CX-GVN-BEFORE  i64 2)
+(const CX-GVN-AFTER   i64 3)
+(const CX-BIG-BEFORE  i64 4)
+(const CX-BIG-AFTER   i64 5)
+(const CX-RANGES      i64 6)
+(const CX-BRANCH      i64 7)
+(const CX-DEAD-BEFORE i64 8)
+(const CX-DEAD-AFTER  i64 9)
+(const CX-DIAMOND     i64 10)
+(const CX-LOOP        i64 11)
+(const CX-GUARD       i64 12)
+(const CX-NESTED      i64 13)
+
+;; RAW-ANALYSED: every node created, nothing peepholed, then `g-analyze!` to a type fixpoint.
+;; OPTIMISED:    peepholed during construction and then `iterate!` to a peephole fixpoint.
+;;
+;; BOTH modes satisfy the WHOLE verifier, which is why the raw mode is raw-ANALYSED and not
+;; raw-unanalysed: a graph left at ANY everywhere is not at its type fixpoint and would report
+;; VERR-STALE-TYPE on nearly every node, which is a true statement about a graph nobody claimed
+;; was finished. What the raw mode is NOT at is the PEEPHOLE fixpoint: `1+2*3` is still an Add
+;; there, with a constant type. The verifier deliberately never asks about that, because asking
+;; means running `idealize`, which rewrites (see verify.coil). So `g-verify` needs no mode
+;; argument today; the mode is what tells a LATER gate which contract to hold a fixture to, and
+;; the differential interpreter in particular has to run over both.
+(const CORPUS-RAW-ANALYSED i64 0)
+(const CORPUS-OPTIMISED    i64 1)
+
+(defn corpus-count [] (-> i64) 14)
+
+(defn panic-corpus [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "corpus: ") (ps w msg) (ps w "\n"))
+  (abort) 0)
+
+;; Names are the diagram file names, and the gallery is built from them, so they are stable
+;; identifiers rather than prose. Changing one changes an artifact somebody has a link to.
+(defn corpus-name [(i i64)] (-> (slice u8))
+  (case i
+    CX-FOLD-BEFORE "01-fold-before"
+    CX-FOLD-AFTER  "02-fold-after"
+    CX-GVN-BEFORE  "03-gvn-before"
+    CX-GVN-AFTER   "04-gvn-after"
+    CX-BIG-BEFORE  "05-big-before"
+    CX-BIG-AFTER   "06-big-after"
+    CX-RANGES      "07-ranges"
+    CX-BRANCH      "08-branch"
+    CX-DEAD-BEFORE "09-dead-branch-before"
+    CX-DEAD-AFTER  "10-dead-branch-after"
+    CX-DIAMOND     "11-diamond"
+    CX-LOOP        "12-loop"
+    CX-GUARD       "13-guard"
+    CX-NESTED      "14-nested-loops"
+    (do (panic-corpus "corpus-name: index out of range") "")))
+
+(defn corpus-mode [(i i64)] (-> i64)
+  (case i
+    CX-FOLD-BEFORE CORPUS-RAW-ANALYSED
+    CX-FOLD-AFTER  CORPUS-OPTIMISED
+    CX-GVN-BEFORE  CORPUS-RAW-ANALYSED
+    CX-GVN-AFTER   CORPUS-OPTIMISED
+    CX-BIG-BEFORE  CORPUS-RAW-ANALYSED
+    CX-BIG-AFTER   CORPUS-OPTIMISED
+    CX-RANGES      CORPUS-OPTIMISED
+    CX-BRANCH      CORPUS-OPTIMISED
+    CX-DEAD-BEFORE CORPUS-RAW-ANALYSED
+    CX-DEAD-AFTER  CORPUS-OPTIMISED
+    CX-DIAMOND     CORPUS-OPTIMISED
+    CX-LOOP        CORPUS-OPTIMISED
+    CX-GUARD       CORPUS-OPTIMISED
+    CX-NESTED      CORPUS-OPTIMISED
+    (do (panic-corpus "corpus-mode: index out of range") 0)))
+
+(defn corpus-mode-name [(m i64)] (-> (slice u8))
+  (case m
+    CORPUS-RAW-ANALYSED "raw-analysed"
+    CORPUS-OPTIMISED    "optimised"
+    (do (panic-corpus "corpus-mode-name: unknown mode") "")))
+
+; ============================================================================
+; Builders
+; ============================================================================
+;; Two sets, because the before/after pictures are the argument that the optimiser does
+;; anything at all. The eager set peepholes as it goes, which is what a front end does; the
+;; raw set creates nodes and rewrites nothing.
+;;
+;; These are exported: a test that wants a hand-built graph should use them rather than grow a
+;; fourth copy.
+
+; --- eager builders: peephole as we go ---------------------------------------
+(defn mk-arg [(t i64)] (-> i64) (n-peephole (n-new1 OP-ARG t (g-start))))
+(defn mk-int [(v i64)] (-> i64) (n-const (t-int-con v)))
+(defn mk-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
+(defn mk-un  [(op i64) (a i64)] (-> i64) (n-peephole (n-new2 op 0 NO-NODE a)))
+(defn mk-ret [(v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 (g-start) v))]
+    (n-add-def! (g-stop) r)
+    (n-peephole (g-stop))
+    (iterate!)
+    r))
+
+; --- raw builders: create nodes, peephole nothing ----------------------------
+(defn raw-arg [(t i64)] (-> i64) (n-new1 OP-ARG t (g-start)))
+(defn raw-int [(v i64)] (-> i64) (n-new1 OP-CONST (t-int-con v) (g-start)))
+(defn raw-bin [(op i64) (a i64) (b i64)] (-> i64) (n-new3 op 0 NO-NODE a b))
+(defn raw-un  [(op i64) (a i64)] (-> i64) (n-new2 op 0 NO-NODE a))
+(defn raw-ret [(v i64)] (-> i64)
+  (let [r (n-new2 OP-RETURN 0 (g-start) v)]
+    (n-add-def! (g-stop) r)
+    ; analysis WITHOUT rewriting: the before picture should show what the lattice concluded,
+    ; not a graph of ANYs, which would say nothing about the analysis at all
+    (g-analyze!)
+    r))
+
+; --- control-flow builders ---------------------------------------------------
+(defn mk-if [(ctrl i64) (pred i64)] (-> i64) (n-peephole (n-new2 OP-IF 0 ctrl pred)))
+(defn mk-cproj [(iff i64) (idx i64)] (-> i64) (n-peephole (n-new1 OP-CPROJ idx iff)))
+(defn mk-cast [(ctrl i64) (t i64) (v i64)] (-> i64) (n-peephole (n-new2 OP-CAST t ctrl v)))
+
+;; A merge is created UNPEEPHOLED: a two-armed region with no Phi yet is a degenerate diamond
+;; and collapses on sight. A real parser has the same problem and solves it the same way,
+;; which is why the builders are shaped like this rather than being a convenience.
+(defn new-region2 [(a i64) (b i64)] (-> i64)
+  (let [r (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r a) (n-add-def! r b) r))
+(defn new-phi2 [(r i64) (declared i64) (a i64) (b i64)] (-> i64)
+  (let [p (n-new OP-PHI declared)]
+    (n-add-def! p r) (n-add-def! p a) (n-add-def! p b) p))
+(defn ret-to [(ctrl i64) (v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 ctrl v))]
+    (n-add-def! (g-stop) r) (n-peephole (g-stop)) r))
+
+; ============================================================================
+; The fixtures
+; ============================================================================
+;; Every one starts from `graph-reset!`, so a fixture is a whole program and not an addition
+;; to whatever was there before. Seed 1 throughout: the multi-seed claim is a separate gate,
+;; and a corpus whose graphs depended on the seed would make every golden comparison a
+;; two-variable question.
+
+;; 1 + 2*3, entirely constant, so the optimiser should leave a single literal behind.
+(defn fx-fold-raw [] (-> i64)
+  (graph-reset! 1)
+  (raw-ret (raw-bin OP-ADD (raw-int 1) (raw-bin OP-MUL (raw-int 2) (raw-int 3)))) 0)
+(defn fx-fold [] (-> i64)
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-ADD (mk-int 1) (mk-bin OP-MUL (mk-int 2) (mk-int 3)))) 0)
+
+;; (arg+2) - (2+arg). Needs operand canonicalisation, then value numbering, then x-x, and
+;; all three have to fire for this to reach zero.
+(defn fx-gvn-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [a (raw-arg (t-int))]
+    (raw-ret (raw-bin OP-SUB (raw-bin OP-ADD a (raw-int 2))
+                             (raw-bin OP-ADD (raw-int 2) a)))) 0)
+(defn fx-gvn [] (-> i64)
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-SUB (mk-bin OP-ADD a (mk-int 2))
+                           (mk-bin OP-ADD (mk-int 2) a)))) 0)
+
+;; Ranges, not constants: nothing folds to a literal, but every node carries what the lattice
+;; worked out. This is the fixture that shows the analysis rather than the rewriting.
+(defn fx-ranges [] (-> i64)
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 0 10))
+        b (mk-arg (t-int-range 2 3))
+        c (mk-arg (t-dyn))
+        e (mk-bin OP-ADD (mk-bin OP-MUL a b) (mk-int 5))]
+    (mk-ret (mk-bin OP-ADD e (mk-bin OP-SUB c (mk-int 1))))) 0)
+
+;; The M1 test fixture: nine expressions that collapse to one multiply.
+(defn fx-big-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [a  (raw-arg (t-int-range 0 100))
+        b  (raw-arg (t-int-range 1 4))
+        e1 (raw-bin OP-ADD a (raw-int 0))
+        e2 (raw-bin OP-MUL e1 (raw-int 1))
+        e3 (raw-bin OP-ADD (raw-int 3) e2)
+        e4 (raw-bin OP-ADD e2 (raw-int 3))
+        e5 (raw-bin OP-SUB e3 e4)
+        e6 (raw-bin OP-MUL b (raw-int 2))
+        e7 (raw-bin OP-ADD e5 e6)]
+    (raw-ret (raw-un OP-MINUS (raw-un OP-MINUS e7)))) 0)
+(defn fx-big [] (-> i64)
+  (graph-reset! 1)
+  (let [a  (mk-arg (t-int-range 0 100))
+        b  (mk-arg (t-int-range 1 4))
+        e1 (mk-bin OP-ADD a (mk-int 0))
+        e2 (mk-bin OP-MUL e1 (mk-int 1))
+        e3 (mk-bin OP-ADD (mk-int 3) e2)
+        e4 (mk-bin OP-ADD e2 (mk-int 3))
+        e5 (mk-bin OP-SUB e3 e4)
+        e6 (mk-bin OP-MUL b (mk-int 2))
+        e7 (mk-bin OP-ADD e5 e6)]
+    (mk-ret (mk-un OP-MINUS (mk-un OP-MINUS e7)))) 0)
+
+;; `if (arg) return 1; else return 2;` with an unknown predicate: both arms survive.
+(defn fx-branch [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-dyn)))]
+    (ret-to (mk-cproj iff 0) (mk-int 1))
+    (ret-to (mk-cproj iff 1) (mk-int 2)))
+  (iterate!) 0)
+
+;; The same shape with a predicate that cannot be truthy. Built raw so the before picture shows
+;; what the analysis concluded without any rewriting having happened yet.
+(defn fx-branch-dead-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (n-new2 OP-IF 0 (g-start) (n-new1 OP-CONST (t-int-con 0) (g-start)))
+        t   (n-new1 OP-CPROJ 0 iff)
+        f   (n-new1 OP-CPROJ 1 iff)]
+    (let [r1 (n-new2 OP-RETURN 0 t (n-new1 OP-CONST (t-int-con 1) (g-start)))
+          r2 (n-new2 OP-RETURN 0 f (n-new1 OP-CONST (t-int-con 2) (g-start)))]
+      (n-add-def! (g-stop) r1)
+      (n-add-def! (g-stop) r2)))
+  (g-analyze!) 0)
+(defn fx-branch-dead [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-int 0))]
+    (ret-to (mk-cproj iff 0) (mk-int 1))
+    (ret-to (mk-cproj iff 1) (mk-int 2)))
+  (iterate!) 0)
+
+;; A diamond that merges a value: this is what a Phi is for.
+(defn fx-diamond [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-dyn)))
+        t   (mk-cproj iff 0)
+        f   (mk-cproj iff 1)
+        r   (new-region2 t f)
+        ph  (new-phi2 r (t-dyn) (mk-int 1) (mk-bin OP-ADD (mk-arg (t-int-range 0 9)) (mk-int 2)))]
+    (ret-to r ph)
+    (wl-push! r) (wl-push! ph))
+  (iterate!) 0)
+
+;; `i = 0; while (true) i = i + 1;`  The dashed edge is the back edge. The phi's type is the
+;; whole termination story: widening is what stops the range climbing for ever.
+;; Built in the order the in-progress contract requires: open the merge, open the phi, build
+;; and peephole the body INSIDE that window, close the phis, then close control.
+(defn fx-loop [] (-> i64)
+  (graph-reset! 1)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE) (n-add-def! lp (g-start)) (n-add-def! lp NO-NODE)
+    (n-peephole lp)
+    (let [ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph lp) (n-add-def! ph (mk-int 0)) (n-add-def! ph NO-NODE)
+      (n-peephole ph)
+      (let [nx (mk-bin OP-ADD ph (mk-int 1))]
+        (n-set-def! ph 2 nx)
+        (n-set-def! lp 2 lp)
+        (ret-to lp ph)
+        (wl-push! lp) (wl-push! ph) (wl-push! nx))))
+  (iterate!) 0)
+
+;; A guard, in the shape DECISIONS.md D4 describes: test the value, and on the taken edge a Cast
+;; carries the narrowed type into the fast path. The generic value still reaches the merge.
+(defn fx-guard [] (-> i64)
+  (graph-reset! 1)
+  (let [x   (mk-arg (t-dyn))
+        iff (mk-if (g-start) (mk-bin OP-LT x (mk-int 100)))
+        t   (mk-cproj iff 0)
+        f   (mk-cproj iff 1)
+        fast (mk-bin OP-ADD (mk-cast t (t-int) x) (mk-int 1))
+        slow (mk-bin OP-ADD x (mk-int 1))
+        r    (new-region2 t f)
+        ph   (new-phi2 r (t-dyn) fast slow)]
+    (ret-to r ph)
+    (wl-push! r) (wl-push! ph))
+  (iterate!) 0)
+
+;; Two nested loops with real exits, so the loop tree has something to nest. The annotations on
+;; the control nodes are the loop-nesting depth, which is what block frequency will be estimated
+;; from once there is a scheduler.
+(defn fx-nested [] (-> i64)
+  (graph-reset! 1)
+  (let [outer (n-new OP-LOOP 0)]
+    (n-add-def! outer NO-NODE) (n-add-def! outer (g-start)) (n-add-def! outer NO-NODE)
+    (n-peephole outer)
+    (let [inner (n-new OP-LOOP 0)]
+      (n-add-def! inner NO-NODE) (n-add-def! inner outer) (n-add-def! inner NO-NODE)
+      (n-peephole inner)
+      (let [iin   (mk-if inner (mk-arg (t-dyn)))
+            ibody (mk-cproj iin 0)
+            iexit (mk-cproj iin 1)]
+        (n-set-def! inner 2 ibody)
+        (let [iout  (mk-if iexit (mk-arg (t-dyn)))
+              obody (mk-cproj iout 0)
+              oexit (mk-cproj iout 1)]
+          (n-set-def! outer 2 obody)
+          (ret-to oexit (mk-int 0))))))
+  (iterate!) 0)
+
+; ============================================================================
+; Building by index
+; ============================================================================
+;; Leaves the graph holding fixture `i`, in the mode `corpus-mode` declares. Every caller
+;; drives the corpus through this, so "the corpus" cannot drift between two tools.
+(defn corpus-build! [(i i64)] (-> i64)
+  (case i
+    CX-FOLD-BEFORE (fx-fold-raw)
+    CX-FOLD-AFTER  (fx-fold)
+    CX-GVN-BEFORE  (fx-gvn-raw)
+    CX-GVN-AFTER   (fx-gvn)
+    CX-BIG-BEFORE  (fx-big-raw)
+    CX-BIG-AFTER   (fx-big)
+    CX-RANGES      (fx-ranges)
+    CX-BRANCH      (fx-branch)
+    CX-DEAD-BEFORE (fx-branch-dead-raw)
+    CX-DEAD-AFTER  (fx-branch-dead)
+    CX-DIAMOND     (fx-diamond)
+    CX-LOOP        (fx-loop)
+    CX-GUARD       (fx-guard)
+    CX-NESTED      (fx-nested)
+    (do (panic-corpus "corpus-build!: index out of range") 0)))

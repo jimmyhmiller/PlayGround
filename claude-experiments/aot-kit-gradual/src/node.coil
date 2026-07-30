@@ -102,6 +102,13 @@
 (defn op-commutes? [(op i64)] (-> bool)
   (or (= op OP-ADD) (or (= op OP-MUL) (= op OP-EQ))))
 
+;; Two operands in slots 1 and 2, with slot 0 the (currently unused) control anchor. `Minus`
+;; and `Not` sit between the arithmetic and the comparisons in the numbering, so this is two
+;; ranges rather than one; the verifier's arity contract is the reason it needs a name.
+(defn op-binary? [(op i64)] (-> bool)
+  (or (and (>= op OP-ADD) (<= op OP-DIV))
+      (and (>= op OP-EQ)  (<= op OP-LE))))
+
 ; ============================================================================
 ; The node
 ; ============================================================================
@@ -132,6 +139,8 @@
    (ldep   (ArrayList i64))    ; id -> how many loops contain it
    (cfgver i64)                ; bumped whenever a control edge changes
    (domver i64)                ; the cfgver the tables above were built at; -1 = never
+   (verifying bool)            ; a checker is walking the graph; see n-add-dep!
+   (achecks i64)               ; falling-type checks the last g-analyze! performed
    (inited bool)])
 
 (defn graph [] (-> (ptr Graph))
@@ -149,6 +158,8 @@
           (store! (field p ldep)  (al-new [i64] (malloc-allocator)))
           (store! (field p cfgver) 0)
           (store! (field p domver) -1)
+          (store! (field p verifying) false)
+          (store! (field p achecks) 0)
           0))
     p))
 
@@ -164,9 +175,23 @@
     (al-clear! [i64]  (field p ldep))
     (store! (field p cfgver) 0)
     (store! (field p domver) -1)
+    (store! (field p verifying) false)
+    (store! (field p achecks) 0)
     (store! (field p seed) seed)
     (store! (field p start) (n-new OP-START 0))
     (store! (field p stop)  (n-new OP-STOP 0))
+    ;; THE ROOTS ARE PINNED. Found by the verifier the first time it ran on the corpus, on
+    ;; `if(0) return 1; else return 2;`: Start's last user there is the predicate constant, so
+    ;; when the dead branch collapsed and that constant died, the kill cascade ran on to Start
+    ;; and killed the root of the graph. Two live nodes went on reading it, the printer omits
+    ;; dead nodes so Start silently vanished from the diagram, and `g-leaked-count` marks from
+    ;; Start, so from then on it could not see a leak.
+    ;;
+    ;; Start and Stop are singletons whose liveness is not a function of their use count, which
+    ;; is exactly what `keeps` is for. Pinning them also upgrades any future attempt to kill a
+    ;; root from silent corruption into `n-kill!`'s named panic.
+    (n-keep! (load (field p start)))
+    (n-keep! (load (field p stop)))
     (n-peephole (load (field p start)))
     (n-peephole (load (field p stop)))
     0))
@@ -174,6 +199,14 @@
 (defn g-start [] (-> i64) (load (field (graph) start)))
 (defn g-stop  [] (-> i64) (load (field (graph) stop)))
 (defn n-count [] (-> i64) (al-len [i64] (load (field (graph) nodes))))
+
+;; A CHECKER IS RUNNING. Verifying a graph means recomputing types over it, and `n-compute` is
+;; not side-effect-free: `phi-compute` records a dependency through `n-add-dep!`. Without this
+;; flag the act of verifying appends to deps lists, which changes what the next edge change
+;; re-queues, so a checker would be observable in later results. Simple guards exactly the
+;; same call with `CODE._midAssert`.
+(defn g-verifying? [] (-> bool) (load (field (graph) verifying)))
+(defn g-set-verifying! [(v bool)] (-> i64) (store! (field (graph) verifying) v) 0)
 
 ; ============================================================================
 ; Node accessors
@@ -351,8 +384,13 @@
 ;; not be revisited when that node changes. Missing this is the classic source of a graph
 ;; that is only wrong under some visit orders, which is exactly what the multi-seed test is
 ;; built to catch.
+;; A verifier recomputes every type and must leave the graph byte-identical, so while it runs
+;; this records nothing. That is sound in exactly one direction: the dependency exists to make
+;; a node be REVISITED, and the verifier changes nothing that could need revisiting. Dropping
+;; it during a real analysis would instead lose a revisit and give an order-dependent graph.
 (defn n-add-dep! [(n i64) (dep i64)] (-> i64)
-  (al-push! [i64] (field (nd n) deps) dep) 0)
+  (if (g-verifying?) 0
+    (do (al-push! [i64] (field (nd n) deps) dep) 0)))
 
 (defn n-move-deps! [(n i64)] (-> i64)
   (let [deps (field (nd n) deps) len (al-len [i64] (load deps)) (mut i) 0]
@@ -781,6 +819,20 @@
             ; change to a non-constant, which is blunter than it needs to be and loses some
             ; loop ranges Simple keeps; termination is the property that matters here, and
             ; sharpening it belongs with loop optimisation.
+            ;
+            ; KNOWN GAP, found in M3 and reproduced, NOT yet fixed. The widening fuel lives in
+            ; the type being widened, and integer arithmetic MINTS A FRESH TYPE: `t-int-range`
+            ; sets `iwide` to 0. So `joined` arrives with an empty gauge on every trip and one
+            ; widening step never accumulates into the next. Around a loop that is peepholed
+            ; eagerly this never shows, because the in-progress contract makes the increment
+            ; read the phi's DECLARED type and the very first `joined` is already `int`. Build
+            ; the same loop RAW and run `g-analyze!` and the phi creeps `int=[0..k]` one step per
+            ; round for ever: measured 6663 after 20000 steps, zero rises, until the step cap
+            ; in `g-analyze!` fires its named error. No corpus fixture is a raw loop, so no gate
+            ; covers it yet. The fix is for the fuel to come from the phi's OWN previous type
+            ; rather than from `joined`, which trades some loop-range precision for termination
+            ; and so belongs with M7's inference-precision gate, where a precision regression is
+            ; visible rather than invisible.
             (if (and (and (= (n-op r) OP-LOOP) (!= joined (n-ty n))) (not (ty-const? joined)))
                 (ty-widen joined)
               joined)))))))
@@ -1075,7 +1127,40 @@
 ;; Termination rests on types only ever falling. M1 has no cycles in the graph at all; when
 ;; M2 introduces loop phis, widening at those phis is what keeps the int axis from creeping
 ;; forever. The step cap turns a non-converging compute into a named error, not a hang.
+;;
+;; TYPE MONOTONICITY, checked rather than assumed. "Every compute is monotone" is a claim about
+;; a SEQUENCE of types and so cannot be seen in any single graph snapshot: the verifier can only
+;; ever say the types are at a fixpoint. This is where it is observable, because `g-analyze!` is
+;; the one phase that changes no edges, so every type it writes must be at or below the type it
+;; replaces. A rise here means some `compute` is not monotone, which means the optimistic pass
+;; in M7 would neither terminate nor be sound, and it is worth an abort naming both types.
+;;
+;; It is deliberately NOT asserted across `iterate!`, where a type legitimately RISES: dropping
+;; a dead path from a Region removes an arm from every Phi on it, and a phi that loses its widest
+;; arm reports a MORE specific type than before. Asserting there would be asserting something
+;; false.
+(defn n-set-ty-falling! [(n i64) (t i64)] (-> i64)
+  (let [p (graph) old (n-ty n)]
+    (store! (field p achecks) (+ (load (field p achecks)) 1))
+    (if (ty-falls? old t) 0
+      (do (let [w (stderr)]
+            (ps w "type monotonicity violated at n")
+            (fmt w "{d} ({s}): " n (op-name (n-op n)))
+            (ty-print w old)
+            (ps w " rose to ")
+            (ty-print w t)
+            (ps w "\n"))
+          (panic-corrupt "g-analyze!: a node's type rose; some compute is not monotone")
+          0))
+    (n-set-ty! n t)))
+
+;; How many falling-type checks the last `g-analyze!` performed. A gate that only asserted "no
+;; violation" would pass just as well with the assertion deleted, so the count is exported and
+;; the gate can require the check to have actually run.
+(defn g-analyze-checks [] (-> i64) (load (field (graph) achecks)))
+
 (defn g-analyze! [] (-> i64)
+  (store! (field (graph) achecks) 0)
   (let [n (n-count) (mut i) 0]
     (loop
       (if (>= (load i) n) (break)
@@ -1088,7 +1173,7 @@
         (if (= n NO-NODE) (break)
           (do (if (n-dead? n) 0
                 (let [t (n-compute n)]
-                  (if (!= t (n-ty n)) (do (n-set-ty! n t) (wl-push-outs! n) 0) 0)))
+                  (if (!= t (n-ty n)) (do (n-set-ty-falling! n t) (wl-push-outs! n) 0) 0)))
               (store! steps (+ (load steps) 1))
               (if (> (load steps) 10000000)
                   (do (panic-corrupt "g-analyze!: types did not reach a fixpoint") 0)

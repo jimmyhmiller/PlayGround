@@ -459,6 +459,12 @@
 ;; and the tests pin it down explicitly.
 (defn ty-isa [(a i64) (b i64)] (-> bool) (= (ty-meet a b) b))
 
+;; "`new` is at or below `old`", which is the only direction an analysis is allowed to move a
+;; type. It is `isa` with its arguments named after the thing being asserted, because
+;; `(ty-isa old new)` reads backwards at the assertion site and an assertion nobody can read
+;; is an assertion that gets written the wrong way round. (M0 had three of those.)
+(defn ty-falls? [(old i64) (new i64)] (-> bool) (ty-isa old new))
+
 (defn ty-high? [(t i64)] (-> bool)
   (match (ty-get t)
     (TBot   [] false)

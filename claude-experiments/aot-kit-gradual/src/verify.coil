@@ -1,0 +1,416 @@
+;; The graph verifier: is this graph well formed, and are its types at a fixpoint.
+;;
+;; DESIGN.md section 8 wants a verifier runnable after any phase, and DECISIONS.md D2 makes it
+;; the mechanism the GC invariants R1 and R2 land in at M8, so its shape is set here rather than
+;; improvised later. M3's gate is that it is GREEN on the whole corpus and RED on a set of
+;; deliberately corrupted graphs, because a verifier that never fails is not a verifier.
+;;
+;; ONE NAMED CODE PER CHECK, and `g-verify` records the first one it hit. That is what stops the
+;; corrupted-graph half of the gate from being vacuous: "verify returned non-zero" is satisfied
+;; by a verifier that always fails, whereas "corrupting the phi/region lockstep reports
+;; VERR-PHI-ARITY" is a claim about a specific check being the one that noticed.
+;;
+;; IT RUNS `compute` AND NEVER `idealize`, and that is the central design constraint here rather
+;; than a detail. Simple's equivalent assertion re-peepholes the graph, which it can afford
+;; because its `idealize` is pure. Here it is not: `region-remove-path!` deletes edges and
+;; `stop-idealize` deletes an input, both mutating before they return. A verifier that checked
+;; "no node is peephole-reducible" would therefore silently TRANSFORM the graph it was
+;; verifying, which is the worst bug a checker can have. `compute` is not free of side effects
+;; either (`phi-compute` records a dependency), which is what the `verifying` flag in node.coil
+;; exists for.
+;;
+;; The one thing left out is a "no node is reducible" check. It is not implementable without
+;; running idealize, and the peephole fixpoint is already gated by the golden tests.
+(module verify)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "ty.coil"        :use *)
+(import "node.coil"      :use *)
+
+; ============================================================================
+; Failure codes
+; ============================================================================
+(const VERR-NONE         i64 0)   ; no violation
+
+;; A graph mid-construction is not claimed to be well formed at all, so this is a PRECONDITION
+;; and not a finding: an open merge has a null final input, reports CONTROL rather than the meet
+;; of its paths, and every Phi on it reports its declared type. Verifying one would trip arity,
+;; slot and stale-type checks at once and bury whatever the caller was actually looking for.
+(const VERR-IN-PROGRESS  i64 1)
+
+(const VERR-EDGE-ASYM    i64 2)   ; def-use and use-def disagree, multiplicity included
+(const VERR-DEAD-INPUT   i64 3)   ; a live node reads a dead one
+(const VERR-DEAD-HAS-INS i64 4)   ; a dead node still holds inputs (n-kill! clears them)
+(const VERR-ARITY        i64 5)   ; wrong number of inputs for the op
+(const VERR-MERGE-IN0    i64 6)   ; a Region/Loop whose input 0 is not null
+(const VERR-PHI-REGION   i64 7)   ; a Phi whose input 0 is not a merge
+(const VERR-PHI-ARITY    i64 8)   ; phi and region are out of lockstep
+(const VERR-CTRL-SLOT    i64 9)   ; a slot that must hold control does not
+(const VERR-DATA-SLOT    i64 10)  ; a slot that must hold a value holds control
+(const VERR-PROJ-SLOT    i64 11)  ; a projection off a non-multi node, or a slot out of range
+(const VERR-STOP-INPUT   i64 12)  ; a Stop input that is not a Return
+(const VERR-STALE-TYPE   i64 13)  ; n-ty differs from n-compute: the types are not at fixpoint
+(const VERR-LEAK         i64 14)  ; a live node nothing can reach
+
+(defn verr-name [(c i64)] (-> (slice u8))
+  (case c
+    VERR-NONE         "VERR-NONE"
+    VERR-IN-PROGRESS  "VERR-IN-PROGRESS"
+    VERR-EDGE-ASYM    "VERR-EDGE-ASYM"
+    VERR-DEAD-INPUT   "VERR-DEAD-INPUT"
+    VERR-DEAD-HAS-INS "VERR-DEAD-HAS-INS"
+    VERR-ARITY        "VERR-ARITY"
+    VERR-MERGE-IN0    "VERR-MERGE-IN0"
+    VERR-PHI-REGION   "VERR-PHI-REGION"
+    VERR-PHI-ARITY    "VERR-PHI-ARITY"
+    VERR-CTRL-SLOT    "VERR-CTRL-SLOT"
+    VERR-DATA-SLOT    "VERR-DATA-SLOT"
+    VERR-PROJ-SLOT    "VERR-PROJ-SLOT"
+    VERR-STOP-INPUT   "VERR-STOP-INPUT"
+    VERR-STALE-TYPE   "VERR-STALE-TYPE"
+    VERR-LEAK         "VERR-LEAK"
+    "VERR-?"))
+
+; ============================================================================
+; The last run's result
+; ============================================================================
+;; Only the FIRST failure is kept, with the node it was found on. Keeping every one would need a
+;; growable list on a struct that has no owner, and a caller that wants the rest can fix the
+;; first and run again, which is the loop you are in anyway.
+(defstruct Verify
+  [(count i64)
+   (code  i64)
+   (node  i64)])
+
+(defn verify-state [] (-> (ptr Verify)) (alloc-static Verify))
+
+(defn g-verify-count [] (-> i64) (load (field (verify-state) count)))
+(defn g-verify-code  [] (-> i64) (load (field (verify-state) code)))
+(defn g-verify-node  [] (-> i64) (load (field (verify-state) node)))
+
+(defn v-reset! [] (-> i64)
+  (let [p (verify-state)]
+    (store! (field p count) 0)
+    (store! (field p code)  VERR-NONE)
+    (store! (field p node)  NO-NODE)
+    0))
+
+(defn v-fail! [(code i64) (n i64)] (-> i64)
+  (let [p (verify-state)]
+    (if (= (load (field p count)) 0)
+        (do (store! (field p code) code) (store! (field p node) n) 0)
+      0)
+    (store! (field p count) (+ (load (field p count)) 1))
+    0))
+
+(defn v-need [(ok bool) (code i64) (n i64)] (-> i64)
+  (if ok 0 (v-fail! code n)))
+
+(defn g-verify-print [(w (ptr Writer))] (-> i64)
+  (let [p (verify-state)]
+    (if (= (load (field p count)) 0) (ps w "verify: clean\n")
+      (do (fmt w "verify: {d} violation(s), first " (load (field p count)))
+          (ps w (verr-name (load (field p code))))
+          (fmt w " at n{d}\n" (load (field p node)))
+          0))))
+
+; ============================================================================
+; Edge symmetry
+; ============================================================================
+;; MULTIPLICITY MATTERS. `phi(r, x, x)` legitimately holds the same def twice, so the two
+;; directions are MULTISETS and comparing "does it appear at all" would miss a `del-def!` that
+;; removed one copy of an edge and left the other. That is precisely the bug that makes a phi
+;; read the wrong arm.
+(defn v-count-ins [(u i64) (d i64)] (-> i64)
+  (let [len (n-nins u) (mut i) 0 (mut c) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (if (= (n-in u (load i)) d) (store! c (+ (load c) 1)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load c)))
+
+(defn v-count-outs [(d i64) (u i64)] (-> i64)
+  (let [len (n-nouts d) (mut i) 0 (mut c) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (if (= (n-out d (load i)) u) (store! c (+ (load c) 1)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load c)))
+
+;; The index of the first occurrence of `u` in `d`'s outputs, or NO-NODE. Used only to visit
+;; each distinct pair once, so a mismatch is one violation and not one per duplicated edge.
+(defn v-first-out [(d i64) (u i64)] (-> i64)
+  (let [len (n-nouts d) (mut i) 0 (mut at) NO-NODE]
+    (loop
+      (if (or (>= (load i) len) (!= (load at) NO-NODE)) (break)
+        (do (if (= (n-out d (load i)) u) (store! at (load i)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load at)))
+
+(defn v-check-edges [(u i64)] (-> i64)
+  ; use-def side: for each distinct def this node reads, the two multiplicities must agree
+  (let [len (n-nins u) (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (let [d (n-in u (load i))]
+              (if (or (= d NO-NODE) (!= (n-find-in u d) (load i))) 0
+                (v-need (= (v-count-ins u d) (v-count-outs d u)) VERR-EDGE-ASYM u)))
+            (store! i (+ (load i) 1))
+            0))))
+  ; def-use side, for the case the loop above cannot see: an out edge u->x where x does not
+  ; read u at all. Walking inputs finds nothing to compare, so it has to be walked from here.
+  ; A dead x lands here too, since `n-kill!` clears its inputs: a dead node must not be
+  ; anybody's listed user.
+  (let [len (n-nouts u) (mut k) 0]
+    (loop
+      (if (>= (load k) len) (break)
+        (do (let [x (n-out u (load k))]
+              (if (!= (v-first-out u x) (load k)) 0
+                (v-need (> (v-count-ins x u) 0) VERR-EDGE-ASYM u)))
+            (store! k (+ (load k) 1))
+            0))))
+  0)
+
+; ============================================================================
+; Arity
+; ============================================================================
+;; The per-op input contract. `Stop` is the only genuinely variable one (it collects Returns and
+;; may end up with none), and `Region`/`Phi` are variable above a floor because a merge's path
+;; count is the program's, not the op's.
+;;
+;; An op with no entry here is an ERROR rather than a default, because a new op silently
+;; inheriting "three inputs" is how a verifier stops verifying the thing it was added for.
+(defn v-check-arity [(n i64)] (-> i64)
+  (let [op (n-op n) k (n-nins n)]
+    (case op
+      OP-START  (v-need (= k 0) VERR-ARITY n)
+      OP-XCTRL  (v-need (= k 0) VERR-ARITY n)
+      OP-STOP   0
+      OP-RETURN (v-need (= k 2) VERR-ARITY n)
+      OP-IF     (v-need (= k 2) VERR-ARITY n)
+      OP-REGION (v-need (>= k 2) VERR-ARITY n)   ; the unused slot 0 plus at least one path
+      OP-LOOP   (v-need (= k 3) VERR-ARITY n)    ; slot 0, the entry, the back edge
+      OP-CPROJ  (v-need (= k 1) VERR-ARITY n)
+      OP-PROJ   (v-need (= k 1) VERR-ARITY n)
+      OP-CONST  (v-need (= k 1) VERR-ARITY n)    ; anchored to control so it is rooted
+      OP-ARG    (v-need (= k 1) VERR-ARITY n)
+      OP-PHI    (v-need (>= k 2) VERR-ARITY n)   ; the region plus at least one value
+      OP-CAST   (v-need (= k 2) VERR-ARITY n)
+      OP-MINUS  (v-need (= k 2) VERR-ARITY n)
+      OP-NOT    (v-need (= k 2) VERR-ARITY n)
+      (if (op-binary? op) (v-need (= k 3) VERR-ARITY n)
+        (do (panic-corrupt "v-check-arity: op has no arity contract") 0)))))
+
+;; How many slots a multi-output node's tuple has. Only meaningful for a multi node, so asking
+;; about anything else is a caller bug rather than a question with a harmless answer.
+(defn v-multi-arity [(op i64)] (-> i64)
+  (case op
+    OP-IF     2
+    OP-RETURN 2
+    (do (panic-corrupt "v-multi-arity: not a multi-output op") 0)))
+
+; ============================================================================
+; Slots
+; ============================================================================
+;; A MISSING slot counts as that slot's violation. "Input 0 does not hold control" is what
+;; VERR-CTRL-SLOT means, and a null is the degenerate case of it; giving absence its own code
+;; would double up with VERR-ARITY, which already reports the count.
+(defn v-need-ctrl [(n i64) (i i64)] (-> i64)
+  (if (>= i (n-nins n)) (v-fail! VERR-CTRL-SLOT n)
+    (let [d (n-in n i)]
+      (v-need (and (!= d NO-NODE) (op-control? (n-op d))) VERR-CTRL-SLOT n))))
+
+(defn v-need-value [(n i64) (i i64)] (-> i64)
+  (if (>= i (n-nins n)) (v-fail! VERR-DATA-SLOT n)
+    (let [d (n-in n i)]
+      (v-need (and (!= d NO-NODE) (op-value? (n-op d))) VERR-DATA-SLOT n))))
+
+(defn v-need-ctrl-from [(n i64) (lo i64)] (-> i64)
+  (let [len (n-nins n) (mut i) lo]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (v-need-ctrl n (load i)) (store! i (+ (load i) 1)) 0))))
+  0)
+
+(defn v-need-value-from [(n i64) (lo i64)] (-> i64)
+  (let [len (n-nins n) (mut i) lo]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (v-need-value n (load i)) (store! i (+ (load i) 1)) 0))))
+  0)
+
+;; A merge's slot 0 is unused by construction: `region-compute` starts its meet at 1, and a node
+;; in that slot would be a use nothing reads, which is how a stale edge survives a rewrite.
+(defn v-check-merge [(n i64)] (-> i64)
+  (if (>= (n-nins n) 1) (v-need (= (n-in n 0) NO-NODE) VERR-MERGE-IN0 n) 0)
+  (v-need-ctrl-from n 1))
+
+;; LAW: region and phi arity are ONE invariant. Checked here as the equality it is, because the
+;; failure it catches (a phi reading the arm of a path that was dropped) is a miscompile that
+;; typechecks cleanly and shows up in no golden string.
+(defn v-check-phi [(n i64)] (-> i64)
+  (let [r (if (>= (n-nins n) 1) (n-in n 0) NO-NODE)]
+    (if (or (= r NO-NODE) (not (op-merge? (n-op r))))
+        (v-fail! VERR-PHI-REGION n)
+      (do (v-need (= (n-nins n) (n-nins r)) VERR-PHI-ARITY n)
+          (v-need-value-from n 1)
+          0))))
+
+;; A projection reads a slot of a tuple, so its parent has to actually produce one and the slot
+;; has to exist. `aux` is the slot index, and an out-of-range one would have `proj-compute`
+;; reporting ALL, which reads as "anything at all" rather than as the error it is.
+(defn v-check-proj [(n i64)] (-> i64)
+  (let [m (if (>= (n-nins n) 1) (n-in n 0) NO-NODE)]
+    (if (or (= m NO-NODE) (not (op-multi? (n-op m))))
+        (v-fail! VERR-PROJ-SLOT n)
+      (let [idx (n-aux n)]
+        (v-need (and (>= idx 0) (< idx (v-multi-arity (n-op m)))) VERR-PROJ-SLOT n)))))
+
+;; Stop collects Returns and nothing else. Anything else in there means some rewrite pointed the
+;; program's exit at a node that does not end a path.
+(defn v-check-stop [(n i64)] (-> i64)
+  (let [len (n-nins n) (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (let [d (n-in n (load i))]
+              (v-need (and (!= d NO-NODE) (= (n-op d) OP-RETURN)) VERR-STOP-INPUT n))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+;; Which slots must hold what, per op.
+;;
+;; Slot 0 of a floating data node (an Add, a Minus) is the control anchor and is unconstrained:
+;; it is null today and will hold control once a division has to be pinned to the block that
+;; proved its divisor non-zero. Constraining it now would encode "always null" as a law, and
+;; that is not the law.
+(defn v-check-slots [(n i64)] (-> i64)
+  (let [op (n-op n)]
+    (case op
+      OP-START  0
+      OP-XCTRL  0
+      OP-STOP   (v-check-stop n)
+      OP-RETURN (do (v-need-ctrl n 0) (v-need-value n 1) 0)
+      OP-IF     (do (v-need-ctrl n 0) (v-need-value n 1) 0)
+      OP-REGION (v-check-merge n)
+      OP-LOOP   (v-check-merge n)
+      OP-CPROJ  (v-check-proj n)
+      OP-PROJ   (v-check-proj n)
+      OP-CONST  (v-need-ctrl n 0)
+      OP-ARG    (v-need-ctrl n 0)
+      OP-PHI    (v-check-phi n)
+      OP-CAST   (do (v-need-ctrl n 0) (v-need-value n 1) 0)
+      OP-MINUS  (v-need-value n 1)
+      OP-NOT    (v-need-value n 1)
+      (if (op-binary? op) (do (v-need-value n 1) (v-need-value n 2) 0)
+        (do (panic-corrupt "v-check-slots: op has no slot contract") 0)))))
+
+; ============================================================================
+; The passes
+; ============================================================================
+;; THE PRECONDITION, reported on its own and before anything else. See VERR-IN-PROGRESS.
+(defn v-pass-in-progress [] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0
+              (if (n-in-progress? (load i)) (v-fail! VERR-IN-PROGRESS (load i)) 0))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+;; The DEAD contract, in a pass of its own and before the live one. A dead node has exactly one
+;; obligation: `n-kill!` released its inputs. Checking it here rather than in node-id order with
+;; everything else is what makes the two dead-node failures distinguishable: a node killed while
+;; it still had users has cleared inputs and so reports VERR-DEAD-INPUT from its users, while a
+;; node marked dead without releasing anything reports VERR-DEAD-HAS-INS whatever its id is.
+;; Interleaved, whichever node happened to have the lower id decided which check "fired", and a
+;; per-check gate on that is a gate on node numbering.
+(defn v-pass-dead [] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i))
+                (v-need (= (n-nins (load i)) 0) VERR-DEAD-HAS-INS (load i))
+              0)
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+(defn v-check-node [(n i64)] (-> i64)
+  ; a live node reading a dead one is checked before arity and slots, because it explains
+  ; every other complaint about that node
+  (let [len (n-nins n) (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (let [d (n-in n (load i))]
+              (if (= d NO-NODE) 0 (v-need (not (n-dead? d)) VERR-DEAD-INPUT n)))
+            (store! i (+ (load i) 1))
+            0))))
+  (v-check-edges n)
+  (v-check-arity n)
+  (v-check-slots n)
+  0)
+
+(defn v-pass-structure [] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0 (v-check-node (load i)))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+;; ARE THE TYPES AT A FIXPOINT. This is all a snapshot can say about monotonicity: `compute` is
+;; a function of the inputs' types, so if re-running it changes an answer then some node was
+;; never revisited after an input changed, which is a missing dependency. The claim that every
+;; `compute` only ever FALLS is a claim about a sequence and is checked where sequences happen,
+;; in `g-analyze!`.
+(defn v-pass-types [] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0
+              (v-need (= (n-compute (load i)) (n-ty (load i))) VERR-STALE-TYPE (load i)))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+;; One violation per leaked node, and the node is NO-NODE because reachability is a whole-graph
+;; question rather than a property of one node: `g-print-flat` is how you find which one. The
+;; check itself is delegated, so there is one definition of "nothing can reach this".
+(defn v-pass-leaks [] (-> i64)
+  (let [k (g-leaked-count) (mut i) 0]
+    (loop
+      (if (>= (load i) k) (break)
+        (do (v-fail! VERR-LEAK NO-NODE) (store! i (+ (load i) 1)) 0))))
+  0)
+
+;; Returns the number of violations; `g-verify-code` then names the first check that fired.
+;;
+;; THE PASSES ARE ORDERED CAUSE BEFORE CONSEQUENCE, and the type pass runs LAST and only on an
+;; otherwise clean graph. `compute` reads its inputs' types, so on a graph with the wrong number
+;; of inputs, a control node in a value slot, or a node nothing can reach, its answers are not
+;; evidence of anything: nothing ever had a reason to revisit that node. Reporting them anyway
+;; would bury the one real failure under a pile of its own consequences, and the recorded first
+;; code would name the wrong check.
+(defn g-verify [] (-> i64)
+  (v-reset!)
+  (g-set-verifying! true)
+  (v-pass-in-progress)
+  (if (> (g-verify-count) 0) 0
+    (do (v-pass-dead)
+        (v-pass-structure)
+        (v-pass-leaks)
+        (if (> (g-verify-count) 0) 0 (v-pass-types))
+        0))
+  (g-set-verifying! false)
+  (g-verify-count))

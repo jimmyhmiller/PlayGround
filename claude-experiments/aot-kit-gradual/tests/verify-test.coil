@@ -1,0 +1,738 @@
+;; The M3a gate: the shared corpus, the graph verifier, and compute monotonicity.
+;;
+;; Three claims, and the second one is what makes the first mean anything:
+;;
+;;   1. `g-verify` is GREEN on every corpus fixture, in both corpus modes, and it changes
+;;      nothing about the graph while saying so.
+;;   2. `g-verify` is RED, with the RIGHT CODE, on a graph corrupted in exactly one way. A
+;;      verifier that never fails is not a verifier, and one that always answers "bad" would
+;;      satisfy an "is non-zero" assertion while checking nothing. So every corruption below
+;;      asserts the specific named code, and usually the node it was found on.
+;;   3. Every `compute` that is a function of its operands' types is MONOTONE over the whole
+;;      lattice sample. That is the property the optimistic pass in M7 rests on, and a snapshot
+;;      verifier cannot see it: the verifier can only say the types are at a fixpoint. The
+;;      SEQUENCE half of it lives in `g-analyze!`, whose falling-type assertion is exercised
+;;      here by making a type rise on purpose.
+;;
+;; Every corruption is applied through the ordinary node API (`n-del-use!`, `n-set-def!`,
+;; `n-del-def!`, `n-set-ty!`) rather than by reaching into the arena, so each one is a bug a
+;; real rewrite could actually have.
+;;
+;;   coil test tests/verify-test.coil
+(module verifytest)
+
+(import "../src/ty.coil"     :use *)
+(import "../src/node.coil"   :use *)
+(import "../src/verify.coil" :use *)
+(import "../src/corpus.coil" :use *)
+(import "assert.coil"    :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "slice.coil"     :use *)
+
+;; A HARD ERROR CAN ONLY BE TESTED FROM ANOTHER PROCESS. `abort` takes the whole program with
+;; it, so the child does the thing that must abort and `_exit(0)` if it survives; the parent
+;; asserts on the wait status. Without the fork this test could only check that the assertion
+;; is PRESENT in the source, never that it fires, which is exactly the vacuity being avoided.
+(extern fork    :cc c [] (-> i32))
+(extern waitpid :cc c [i32 (ptr i32) i32] (-> i32))
+(extern _exit   :cc c [i32] (-> void))
+
+; ---------------------------------------------------------------------------
+; Pins. A number written down here fails loudly when the thing it measures shrinks.
+; ---------------------------------------------------------------------------
+;; The corpus is allowed to GROW; losing a fixture is a silent weakening of every later gate,
+;; because "on the whole corpus" is only as strong as the corpus. Adding one means raising this
+;; deliberately, in the same commit as the fixture.
+(const CORPUS-FLOOR i64 14)
+
+;; The lattice sample is 28 hand-listed types plus all 28 duals, and 433 of the 3136 ordered
+;; pairs are strictly comparable. Both are floors for the same reason: narrowing the sample
+;; would leave every monotonicity test passing while checking less.
+(const SAMPLE-FLOOR      i64 56)
+(const MONO-PAIRS-FLOOR  i64 433)
+(const MONO-BIN-FLOOR    i64 48496)    ; 433 pairs x 56 others x 2 operand positions
+
+; ---------------------------------------------------------------------------
+; Located failure reporting. A bare `assert` on a verifier result says a check went wrong but
+; not which graph it went wrong on, and the graph is the only thing you need.
+; ---------------------------------------------------------------------------
+(defn vfail-head [(label (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "\nVERIFIER GATE: ") (ps w label) (ps w "\n") 0))
+
+(defn vdump [] (-> i64)
+  (let [w (stderr)] (g-verify-print w) (g-print-flat w) 0))
+
+;; The graph is claimed well formed: any violation at all is a failure, and the first one is
+;; named so the report says which check disagreed rather than only that something did.
+(defn expect-clean [(label (slice u8))] (-> i64)
+  (let [c (g-verify)]
+    (if (= c 0) 0
+      (do (vfail-head label)
+          (let [w (stderr)]
+            (fmt w "expected a clean graph, got {d} violation(s), first " c)
+            (ps w (verr-name (g-verify-code)))
+            (fmt w " at n{d}\n" (g-verify-node)))
+          (vdump)
+          (abort)
+          0))))
+
+;; THE CODE IS THE ASSERTION. "verify returned non-zero" is satisfied by a verifier that always
+;; fails; "corrupting the region/phi lockstep reports VERR-PHI-ARITY" is a claim about which
+;; check noticed, which is the thing being gated.
+(defn expect-verr [(label (slice u8)) (want i64)] (-> i64)
+  (let [c (g-verify) got (g-verify-code)]
+    (if (and (> c 0) (= got want)) 0
+      (do (vfail-head label)
+          (let [w (stderr)]
+            (ps w "expected first violation ") (ps w (verr-name want))
+            (fmt w ", got {d} violation(s), first " c)
+            (ps w (verr-name got))
+            (fmt w " at n{d}\n" (g-verify-node)))
+          (vdump)
+          (abort)
+          0))))
+
+;; The same, plus the node it was found on. Used where the corruption also has a knock-on
+;; consequence elsewhere in the graph and the point is that the CAUSE is what got reported.
+(defn expect-verr-at [(label (slice u8)) (want i64) (n i64)] (-> i64)
+  (expect-verr label want)
+  (if (= (g-verify-node) n) 0
+    (do (vfail-head label)
+        (let [w (stderr)]
+          (ps w (verr-name want))
+          (fmt w " was reported at n{d}, expected n{d}\n" (g-verify-node) n))
+        (vdump)
+        (abort)
+        0)))
+
+;; Exactly one violation, for the corruptions that are meant to be a single localised lie about
+;; the graph. Without this a corruption that happened to break five things at once would still
+;; "pass", and the test would no longer be about one check.
+(defn expect-only [(label (slice u8)) (want i64)] (-> i64)
+  (expect-verr label want)
+  (if (= (g-verify-count) 1) 0
+    (do (vfail-head label)
+        (let [w (stderr)]
+          (fmt w "expected exactly 1 violation, got {d}; the corruption is not localised\n"
+               (g-verify-count)))
+        (vdump)
+        (abort)
+        0)))
+
+; ---------------------------------------------------------------------------
+; Structural lookup. Node ids are an implementation detail of the fixture builders, so nothing
+; below hardcodes one: a test that says "n11" breaks the day a builder gains a node.
+; ---------------------------------------------------------------------------
+;; Absence is an ERROR, not NO-NODE: every caller here needs the node to exist, and handing back
+;; a sentinel would turn "the fixture changed shape" into a corruption test of something else.
+(defn find-op [(op i64)] (-> i64)
+  (let [n (n-count) (mut at) NO-NODE (mut i) 0]
+    (loop
+      (if (or (>= (load i) n) (!= (load at) NO-NODE)) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) op))
+                (store! at (load i))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (if (= (load at) NO-NODE)
+        (do (let [w (stderr)]
+              (ps w "\nfixture has no live ") (ps w (op-name op)) (ps w "\n")
+              (g-print-flat w))
+            (abort) 0)
+      (load at))))
+
+; ---------------------------------------------------------------------------
+; A whole-graph fingerprint: op, aux, type, dead flag and every edge, for every node.
+;
+; The gate says the verifier must not change node count, live count or cfgver. Those three miss
+; a swapped DATA edge and a rewritten type, and "the checker silently transformed the thing it
+; was checking" is the worst bug a checker can have, so the comparison is over everything a
+; node is instead. Out edges are unordered, so they contribute their count and their sum: a
+; permutation is not a change, a replacement is.
+; ---------------------------------------------------------------------------
+(defn fp-step [(h i64) (x i64)] (-> i64) (+ (* (^ h x) 1099511628211) 31))
+
+(defn g-fingerprint [] (-> i64)
+  (let [n (n-count) (mut h) 1469598103934665603 (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (store! h (fp-step (load h) (load i)))
+            (store! h (fp-step (load h) (if (n-dead? (load i)) 1 0)))
+            (store! h (fp-step (load h) (n-op (load i))))
+            (store! h (fp-step (load h) (n-aux (load i))))
+            (store! h (fp-step (load h) (n-ty (load i))))
+            (store! h (fp-step (load h) (n-nins (load i))))
+            (store! h (fp-step (load h) (n-nouts (load i))))
+            (let [(mut k) 0]
+              (loop
+                (if (>= (load k) (n-nins (load i))) (break)
+                  (do (store! h (fp-step (load h) (n-in (load i) (load k))))
+                      (store! k (+ (load k) 1))
+                      0))))
+            (let [(mut k) 0 (mut osum) 0]
+              (loop
+                (if (>= (load k) (n-nouts (load i))) (break)
+                  (do (store! osum (+ (load osum) (n-out (load i) (load k))))
+                      (store! k (+ (load k) 1))
+                      0)))
+              (store! h (fp-step (load h) (load osum))))
+            (store! i (+ (load i) 1))
+            0)))
+    (load h)))
+
+; ===========================================================================
+; 1. The corpus verifies clean, in both modes
+; ===========================================================================
+;; The gate says "on the whole corpus" and this is what makes that phrase mechanical: every
+;; index is built through `corpus-build!`, so no tool can hold a private copy of a fixture, and
+;; the count is asserted so a corpus that quietly loses a fixture fails instead of passing
+;; faster. BOTH MODES have to be represented: a raw-then-analysed graph is at its TYPE fixpoint
+;; but not its PEEPHOLE fixpoint, and it is the mode where a verifier that secretly ran
+;; `idealize` would rewrite the graph under itself.
+(deftest the_whole_corpus_verifies_clean_in_both_modes
+  (let [w (stdout) (mut seen) 0 (mut raw) 0 (mut opt) 0 (mut i) 0]
+    (ps w "\n--- corpus ---\n")
+    (loop
+      (if (>= (load i) (corpus-count)) (break)
+        (do (corpus-build! (load i))
+            (expect-clean (corpus-name (load i)))
+            (fmt w "  {d}\t" (load i))
+            (ps w (corpus-name (load i)))
+            (ps w "\t")
+            (ps w (corpus-mode-name (corpus-mode (load i))))
+            (fmt w "\tnodes {d}, live {d}\n" (n-count) (g-live-count))
+            (if (= (corpus-mode (load i)) CORPUS-RAW-ANALYSED)
+                (store! raw (+ (load raw) 1))
+              (store! opt (+ (load opt) 1)))
+            (store! seen (+ (load seen) 1))
+            (store! i (+ (load i) 1))
+            0)))
+    (fmt w "  {d} fixtures verified clean ({d} raw-analysed, {d} optimised)\n"
+         (load seen) (load raw) (load opt))
+    ; every index the corpus declares was actually built and verified
+    (assert (= (load seen) (corpus-count)))
+    (assert (= (+ (load raw) (load opt)) (corpus-count)))
+    ; and the corpus did not shrink out from under the claim
+    (assert (>= (corpus-count) CORPUS-FLOOR))
+    ; both contracts are exercised, not just whichever one is easier to satisfy
+    (assert (> (load raw) 0))
+    (assert (> (load opt) 0))))
+
+; ===========================================================================
+; 2. Verifying changes nothing
+; ===========================================================================
+;; `g-verify` runs `compute` over every node and must leave the graph byte-identical. This is a
+;; real hazard rather than a hypothetical: `idealize` here is NOT pure (`region-remove-path!`
+;; deletes edges, `stop-idealize` drops an input), so a verifier that checked "nothing is
+;; reducible" would transform what it was verifying, and `phi-compute` records a dependency
+;; unless the verifying flag suppresses it.
+;;
+;; cfgver has no public accessor, and does not need one: `g-build-loop-tree!` stamps the current
+;; cfgver, and `g-dom-fresh?` is exactly the question "has cfgver changed since". So freshness
+;; surviving the verifier IS "cfgver is identical", and it fails loudly if a control edge moved.
+(deftest verifying_does_not_change_the_graph
+  (let [w (stdout) (mut i) 0]
+    (ps w "\n--- verify is read-only ---\n")
+    (loop
+      (if (>= (load i) (corpus-count)) (break)
+        (do (corpus-build! (load i))
+            (g-build-loop-tree!)
+            (assert (g-dom-fresh?))
+            (let [nodes (n-count) live (g-live-count) fp (g-fingerprint)]
+              (expect-clean (corpus-name (load i)))
+              (if (and (and (= (n-count) nodes) (= (g-live-count) live))
+                       (and (= (g-fingerprint) fp) (g-dom-fresh?)))
+                  0
+                (do (vfail-head (corpus-name (load i)))
+                    (let [e (stderr)]
+                      (fmt e "g-verify mutated the graph: nodes {d}->{d}, live {d}->{d}, fingerprint {d}->{d}, cfg fresh 1->{d}\n"
+                           nodes (n-count) live (g-live-count) fp (g-fingerprint)
+                           (if (g-dom-fresh?) 1 0)))
+                    (vdump)
+                    (abort)
+                    0)))
+            (store! i (+ (load i) 1))
+            0)))
+    (fmt w "  {d} fixtures unchanged by g-verify (nodes, live, cfgver, every edge and type)\n"
+         (corpus-count))
+    0))
+
+; ===========================================================================
+; 3. Edge symmetry is a MULTISET
+; ===========================================================================
+;; `phi(r, x, x)` and `x + x` legitimately hold the same def twice. Comparing "does this def
+;; appear at all" in the two directions would call that clean AND would call it clean after a
+;; `del-def!` removed one copy of the edge, which is precisely the bug that leaves a phi reading
+;; the wrong arm.
+;;
+;; The measurement is what makes this non-vacuous: if the fixture did not really have a doubled
+;; edge, dropping one copy would be an ordinary asymmetry and the multiset claim would be
+;; untested. So the doubling is asserted before the corruption.
+(deftest def_use_symmetry_is_a_multiset
+  (graph-reset! 1)
+  (let [a   (mk-arg (t-dyn))
+        add (mk-bin OP-ADD a a)]
+    (mk-ret add)
+    ; measured: the Add really does appear twice in the arg's outs, and the arg twice in the
+    ; Add's ins. `dyn + dyn` is what stops a peephole from folding this away first.
+    (assert (= (v-count-ins add a) 2))
+    (assert (= (v-count-outs a add) 2))
+    (expect-clean "x+x holds one def twice")
+
+    ; drop ONE of the two out edges: the use-def side still reads `a` twice
+    (n-del-use! a add)
+    (assert (= (v-count-ins add a) 2))
+    (assert (= (v-count-outs a add) 1))
+    (expect-only "one of two duplicated out edges dropped" VERR-EDGE-ASYM)))
+
+; ===========================================================================
+; 4. The remaining checks, one corruption each
+; ===========================================================================
+(deftest a_live_node_reading_a_dead_one_is_caught
+  (graph-reset! 1)
+  (let [a   (mk-arg (t-int))
+        add (mk-bin OP-ADD a (mk-int 2))]
+    (mk-ret add)
+    (let [z (n-new1 OP-ARG (t-int) (g-start))]
+      (n-kill! z)
+      (assert (n-dead? z))
+      ; a rewrite that pointed a live node at a node it had just killed
+      (n-set-def! add 2 z)
+      (expect-only "an Add operand is a dead node" VERR-DEAD-INPUT)
+      (assert (= (g-verify-node) add)))))
+
+;; REGION AND PHI ARITY ARE ONE INVARIANT. The verifier establishes it GLOBALLY, as the equality
+;; it is, and that is not redundant with `region-remove-path!` keeping them in step: that
+;; function's guard is `(= (n-nins u) (n-nins n))`, so it SKIPS any phi whose arity already
+;; differs. It cannot detect the divergence it exists to prevent, in either direction, and the
+;; second half of this test measures that blind spot rather than asserting it in prose.
+(deftest region_and_phi_arity_are_one_invariant
+  ; direction one: a path deleted from the Region alone
+  (corpus-build! CX-DIAMOND)
+  (let [r (find-op OP-REGION) p (find-op OP-PHI)]
+    (assert (= (n-nins p) (n-nins r)))
+    (n-del-def! r 2)
+    (expect-only "a Region path dropped without the matching Phi value" VERR-PHI-ARITY)
+    (assert (= (g-verify-node) p)))
+
+  ; direction two: a value added to the Phi alone
+  (corpus-build! CX-DIAMOND)
+  (let [r (find-op OP-REGION) p (find-op OP-PHI)]
+    (n-add-def! p (mk-int 5))
+    (assert (= (n-nins p) (+ (n-nins r) 1)))
+    (expect-only "a Phi value added without the matching Region path" VERR-PHI-ARITY)
+    (assert (= (g-verify-node) p))
+
+    ; and now the blind spot: removing a region path leaves this phi untouched, because the
+    ; guard only maintains a phi that is ALREADY in lockstep. Measured before and after.
+    (let [w (stdout) before (n-nins p)]
+      (region-remove-path! r 1)
+      (fmt w "\n  region-remove-path! skipped a diverged phi: phi {d} -> {d}, region now {d}\n"
+           before (n-nins p) (n-nins r))
+      (assert (= (n-nins p) before))
+      (assert (!= (n-nins p) (n-nins r))))
+    (expect-verr-at "region-remove-path! cannot repair a diverged Phi" VERR-PHI-ARITY p)))
+
+(deftest a_phi_off_something_that_is_not_a_merge_is_caught
+  (corpus-build! CX-DIAMOND)
+  (let [p (find-op OP-PHI)]
+    (n-set-def! p 0 (g-start))
+    (expect-only "a Phi whose input 0 is Start" VERR-PHI-REGION)
+    (assert (= (g-verify-node) p))))
+
+(deftest a_control_slot_holding_a_value_is_caught
+  (graph-reset! 1)
+  (let [k (mk-int 7)
+        r (mk-ret k)]
+    ; Return's slot 0 is control. Pointing it at the constant it returns also puts the same def
+    ; in two slots, so this incidentally holds the multiset rule: 2 ins, 2 outs, symmetric.
+    (n-set-def! r 0 k)
+    (assert (= (v-count-ins r k) 2))
+    (assert (= (v-count-outs k r) 2))
+    (expect-only "a Const in Return's control slot" VERR-CTRL-SLOT)
+    (assert (= (g-verify-node) r))))
+
+(deftest a_value_slot_holding_control_is_caught
+  (graph-reset! 1)
+  (let [a   (mk-arg (t-int))
+        add (mk-bin OP-ADD a (mk-int 2))]
+    (mk-ret add)
+    (n-set-def! add 2 (g-start))
+    (expect-only "Start as an Add operand" VERR-DATA-SLOT)
+    (assert (= (g-verify-node) add))))
+
+;; A merge's slot 0 is unused BY CONSTRUCTION (`region-compute` starts its meet at 1), so a node
+;; parked there is a use nothing reads: exactly how a stale edge survives a rewrite and keeps a
+;; subtree alive.
+(deftest a_merge_with_a_non_null_input_zero_is_caught
+  (corpus-build! CX-DIAMOND)
+  (let [r (find-op OP-REGION)]
+    (n-set-def! r 0 (g-start))
+    (expect-only "a Region whose input 0 is Start" VERR-MERGE-IN0)
+    (assert (= (g-verify-node) r))))
+
+;; A Loop is (unused slot 0, entry, back edge) and nothing else. Truncating it also diverges the
+;; phi on it, which is the point of `expect-verr-at`: the arity of the Loop is the CAUSE and is
+;; what gets reported, while the phi arity it drags along is the consequence.
+(deftest a_truncated_loop_is_caught_as_arity
+  (corpus-build! CX-LOOP)
+  (let [lp (find-op OP-LOOP)]
+    (assert (= (n-nins lp) 3))
+    (n-del-def! lp 2)
+    (assert (= (n-nins lp) 2))
+    (expect-verr-at "a Loop truncated to 2 inputs" VERR-ARITY lp)))
+
+;; A projection reads a slot of a TUPLE, so its parent has to produce one. A Region produces
+;; plain control, and `proj-compute` would answer ALL, which reads as "anything at all" rather
+;; than as the error it is.
+(deftest a_projection_off_a_region_is_caught
+  (corpus-build! CX-DIAMOND)
+  (let [r (find-op OP-REGION)
+        arm (n-in r 2)]
+    (assert (= (n-op arm) OP-CPROJ))
+    (n-set-def! arm 0 r)
+    (expect-only "a CProj whose parent is a Region" VERR-PROJ-SLOT)
+    (assert (= (g-verify-node) arm))))
+
+(deftest a_stop_input_that_is_not_a_return_is_caught
+  (corpus-build! CX-GVN-AFTER)
+  (n-add-def! (g-stop) (mk-int 9))
+  (expect-only "a Const among Stop's inputs" VERR-STOP-INPUT)
+  (assert (= (g-verify-node) (g-stop))))
+
+;; ARE THE TYPES AT A FIXPOINT. `compute` is a function of its inputs' types, so if re-running it
+;; changes an answer then some node was never revisited after an input changed, which is a
+;; missing dependency and an optimiser that is only right under some visit orders.
+(deftest a_stale_type_is_caught
+  (corpus-build! CX-GVN-AFTER)
+  (let [ret (find-op OP-RETURN)
+        v   (n-in ret 1)]
+    ; the corruption is a type that is not what compute says, and nothing else
+    (assert (= (n-ty v) (n-compute v)))
+    (n-set-ty! v (t-int))
+    (assert (!= (n-ty v) (n-compute v)))
+    ; the Return reading it goes stale too; the node whose OWN type is wrong is the lower id and
+    ; the one reported, so this pins the cause rather than the consequence
+    (expect-verr-at "a hand-set type that compute disagrees with" VERR-STALE-TYPE v)))
+
+;; A live node nothing can reach is a leak: the arena would grow forever across a real compile,
+;; and the printer omits dead nodes so a leak is invisible in every diagram.
+(deftest a_leaked_node_is_caught
+  (corpus-build! CX-GVN-AFTER)
+  ; peepholed, so its TYPE is right and the only thing wrong with it is that nothing can reach
+  ; it. An unpeepholed node would also be stale, and the test would no longer be about leaks.
+  (let [x (n-xctrl)]
+    (assert (not (n-dead? x)))
+    (assert (= (n-ty x) (n-compute x)))
+    (assert (= (n-nouts x) 0))
+    ; the leak is a whole-graph property, so it is reported at NO-NODE: g-print-flat is how you
+    ; find which node it was
+    (expect-only "an XCtrl reachable from neither Start nor Stop" VERR-LEAK)
+    (assert (= (g-verify-node) NO-NODE))))
+
+;; THE PRECONDITION, not a finding. A merge still being built has a null final input, reports
+;; CONTROL rather than the meet of its paths, and every Phi on it reports its DECLARED type.
+;; Verifying one would trip arity, slot and stale-type checks at once and bury whatever the
+;; caller was looking for, so it is reported alone and first.
+(deftest an_open_merge_is_reported_as_in_progress
+  (corpus-build! CX-GVN-AFTER)
+  (let [r (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE)
+    (n-add-def! r (g-start))
+    (n-add-def! r NO-NODE)
+    (assert (n-in-progress? r))
+    ; that region is ALSO a leak and its type is ALSO unanalysed; the in-progress pass runs
+    ; first and returns before any of that, so exactly one thing is reported
+    (expect-only "a merge with a null final input" VERR-IN-PROGRESS)
+    (assert (= (g-verify-node) r))))
+
+; ===========================================================================
+; 5. compute is monotone
+; ===========================================================================
+;; MONOTONICITY IS THE PROPERTY M7 RESTS ON: inputs that only fall must give an output that only
+;; falls, or the optimistic pass neither terminates nor is sound. It is checked over every
+;; strictly comparable ordered pair in the lattice sample, in every operand position, with the
+;; other operand ranging over the whole sample too, because a per-position check with one fixed
+;; partner would miss a rule that only misbehaves when both sides are numeric.
+(defn nsamples [] (-> i64) (* (ty-sample-count) 2))
+(defn sample [(i i64)] (-> i64)
+  (if (< i (ty-sample-count)) (ty-sample i) (ty-sample-dual (- i (ty-sample-count)))))
+
+;; The binary value computes, dispatched the way `n-compute` dispatches them. An op with no
+;; entry is an error rather than a default: a new binary op silently inheriting the arithmetic
+;; rules is how a monotonicity gate stops covering the op it was extended for.
+(defn compute2 [(op i64) (a i64) (b i64)] (-> i64)
+  (case op
+    OP-ADD (arith-compute OP-ADD a b)
+    OP-SUB (arith-compute OP-SUB a b)
+    OP-MUL (arith-compute OP-MUL a b)
+    OP-DIV (arith-compute OP-DIV a b)
+    OP-EQ  (cmp-compute OP-EQ a b)
+    OP-LT  (cmp-compute OP-LT a b)
+    OP-LE  (cmp-compute OP-LE a b)
+    (do (let [w (stderr)]
+          (ps w "\nmonotonicity gate has no binary compute for ") (ps w (op-name op)) (ps w "\n"))
+        (abort) 0)))
+
+(defn compute1 [(op i64) (a i64)] (-> i64)
+  (case op
+    OP-MINUS (minus-compute a)
+    OP-NOT   (not-compute a)
+    (do (let [w (stderr)]
+          (ps w "\nmonotonicity gate has no unary compute for ") (ps w (op-name op)) (ps w "\n"))
+        (abort) 0)))
+
+(defn mono-fail [(op i64) (pos i64) (a i64) (b i64) (x i64) (ra i64) (rb i64)] (-> i64)
+  (let [w (stderr)]
+    (ps w "\nCOMPUTE IS NOT MONOTONE: ") (ps w (op-name op))
+    (fmt w ", operand {d}\n" pos)
+    (ps w "  a      = ") (ty-print w a) (ps w "\n")
+    (ps w "  b      = ") (ty-print w b) (ps w "   (a isa b, so a is at or above b)\n")
+    (ps w "  other  = ") (ty-print w x) (ps w "\n")
+    (ps w "  f(a)   = ") (ty-print w ra) (ps w "\n")
+    (ps w "  f(b)   = ") (ty-print w rb) (ps w "   (f(a) isa f(b) is false)\n"))
+  1)
+
+;; The count of strictly comparable ordered pairs, which every count below is a multiple of.
+(defn mono-pairs [] (-> i64)
+  (let [n (nsamples) (mut pairs) 0 (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j))]
+                (if (and (!= a b) (ty-isa a b)) (store! pairs (+ (load pairs) 1)) 0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))
+    (load pairs)))
+
+;; Returns the number of checks performed, so the caller can require that the sample really was
+;; explored. A monotonicity test over an empty pair set passes trivially.
+(defn mono-check-binary [(op i64)] (-> i64)
+  (let [n (nsamples) (mut checks) 0 (mut bads) 0 (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j))]
+                (if (and (!= a b) (ty-isa a b))
+                    (let [(mut k) 0]
+                      (loop
+                        (if (>= (load k) n) (break)
+                          (let [x  (sample (load k))
+                                l1 (compute2 op a x) l2 (compute2 op b x)
+                                r1 (compute2 op x a) r2 (compute2 op x b)]
+                            (if (ty-isa l1 l2) 0
+                              (store! bads (+ (load bads) (mono-fail op 1 a b x l1 l2))))
+                            (if (ty-isa r1 r2) 0
+                              (store! bads (+ (load bads) (mono-fail op 2 a b x r1 r2))))
+                            (store! checks (+ (load checks) 2))
+                            (store! k (+ (load k) 1))
+                            0)))
+                      0)
+                  0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))
+    (if (= (load bads) 0) 0 (do (abort) 0))
+    (load checks)))
+
+(defn mono-check-unary [(op i64)] (-> i64)
+  (let [n (nsamples) (mut checks) 0 (mut bads) 0 (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j))]
+                (if (and (!= a b) (ty-isa a b))
+                    (let [r1 (compute1 op a) r2 (compute1 op b)]
+                      (if (ty-isa r1 r2) 0
+                        (store! bads (+ (load bads) (mono-fail op 1 a b a r1 r2))))
+                      (store! checks (+ (load checks) 1))
+                      0)
+                  0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))
+    (if (= (load bads) 0) 0 (do (abort) 0))
+    (load checks)))
+
+(defn mono-report [(op i64) (checks i64) (floor i64)] (-> i64)
+  (let [w (stdout)]
+    (ps w "  ") (ps w (op-name op)) (fmt w "\t{d} checks\n" checks))
+  ; the sample really was explored: a narrowed sample fails here instead of passing quietly
+  (assert (>= checks floor))
+  0)
+
+(deftest compute_is_monotone_in_every_operand_position
+  (let [w (stdout) pairs (mono-pairs)]
+    (fmt w "\n--- compute monotonicity: {d} samples, {d} strictly comparable ordered pairs ---\n"
+         (nsamples) pairs)
+    (assert (>= (nsamples) SAMPLE-FLOOR))
+    (assert (>= pairs MONO-PAIRS-FLOOR))
+    (mono-report OP-ADD   (mono-check-binary OP-ADD)   MONO-BIN-FLOOR)
+    (mono-report OP-SUB   (mono-check-binary OP-SUB)   MONO-BIN-FLOOR)
+    (mono-report OP-MUL   (mono-check-binary OP-MUL)   MONO-BIN-FLOOR)
+    (mono-report OP-DIV   (mono-check-binary OP-DIV)   MONO-BIN-FLOOR)
+    (mono-report OP-EQ    (mono-check-binary OP-EQ)    MONO-BIN-FLOOR)
+    (mono-report OP-LT    (mono-check-binary OP-LT)    MONO-BIN-FLOOR)
+    (mono-report OP-LE    (mono-check-binary OP-LE)    MONO-BIN-FLOOR)
+    (mono-report OP-MINUS (mono-check-unary OP-MINUS)  MONO-PAIRS-FLOOR)
+    (mono-report OP-NOT   (mono-check-unary OP-NOT)    MONO-PAIRS-FLOOR)
+    0))
+
+;; `if-compute` reads two slots and is the one control compute that is a function of its inputs'
+;; types alone, so it gets the same treatment. It is also the compute the whole
+;; dead-code-elimination story rests on: an If's type is a TUPLE of its two control outputs, and
+;; a non-monotone answer there would resurrect a branch the analysis had already killed.
+;;
+;; The two inputs are stand-in nodes whose types are set directly. Nothing computes or verifies
+;; them; they exist so `n-in-ty` has something to read.
+(deftest if_compute_is_monotone_in_both_slots
+  (graph-reset! 1)
+  (let [c   (n-new OP-ARG (t-top))
+        p   (n-new OP-ARG (t-top))
+        iff (n-new2 OP-IF 0 c p)
+        n   (nsamples) (mut checks) 0 (mut bads) 0 (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j))]
+                (if (and (!= a b) (ty-isa a b))
+                    (let [(mut k) 0]
+                      (loop
+                        (if (>= (load k) n) (break)
+                          (let [x (sample (load k))]
+                            ; slot 0: the incoming control
+                            (n-set-ty! p x)
+                            (n-set-ty! c a)
+                            (let [ra (if-compute iff)]
+                              (n-set-ty! c b)
+                              (let [rb (if-compute iff)]
+                                (if (ty-isa ra rb) 0
+                                  (store! bads (+ (load bads) (mono-fail OP-IF 0 a b x ra rb))))))
+                            ; slot 1: the predicate, where JavaScript truthiness decides
+                            (n-set-ty! c x)
+                            (n-set-ty! p a)
+                            (let [ra (if-compute iff)]
+                              (n-set-ty! p b)
+                              (let [rb (if-compute iff)]
+                                (if (ty-isa ra rb) 0
+                                  (store! bads (+ (load bads) (mono-fail OP-IF 1 a b x ra rb))))))
+                            (store! checks (+ (load checks) 2))
+                            (store! k (+ (load k) 1))
+                            0)))
+                      0)
+                  0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))
+    (assert (= (load bads) 0))
+    (mono-report OP-IF (load checks) MONO-BIN-FLOOR)))
+
+;; `proj-compute` is a function of the parent's tuple type and the slot index. An out-of-range
+;; slot answers ALL, which is the deliberate reading of "this projection is nonsense" rather than
+;; a crash, so slot 2 of a two-slot tuple is in the sweep on purpose.
+(deftest proj_compute_is_monotone
+  (graph-reset! 1)
+  (let [m  (n-new OP-ARG (t-top))
+        p0 (n-new1 OP-PROJ 0 m)
+        p1 (n-new1 OP-PROJ 1 m)
+        p2 (n-new1 OP-PROJ 2 m)
+        n  (nsamples) (mut checks) 0 (mut bads) 0 (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j))]
+                (if (and (!= a b) (ty-isa a b))
+                    (let [(mut s) 0]
+                      (loop
+                        (if (>= (load s) 3) (break)
+                          (let [pn (if (= (load s) 0) p0 (if (= (load s) 1) p1 p2))]
+                            (n-set-ty! m a)
+                            (let [ra (proj-compute pn)]
+                              (n-set-ty! m b)
+                              (let [rb (proj-compute pn)]
+                                (if (ty-isa ra rb) 0
+                                  (store! bads
+                                          (+ (load bads) (mono-fail OP-PROJ (load s) a b a ra rb))))))
+                            (store! checks (+ (load checks) 1))
+                            (store! s (+ (load s) 1))
+                            0)))
+                      0)
+                  0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))
+    (assert (= (load bads) 0))
+    ; three slots per comparable pair
+    (mono-report OP-PROJ (load checks) (* MONO-PAIRS-FLOOR 3))))
+
+; ===========================================================================
+; 6. A rising type is a hard error
+; ===========================================================================
+;; The other half of monotonicity is a claim about a SEQUENCE and so cannot be seen in any
+;; snapshot: `g-analyze!` asserts that every type it writes is at or below the one it replaces.
+;;
+;; TWO THINGS MAKE THIS NON-VACUOUS, and neither is optional. First, the check has to actually
+;; run: on a graph already at its fixpoint no type changes, so no comparison happens, and a
+;; deleted assertion would be indistinguishable from a passing one. `g-analyze-checks` reports
+;; how many comparisons the last run made. Second, it has to FIRE: a node is seeded with a type
+;; strictly below its true computed one, which makes the next `compute` a rise, and the abort
+;; that follows is observed from the parent process.
+(deftest a_rising_type_aborts_g_analyze
+  (let [w (stdout)]
+    ; a RAW fixture, built with no peepholing, so `g-analyze!` has real work to do and the
+    ; falling-type check is exercised rather than merely compiled in
+    (graph-reset! 1)
+    (let [a    (raw-arg (t-int-range 0 10))
+          add  (raw-bin OP-ADD a (raw-int 2))]
+      (raw-ret add)
+      (fmt w "\n--- monotonicity in sequence ---\n  raw fixture: {d} falling-type checks performed\n"
+           (g-analyze-checks))
+      (assert (> (g-analyze-checks) 0))
+      (expect-clean "the raw rise fixture before corruption")
+
+      (let [truth (n-ty add)]
+        ; ALL is strictly below every value type: seeding it makes the next compute a RISE, and
+        ; the assertions below are the proof that this fixture is really such a case rather than
+        ; a no-op the analysis would ignore
+        (n-set-ty! add (t-bot))
+        (assert (= (n-compute add) truth))
+        (assert (ty-falls? truth (t-bot)))              ; ALL is below the true type
+        (assert (not (ty-falls? (t-bot) truth)))        ; so going back up is a rise
+
+        ; the child must die of it. If the assertion in `n-set-ty-falling!` were removed, the
+        ; child would reach `_exit(0)`, the wait status would be a clean exit, and this fails.
+        (let [pid (fork)]
+          (if (= pid 0)
+              (do (g-analyze!)
+                  (_exit 0)
+                  0)
+            (let [st (alloc-stack i32)]
+              (store! st 0)
+              (waitpid pid st 0)
+              (let [status (cast i64 (load st))
+                    sig    (& status 127)
+                    code   (>> status 8)]
+                (fmt w "  child wait status {d}: signal {d}, exit code {d}\n" status sig code)
+                ; killed by a signal (abort), not returned from
+                (assert (!= sig 0))
+                0))))))))
