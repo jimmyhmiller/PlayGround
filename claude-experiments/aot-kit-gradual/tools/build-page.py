@@ -279,6 +279,25 @@ BODY = f"""
       "<code>undefined</code>, <code>NaN</code> and <code>-0.0</code> all take the false arm, and "
       "every object takes the true one.")}
 
+{single("15-nested-dead-branch",
+        "A dead branch inside a live one",
+        "if (p) return 1; else { if (0) return 2; else return 3; }",
+        "The same <code>if (0)</code> as above, moved one level down so that its control input is "
+        "an ordinary projection instead of <code>Start</code>. That difference is the whole "
+        "specimen: it looks like a redundant variation and it is the only version that catches "
+        "the bug.",
+        "The outer branch survives because <code>p</code> is opaque; the inner one is gone "
+        "entirely, and the arm that returns 3 is wired straight to the outer false projection. "
+        "Getting there needs an <code>If</code> to stay alive while <em>both</em> of its "
+        "projections are built: folding the first arm to <code>~ctrl</code> drops the "
+        "<code>If</code>'s last use, so the kill cascade takes the <code>If</code> with it and "
+        "the second arm is then rewritten against a corpse whose inputs have been cleared. In the "
+        "flat version above that read landed on <code>Start</code>, which is pinned, so the wrong "
+        "answer happened to be the right node and every test stayed green. Here it landed on a "
+        "node that had just died, and the surviving <code>Return</code> read dead control: the "
+        "verifier says <code>VERR-DEAD-INPUT</code> and running it with <code>p = 0</code> gets "
+        "stuck instead of returning 3.")}
+
 {single("11-diamond",
         "Merging with a phi", "if (arg) x = 1; else x = a + 2; return x;",
         "When a branch does produce a value, the merge needs a <code>Phi</code>: one input per "
@@ -339,6 +358,13 @@ BODY = f"""
   <code>NaN</code>. Same for <code>x == x</code> and <code>x * 0</code>. There is a test
   asserting all three stay withheld, and the graphs are how you check the test is testing what
   you think.</p>
+  <p><em>A dead branch inside a live one</em> is in the gallery for a reason that is worth
+  stating on its own: <strong>a fixture can be correct by accident.</strong> The flat
+  <code>if (0)</code> two specimens up exercised the same rewrite and passed, because the one
+  node the broken code reached for happened to be a pinned root. Nothing about the flat picture
+  says so; you only find out by moving the same construct somewhere its neighbours are ordinary
+  nodes. The general form: when a rule reaches for a node it did not create, ask what happens
+  when that node is not special.</p>
   <p>The loop specimen exposed something sharper. Building it in the wrong order, closing the
   loop before peepholing its body, deletes the entire loop and reports no error. The phi
   momentarily reads <code>int=0</code> because its back-edge value has no type yet; that is a

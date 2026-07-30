@@ -24,6 +24,7 @@
 (import "control.coil"   :use *)
 (import "io.coil"        :use *)
 (import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
 
 ; ============================================================================
 ; Ids
@@ -34,6 +35,17 @@
 ;; discipline is naming instead: type ids are `tid`/`t`, node ids will be `nid`/`n`.
 
 (const TY-NO-ID i64 -1)          ; "no id yet", used while installing duals
+
+;; HOW DEEPLY A TUPLE MAY NEST, and it is a property of the TYPE and not of the printer, which is
+;; why it lives here. src/text.coil's exact form is the type's serialised contract and its parser
+;; recurses on the C stack, so a type nested deeper than this has a printed form that cannot be
+;; read back. Rather than let a legally interned type be unprintable, `ty-tuple-close` refuses to
+;; mint one, at construction, where the caller is still on the stack. src/text.coil's
+;; TEXT-MAX-DEPTH is this same number, and a gate pins them equal.
+;;
+;; 256 is far beyond anything the IR builds: nesting comes from tuple MEMBERS, and no pass nests
+;; parallel types at all yet. Arity, which is what M6's `Start` actually needs, is unbounded.
+(const TY-MAX-TUPLE-DEPTH i64 256)
 
 ; ============================================================================
 ; Value kinds
@@ -266,6 +278,7 @@
   [(tab    (ArrayList Ty))       ; id -> Ty
    (duals  (ArrayList i64))      ; id -> the id of its dual
    (kids   (ArrayList i64))      ; tuple members, addressed by (off, len)
+   (depths (ArrayList i64))      ; id -> tuple nesting depth; 0 for everything that is not a tuple
    (intern (HashMap Ty i64))     ; Ty -> id
    (inited bool)])
 
@@ -278,6 +291,7 @@
           (store! (field p tab)    (al-new [Ty] (malloc-allocator)))
           (store! (field p duals)  (al-new [i64] (malloc-allocator)))
           (store! (field p kids)   (al-new [i64] (malloc-allocator)))
+          (store! (field p depths) (al-new [i64] (malloc-allocator)))
           (store! (field p intern) (hm-new [Ty i64] (malloc-allocator) (ty-keyops)))
           (ty-seed p)
           0))
@@ -285,6 +299,126 @@
 
 (defn ty-kid [(off i64) (i i64)] (-> i64)
   (al-get (load (field (types) kids)) (+ off i)))
+
+;; How many member slots the kid array holds. Exported so a gate can assert that building,
+;; meeting or PRINTING an already-interned tuple does not grow it: the array is append-only and
+;; the growth would be unbounded in the number of CALLS. See `ty-tuple-close`.
+(defn ty-kids-len [] (-> i64) (al-len [i64] (load (field (types) kids))))
+
+(defn ty-panic [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "type table: ") (ps w msg) (ps w "\n"))
+  (abort) 0)
+
+; ---------------------------------------------------------------------------
+; Building a tuple: reserve the member window, then fill it
+; ---------------------------------------------------------------------------
+;; WHY RESERVE INSTEAD OF PUSH. This was a live bug, not a hypothetical one. A producer that
+;; INTERNS a member before handing it over appends to this same kid array while doing so, because
+;; a nested tuple's members and its dual's members live here too. `ty-meet-tuples` used to push
+;; each member's meet as it computed it, so meeting two tuples whose members were themselves
+;; tuples left the outer window pointing at the INNER tuple's members:
+;;
+;;     [[ctrl int] flt]  meet  [[ctrl dyn] flt]   ==>   [ctrl dyn]
+;;
+;; and `meet` stopped being a lower bound at all. Nothing caught it because no tuple in the
+;; corpus has a tuple member yet.
+;;
+;; Reserving the window up front makes it contiguous by construction: whatever an inner intern
+;; appends lands after the reservation, and the members are written in place. Every producer goes
+;; through here, so there is exactly one way a member window comes into existence.
+(defstruct TupleBuild [(off i64) (len i64) (nty i64)])
+
+(defn tb-off [(b TupleBuild)] (-> i64) (load (field b off)))
+(defn tb-len [(b TupleBuild)] (-> i64) (load (field b len)))
+(defn tb-nty [(b TupleBuild)] (-> i64) (load (field b nty)))
+
+;; Reserve `len` member slots. They hold TY-NO-ID until written, which is not a type id, so a
+;; slot nobody filled is detectable rather than a plausible index into the table.
+(defn ty-tuple-open [(len i64)] (-> TupleBuild)
+  (if (< len 0) (do (ty-panic "ty-tuple-open: negative tuple arity") 0) 0)
+  (let [p (types)
+        off (al-len [i64] (load (field p kids)))
+        n0  (ty-count)
+        (mut i) 0
+        (mut b) (zeroed TupleBuild)]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (al-push! [i64] (field p kids) TY-NO-ID)
+            (store! i (+ (load i) 1))
+            0)))
+    (store! (field b off) off)
+    (store! (field b len) len)
+    (store! (field b nty) n0)
+    (load b)))
+
+(defn ty-tuple-put! [(b TupleBuild) (i i64) (t i64)] (-> i64)
+  (if (or (< i 0) (>= i (tb-len b)))
+      (do (ty-panic "ty-tuple-put!: member index outside the reserved window") 0)
+    (do (al-set! [i64] (field (types) kids) (+ (tb-off b) i) t) 0)))
+
+;; Drop everything the kid array has grown past `off`. Only ever called with the `off` of a
+;; window whose tuple turned out to be already interned; see `ty-tuple-close`.
+(defn ty-kids-truncate! [(off i64)] (-> i64)
+  (let [p (types)]
+    (loop
+      (if (<= (al-len [i64] (load (field p kids))) off) (break)
+        (do (al-pop! [i64] (field p kids)) 0)))
+    0))
+
+;; THE WINDOW IS RECLAIMED WHEN THE TUPLE TURNS OUT TO ALREADY EXIST, and this is not a
+;; micro-optimisation. The kid array is append-only and `ty-intern` returns an existing id for a
+;; structurally equal tuple, so without this every REPEAT construction of an interned tuple leaks
+;; its reservation for ever: unbounded in the number of CALLS rather than in program size.
+;; `if-compute` builds its result with `t-tuple2` on every visit, so an M3 fixpoint leaked two
+;; words per If revisit, and `ty-print-exact` leaked two per print (it round-trips through the
+;; parser, which reserves a window to check the text decodes). Printing is supposed to be
+;; observation, and src/text.coil's "the only growth the parser causes is interning" was false.
+;;
+;; WHY IT IS SOUND TO DROP THE WHOLE TAIL, not just our own slots. Members are computed BETWEEN
+;; open and close, and computing one can intern nested tuples, which append after our window. But
+;; if the outer tuple was already interned then every member id already existed, and by induction
+;; nothing anywhere in that subtree was newly pushed either: a genuinely new inner id would make
+;; the outer tuple new too, because no pre-existing tuple can reference an id that did not exist.
+;; So on the hit path the tail is garbage by construction. That argument is CHECKED rather than
+;; trusted: if the table grew while we were filling the window, something live may point into the
+;; tail, and the window is simply left in place. Leaking is the safe answer there; a panic would
+;; be worse than the bug it guards.
+(defn ty-tuple-close [(b TupleBuild)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (tb-len b)) (break)
+        (do (if (= (ty-kid (tb-off b) (load i)) TY-NO-ID)
+                (do (ty-panic "ty-tuple-close: a member slot was never filled") 0)
+              0)
+            (store! i (+ (load i) 1))
+            0))))
+  (ty-tuple-check-depth b)
+  (let [p (types) found (ty-lookup p (TTuple (tb-off b) (tb-len b)))]
+    (if (= found TY-NO-ID) (ty-intern (TTuple (tb-off b) (tb-len b)))
+      (do (if (= (ty-count) (tb-nty b)) (ty-kids-truncate! (tb-off b)) 0)
+          found))))
+
+;; THE FORMAT IS PART OF THE TYPE'S CONTRACT. src/text.coil parses a tuple by recursing on the C
+;; stack and gives up past `TY-MAX-TUPLE-DEPTH`, so a type nested deeper than that has an exact
+;; printed form that cannot be read back, and `ty-print-exact` would refuse to print a type that
+;; was perfectly legal to construct. Two ways out: raise the parser's budget (impossible, nesting
+;; is unbounded) or refuse to MINT what the format cannot represent. This is the second, and it
+;; fails here, at construction, with the caller still on the stack, instead of three passes later
+;; inside a printer.
+;;
+;; Arity is deliberately NOT bounded: the window is reserved rather than staged in a frame, and
+;; M6's `Start` gets one output per parameter.
+(defn ty-tuple-check-depth [(b TupleBuild)] (-> i64)
+  (let [(mut i) 0 (mut d) 0]
+    (loop
+      (if (>= (load i) (tb-len b)) (break)
+        (do (let [dm (ty-depth (ty-kid (tb-off b) (load i)))]
+              (if (> dm (load d)) (store! d dm) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    (if (> (+ (load d) 1) TY-MAX-TUPLE-DEPTH)
+        (do (ty-panic "ty-tuple-close: tuple nesting is deeper than the textual form can represent (TY-MAX-TUPLE-DEPTH)") 0)
+      0)))
 
 ;; Structural equality. Tuples compare by their MEMBERS, not by where those members happen
 ;; to sit in the kid array, or two structurally identical tuples would intern separately.
@@ -351,8 +485,28 @@
   (let [id (al-len [Ty] (load (field p tab)))]
     (al-push! [Ty]  (field p tab)   t)
     (al-push! [i64] (field p duals) TY-NO-ID)
+    ; the depth is recorded ONCE, here, because every member is already interned by now and so
+    ; already has a depth: computing it on demand instead would re-walk the whole subtree
+    (al-push! [i64] (field p depths) (ty-xdepth p t))
     (hm-put! [Ty i64] (field p intern) t id)
     id))
+
+;; Tuple nesting depth: 0 for anything that is not a tuple, and one more than its deepest member
+;; for one that is. A 0-tuple is depth 1: it is still a bracket the parser has to recurse into.
+(defn ty-depth [(t i64)] (-> i64) (al-get (load (field (types) depths)) t))
+
+(defn ty-xdepth [(p (ptr Types)) (t Ty)] (-> i64)
+  (match t
+    (TBot   [] 0) (TTop   [] 0) (TCtrl  [] 0) (TXCtrl [] 0) (TVal [v] 0)
+    (TTuple [off len]
+      (let [(mut i) 0 (mut d) 0]
+        (loop
+          (if (>= (load i) len) (break)
+            (do (let [dm (al-get (load (field p depths)) (ty-kid off (load i)))]
+                  (if (> dm (load d)) (store! d dm) 0))
+                (store! i (+ (load i) 1))
+                0)))
+        (+ (load d) 1)))))
 
 (defn ty-lookup [(p (ptr Types)) (t Ty)] (-> i64)
   (match (hm-get (load (field p intern)) t) (Some [id] id) (None [] TY-NO-ID)))
@@ -387,16 +541,17 @@
     (TVal [v] (TVal (val-dual v)))
     (TTuple [off len] (ty-tuple-of-duals off len))))
 
+;; `ty-dual` is a table read and cannot intern, so this one could push directly and be correct.
+;; It reserves anyway: one way to build a member window means nobody has to re-derive which
+;; producers are safe, and "this one happens not to intern" is a property that changes silently.
 (defn ty-tuple-of-duals [(off i64) (len i64)] (-> Ty)
-  (let [p (types)
-        noff (al-len [i64] (load (field p kids)))
-        (mut i) 0]
+  (let [b (ty-tuple-open len) (mut i) 0]
     (loop
       (if (>= (load i) len) (break)
-        (do (al-push! [i64] (field p kids) (ty-dual (ty-kid off (load i))))
+        (do (ty-tuple-put! b (load i) (ty-dual (ty-kid off (load i))))
             (store! i (+ (load i) 1))
             0)))
-    (TTuple noff len)))
+    (TTuple (tb-off b) (tb-len b))))
 
 ; ============================================================================
 ; meet / join / isa
@@ -436,16 +591,17 @@
     (TVal [v]      (t-bot))
     (TTuple [o l]  (t-bot))))
 
+;; `ty-meet` on a member INTERNS, and interning a tuple appends to the kid array. That is the
+;; whole reason the window is reserved first; see `ty-tuple-open` for what pushing instead did to
+;; a tuple of tuples.
 (defn ty-meet-tuples [(oa i64) (ob i64) (n i64)] (-> i64)
-  (let [p (types)
-        noff (al-len [i64] (load (field p kids)))
-        (mut i) 0]
+  (let [b (ty-tuple-open n) (mut i) 0]
     (loop
       (if (>= (load i) n) (break)
-        (do (al-push! [i64] (field p kids) (ty-meet (ty-kid oa (load i)) (ty-kid ob (load i))))
+        (do (ty-tuple-put! b (load i) (ty-meet (ty-kid oa (load i)) (ty-kid ob (load i))))
             (store! i (+ (load i) 1))
             0)))
-    (ty-intern (TTuple noff n))))
+    (ty-tuple-close b)))
 
 ;; join(a,b) = ~(~a meet ~b). Defined, not implemented: the lattice has one primitive.
 (defn ty-join [(a i64) (b i64)] (-> i64)
@@ -540,17 +696,41 @@
 (defn t-obj-shape [(shape i64)] (-> i64) (t-obj-shapes (<< 1 shape)))
 
 (defn t-tuple2 [(a i64) (b i64)] (-> i64)
-  (let [p (types) off (al-len [i64] (load (field p kids)))]
-    (al-push! [i64] (field p kids) a)
-    (al-push! [i64] (field p kids) b)
-    (ty-intern (TTuple off 2))))
+  (let [tb (ty-tuple-open 2)]
+    (ty-tuple-put! tb 0 a)
+    (ty-tuple-put! tb 1 b)
+    (ty-tuple-close tb)))
 
 (defn t-tuple3 [(a i64) (b i64) (c i64)] (-> i64)
-  (let [p (types) off (al-len [i64] (load (field p kids)))]
-    (al-push! [i64] (field p kids) a)
-    (al-push! [i64] (field p kids) b)
-    (al-push! [i64] (field p kids) c)
-    (ty-intern (TTuple off 3))))
+  (let [tb (ty-tuple-open 3)]
+    (ty-tuple-put! tb 0 a)
+    (ty-tuple-put! tb 1 b)
+    (ty-tuple-put! tb 2 c)
+    (ty-tuple-close tb)))
+
+;; A 1-tuple and a 0-tuple. Nothing in the IR builds either yet, but `t-tuple-list` can mint both,
+;; and they are the arities the hand-written builders never reach: the 1-tuple is where a member
+;; separator and a refinement separator look most alike to a reader, and the 0-tuple is the only
+;; tuple with no members to compare. They exist so `ty-sample` can carry them and every lattice law
+;; is checked on them.
+(defn t-tuple1 [(a i64)] (-> i64)
+  (let [tb (ty-tuple-open 1)] (ty-tuple-put! tb 0 a) (ty-tuple-close tb)))
+
+(defn t-tuple0 [] (-> i64) (ty-tuple-close (ty-tuple-open 0)))
+
+;; A tuple of arbitrary arity from a list of member ids. `t-tuple2`/`t-tuple3` cover everything
+;; the IR builds by hand; the textual parser needs whatever arity the text says, and M6's `Start`
+;; will want one output per parameter.
+(defn t-tuple-list [(members (slice i64))] (-> i64)
+  (let [n  (slice-len members)
+        tb (ty-tuple-open n)
+        (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (ty-tuple-put! tb (load i) (slice-get members (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    (ty-tuple-close tb)))
 
 ; ---------------------------------------------------------------------------
 ; Widening: how an interval axis is forced to converge
@@ -622,6 +802,40 @@
 ;; named helper so the discard is deliberate and greppable rather than accidental.
 (defn ps [(w (ptr Writer)) (s (slice u8))] (-> i64) (print-str w s) 0)
 
+;; A signed decimal over the WHOLE i64 range. `fmt`'s `{d}` renders INT64_MIN as "-0", which is
+;; cosmetic in a debug dump and a correctness bug in src/text.coil's exact form, where a bitset
+;; of exactly bit 63 (`t-fun-con 63`) would decode back as 0. One writer, so the two printers
+;; cannot disagree about a number.
+;;
+;; The magnitude of INT64_MIN has no signed form, so it is carried as the wrapped bit pattern and
+;; divided with the UNSIGNED ops, which is exactly the right answer for every other magnitude
+;; too.
+(defn dec-print [(w (ptr Writer)) (n i64)] (-> i64)
+  (let [buf (alloc-stack (array u8 24))
+        neg (< n 0)
+        (mut k) 24
+        (mut m) (if neg (- 0 n) n)]
+    (if (= n 0)
+        (do (store! k 23) (store! (index buf 23) (cast u8 48)) 0)   ; 48 = '0'
+      (do (loop
+            (if (= (load m) 0) (break)
+              (do (store! k (- (load k) 1))
+                  (store! (index buf (load k)) (cast u8 (+ 48 (urem (load m) 10))))
+                  (store! m (udiv (load m) 10))
+                  0)))
+          0))
+    (if neg (ps w "-") 0)
+    (print-str w (slice-new [u8] (cast (ptr u8) (index buf (load k))) (- 24 (load k))))
+    0))
+
+;; THIS PRINTER IS THE HUMAN AND DIAGRAM FORM, AND IT IS LOSSY. It consults a refinement's KIND
+;; BIT before printing it, so a float constant carried by a type whose `flt` bit is off, a
+;; pinned interval on a type whose `int` bit is off, and an unspent widening counter are all
+;; invisible here. Two distinct interned types can therefore print the same string, which is
+;; right for a label on a graph and wrong for anything that has to decode.
+;;
+;; The exact, round-trippable form is `ty-print-exact` in src/text.coil, which decides every
+;; axis by field value. Nothing that has to be read back should use this one.
 (defn ty-print [(w (ptr Writer)) (t i64)] (-> i64)
   (match (ty-get t)
     (TBot   [] (ps w "ALL"))
@@ -681,12 +895,17 @@
       0)
     0))
 
-;; The axis bounds print as names, not as their digits. Partly because they are noise, and
-;; partly because `fmt`'s `{d}` renders INT64_MIN as "-0".
+;; The axis extremes print as names, not as their digits, because eighteen digits of INT64_MIN
+;; in every unrefined range is noise. Everything else goes through `dec-print`; `{d}` would be
+;; correct for every value that reaches it here (the extremes are already named) but relying on
+;; that is one edit away from being wrong.
+;;
+;; src/text.coil's exact form reuses this and `int-range-print`, so the int axis has ONE spelling
+;; in the project and the debug and exact printers cannot drift on it.
 (defn ibound-print [(w (ptr Writer)) (n i64)] (-> i64)
   (if (= n TY-IMIN) (ps w "min")
     (if (= n TY-IMAX) (ps w "max")
-      (do (fmt w "{d}" n) 0))))
+      (dec-print w n))))
 
 (defn int-range-print [(w (ptr Writer)) (lo i64) (hi i64)] (-> i64)
   (if (= lo hi) (do (ps w "=") (ibound-print w lo))
@@ -738,7 +957,7 @@
 ;; Property tests need a set of types that exercises every axis at its top, centreline and
 ;; bottom, plus duals and composites. `ty-sample-count` and `ty-sample` are that set. The
 ;; laws are then checked over every pair and a spread of triples.
-(defn ty-sample-count [] (-> i64) 28)
+(defn ty-sample-count [] (-> i64) 32)
 
 (defn ty-sample [(i i64)] (-> i64)
   (case i
@@ -770,6 +989,16 @@
     25 (t-obj-shape 2)
     26 (t-tuple2 (t-ctrl) (t-int))
     27 (t-tuple2 (t-ctrl) (t-dyn))
+    ; A TUPLE WHOSE MEMBER IS A TUPLE. 28 and 29 differ only in an INNER member, which is the exact
+    ; shape that broke `meet`: computing the inner member's meet INTERNS, and interning a tuple
+    ; appends to the same kid array the outer member window lives in, so a producer that pushed as
+    ; it went ended up describing the inner tuple. `meet` stopped being a lower bound and the whole
+    ; suite stayed green, because until now no tuple in the sample set had a tuple member.
+    28 (t-tuple2 (t-tuple2 (t-ctrl) (t-int)) (t-flt))
+    29 (t-tuple2 (t-tuple2 (t-ctrl) (t-dyn)) (t-flt))
+    ; the two arities `t-tuple-list` can mint and no hand-written builder produces
+    30 (t-tuple1 (t-ctrl))
+    31 (t-tuple0)
     (t-bot)))
 
 ;; Duals of the sample are themselves interesting inputs; this doubles the set without

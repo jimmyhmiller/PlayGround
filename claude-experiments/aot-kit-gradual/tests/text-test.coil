@@ -1,0 +1,1018 @@
+;; The M3 slice 3a gate: the EXACT textual form of a type.
+;;
+;; The claim being gated is an identity, `ty-parse(ty-print-exact(t)) == t`, and the only honest
+;; way to state it is over EVERY interned type rather than over a chosen list. So the sweep walks
+;; the interning table from 0 to `ty-count` after the whole corpus is built and the whole lattice
+;; sample (32 types plus all 32 duals) is interned. A hand-listed set would test the types whoever
+;; wrote the printer was thinking about, which is precisely the set that already works.
+;;
+;; THE VACUITY DEFENCE, in three layers, because "the round trip holds" is trivially true of a
+;; format nobody exercises:
+;;
+;;   1. BY COUNT. The sweep reports how many ids it checked and refuses to pass below a floor.
+;;      A change that stopped interning the samples would leave the loop ranging over four
+;;      trivial types and would fail here, which is the "5 nodes on the worklist" failure mode
+;;      M1 already paid for once.
+;;   2. BY CLASS. A count says nothing about coverage, so there is also a census: the swept set
+;;      must contain at least one tuple, one inverted (high) interval, an FSZ-HIGH float, an
+;;      FSZ-CON float, a widening counter that is not the default, a refinement carried on an
+;;      axis whose kind bit is OFF, and a `~dyn` (kinds = VK-NONE) value.
+;;   3. BY MEASURING THE FEATURE'S ABSENCE. `ty-print` is the debug form and is deliberately
+;;      lossy, so it is a working stand-in for "the exact printer was never written". Feeding
+;;      every id's DEBUG form back through the parser fails for a large, counted fraction of the
+;;      table. That number is what says the exact printer is doing work, and two named witnesses
+;;      pin specific defects: `fun#-0` (`fmt`'s `{d}` on INT64_MIN) decodes to the WRONG type
+;;      rather than failing, and `int=[min..max]` silently loses its widening counter.
+;;
+;; The adversarial fixtures are the other half. The corpus contains no partial widening, no
+;; extreme bitset and no off-kind refinement, so a round trip written only over it would pass
+;; with the widening counter unprinted and with `{d}` still writing INT64_MIN as "-0".
+;;
+;; AND THE PARSER HAS TO REFUSE TO GUESS. "parse failed" is satisfied by a parser that always
+;; fails, so every malformed input below asserts its OWN named TERR code, the table measures how
+;; many DIFFERENT codes it reached, and every one of them has to come back as TY-NO-ID and not as
+;; a plausible id that would surface three passes later as an ALL-typed node.
+;;
+;;   coil test tests/text-test.coil
+(module texttest)
+
+(import "../src/ty.coil"     :use *)
+(import "../src/text.coil"   :use *)
+(import "../src/node.coil"   :use *)
+(import "../src/dot.coil"    :use *)
+(import "../src/corpus.coil" :use *)
+(import "assert.coil"    :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "alloc.coil"     :use *)
+(import "str.coil"       :use *)
+(import "slice.coil"     :use *)
+
+;; A HARD ERROR CAN ONLY BE TESTED FROM ANOTHER PROCESS. `abort` takes the whole program with it,
+;; so the child does the thing that must abort and `_exit(0)` if it survives; the parent asserts
+;; on the wait status. Same shape as verify-test.coil.
+(extern fork    :cc c [] (-> i32))
+(extern waitpid :cc c [i32 (ptr i32) i32] (-> i32))
+(extern _exit   :cc c [i32] (-> void))
+
+; ---------------------------------------------------------------------------
+; Pins. A number written down here fails loudly when the thing it measures shrinks.
+; ---------------------------------------------------------------------------
+;; The interning table after the corpus and the sample set. It measures 131 today. Losing types
+;; is a silent weakening of an "over every interned type" claim, so the floor is deliberate and
+;; raising it is a decision, not a side effect.
+(const TYPE-FLOOR i64 110)
+
+;; How many ids the DEBUG form fails to decode back to. 85 of 131 today. This is the number that
+;; says the exact printer is not a no-op: if `ty-print-exact` were aliased to `ty-print`, the
+;; exhaustive sweep above would fail on every one of them.
+(const DEBUG-LOSSY-FLOOR i64 20)
+
+;; Adversarial fixtures, and the number of DIFFERENT parse failures the malformed table reaches.
+;; A table that tripped one code twenty times would satisfy every individual assertion and test
+;; one check.
+(const ADVERSARIAL-FLOOR i64 20)
+(const TERR-CODE-FLOOR   i64 12)
+
+;; Types shown on a diagram label, across the whole corpus. 74 today.
+(const LABEL-FLOOR i64 60)
+
+; ---------------------------------------------------------------------------
+; Rendering
+; ---------------------------------------------------------------------------
+;; Buffer sizes are written as literals at both the `alloc-stack` and the `cap`, because Coil has
+;; no const array dimensions and a const used for only one of the two would be a buffer overrun
+;; waiting for someone to edit it.
+;;
+;; EVERY BUFFER LIVES IN A FUNCTION FRAME, never in a loop body. `alloc-stack` inside a loop
+;; allocates once per iteration and never releases, which is a segfault a few thousand iterations
+;; later; found the hard way while writing this file.
+
+;; The debug form, for comparing the two printers.
+(defn dbg-render [(t i64) (buf (ptr i8)) (cap i64)] (-> (slice u8))
+  (let [fb (alloc-stack FixBuf)
+        w  (alloc-stack Writer)]
+    (store! (field fb data) buf)
+    (store! (field fb cap)  cap)
+    (store! (field fb len)  0)
+    (fixed-buffer-writer w fb)
+    (ty-print w t)
+    (let [n (load (field fb len))]
+      ; a truncated string can compare equal to another truncated string, so this is a hard
+      ; error rather than a shorter answer
+      (if (>= n cap) (do (ps (stderr) "\ndbg-render: buffer too small\n") (abort) 0) 0)
+      (slice-new [u8] (cast (ptr u8) buf) n))))
+
+;; The exact form through the UNCHECKED writer. Failure reporting must not go through
+;; `ty-print-exact`: that one panics on a type whose form is not injective, which is exactly the
+;; case a report is being written about, and the abort would swallow the report.
+(defn raw-render [(t i64) (buf (ptr i8)) (cap i64)] (-> (slice u8))
+  (let [fb (alloc-stack FixBuf)
+        w  (alloc-stack Writer)]
+    (store! (field fb data) buf)
+    (store! (field fb cap)  cap)
+    (store! (field fb len)  0)
+    (fixed-buffer-writer w fb)
+    (ty-write-exact w t)
+    (let [n (load (field fb len))]
+      (if (>= n cap) (do (ps (stderr) "\nraw-render: buffer too small\n") (abort) 0) 0)
+      (slice-new [u8] (cast (ptr u8) buf) n))))
+
+; ---------------------------------------------------------------------------
+; Located failure reporting. The offending object here is a TYPE, so this is the analogue of
+; dumping the graph: every field the exact form has to encode, and both printers' output.
+; ---------------------------------------------------------------------------
+(defn tfail-head [(label (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "\nTEXT GATE: ") (ps w label) (ps w "\n") 0))
+
+(defn val-dump [(v Val)] (-> i64)
+  (let [w (stderr)]
+    (fmt w "    kinds {d}  ilo {d}  ihi {d}  iwide {d}\n"
+         (val-kinds v) (val-ilo v) (val-ihi v) (val-iwide v))
+    (fmt w "    fsz {d}  fbits {d}  fidxs {d}  shapes {d}\n"
+         (val-fsz v) (val-fbits v) (val-fidxs v) (val-shapes v))
+    0))
+
+(defn ty-dump [(t i64)] (-> i64)
+  (let [w  (stderr)
+        ba (alloc-stack (array u8 4096))
+        bb (alloc-stack (array u8 4096))]
+    (fmt w "  t{d}  tag {d}  dual t{d}\n" t (ty-tag (ty-get t)) (ty-dual t))
+    (ps w "    debug = \"") (ps w (dbg-render t (cast (ptr i8) ba) 4096)) (ps w "\"\n")
+    (ps w "    exact = \"") (ps w (raw-render t (cast (ptr i8) bb) 4096)) (ps w "\"\n")
+    (match (ty-get t)
+      (TVal   [v]   (val-dump v))
+      (TTuple [o l] (do (fmt w "    tuple of {d} member(s) at kid offset {d}\n" l o) 0))
+      (TBot [] 0) (TTop [] 0) (TCtrl [] 0) (TXCtrl [] 0))
+    0))
+
+; ---------------------------------------------------------------------------
+; The identity under test
+; ---------------------------------------------------------------------------
+;; Returns 1, so a caller can count how many types it really checked rather than trusting that
+;; the loop ran.
+;;
+;; `ty-injective?` is asserted FIRST and separately. It is the guard `ty-print-exact` consults
+;; before it will emit anything, so checking it on every type in the sweep is what keeps it from
+;; being dead code; and asking it before printing means a genuinely ambiguous type is reported
+;; here instead of aborting inside the printer with nothing said about which type it was.
+(defn expect-round-trip [(label (slice u8)) (t i64)] (-> i64)
+  (if (ty-injective? t) 0
+    (do (tfail-head label)
+        (ps (stderr) "  ty-injective? says this type's exact form does not decode back to it\n")
+        (ty-dump t)
+        (abort)
+        0))
+  (let [ba   (alloc-stack (array u8 4096))
+        txt  (ty-render t (cast (ptr i8) ba) 4096)
+        back (ty-try-parse txt)]
+    (if (= back t) 0
+      (do (tfail-head label)
+          (let [w (stderr)]
+            (ps w "  the exact form does not decode back to the type it came from\n")
+            (ps w "    text  = \"") (ps w txt) (ps w "\"\n")
+            (fmt w "    parsed back as t{d}, " back)
+            (ps w (text-err-name (text-err)))
+            (fmt w " at byte {d}\n" (text-err-pos)))
+          (ty-dump t)
+          (if (= back TY-NO-ID) 0 (ty-dump back))
+          (abort)
+          0))
+    1))
+
+;; The exact text of a type, asserted against a literal. Used where the SPELLING is the contract
+;; (the human-visible forms) rather than only the identity.
+(defn expect-exact [(label (slice u8)) (t i64) (want (slice u8))] (-> i64)
+  (let [ba  (alloc-stack (array u8 4096))
+        got (raw-render t (cast (ptr i8) ba) 4096)]
+    (if (str-eq got want) 0
+      (do (tfail-head label)
+          (let [w (stderr)]
+            (ps w "  exact form moved\n")
+            (ps w "    want \"") (ps w want) (ps w "\"\n")
+            (ps w "    got  \"") (ps w got)  (ps w "\"\n"))
+          (ty-dump t)
+          (abort)
+          0))
+    1))
+
+(defn expect-debug [(label (slice u8)) (t i64) (want (slice u8))] (-> i64)
+  (let [ba  (alloc-stack (array u8 4096))
+        got (dbg-render t (cast (ptr i8) ba) 4096)]
+    (if (str-eq got want) 0
+      (do (tfail-head label)
+          (let [w (stderr)]
+            (ps w "  debug form moved, which means a golden string or a gallery label moved\n")
+            (ps w "    want \"") (ps w want) (ps w "\"\n")
+            (ps w "    got  \"") (ps w got)  (ps w "\"\n"))
+          (ty-dump t)
+          (abort)
+          0))
+    1))
+
+(defn forms-agree? [(t i64)] (-> bool)
+  (let [ba (alloc-stack (array u8 4096))
+        bb (alloc-stack (array u8 4096))]
+    (str-eq (dbg-render t (cast (ptr i8) ba) 4096)
+            (raw-render t (cast (ptr i8) bb) 4096))))
+
+; ---------------------------------------------------------------------------
+; The census: which CLASSES of type the exhaustive sweep actually contained
+; ---------------------------------------------------------------------------
+(const CL-TUPLE    i64 1)     ; a tuple, so the member separator is exercised
+(const CL-INVERTED i64 2)     ; ilo > ihi: the high side of the int axis, `=~[lo..hi]`
+(const CL-FHIGH    i64 4)     ; the top of the float chain, `flt^`
+(const CL-FCON     i64 8)     ; a float constant, `flt=b<bits>`
+(const CL-WIDE     i64 16)    ; a widening counter that is not the one the interval implies
+(const CL-OFFKIND  i64 32)    ; a refinement on an axis whose kind bit is OFF
+(const CL-NOKINDS  i64 64)    ; kinds = VK-NONE, the top of the value sublattice
+(const CL-ALL      i64 127)
+
+;; A refinement carried on an axis whose KIND BIT is off. These exist because `dual` maps an axis
+;; bottom to an axis top, so the redundancy is the price of an involutive dual (see ty.coil), and
+;; they are exactly the types the debug printer cannot show. A format that consulted kind bits
+;; would lose them, so the sweep has to contain some.
+(defn val-off-kind? [(v Val)] (-> bool)
+  (let [k      (val-kinds v)
+        pinned (or (!= (val-ilo v) TY-IMIN) (!= (val-ihi v) TY-IMAX))]
+    (or (and (= (val-fsz v) FSZ-CON) (= (& k VK-FLT) 0))
+      (or (and (!= (val-fidxs v) -1) (= (& k VK-FUN) 0))
+        (or (and (!= (val-shapes v) -1) (= (& k VK-OBJ) 0))
+            (and pinned (= (& k (| VK-INT VK-BOOL)) 0)))))))
+
+;; The widening counter's default is the one the printed interval implies: a pinned interval is
+;; freshly minted so 0, an unpinned one is already as wide as it can get so TY-WIDEN-MAX. That is
+;; the FORMAT's rule (ROADMAP, slice 3a), which is why it is restated here rather than read out of
+;; the printer: this census has to be able to disagree with the printer.
+(defn val-wide-nondefault? [(v Val)] (-> bool)
+  (let [pinned (or (!= (val-ilo v) TY-IMIN) (!= (val-ihi v) TY-IMAX))
+        wdef   (if pinned 0 TY-WIDEN-MAX)]
+    (!= (val-iwide v) wdef)))
+
+(defn val-classes [(v Val)] (-> i64)
+  (| (if (> (val-ilo v) (val-ihi v)) CL-INVERTED 0)
+   (| (if (= (val-fsz v) FSZ-HIGH) CL-FHIGH 0)
+    (| (if (= (val-fsz v) FSZ-CON) CL-FCON 0)
+     (| (if (val-wide-nondefault? v) CL-WIDE 0)
+      (| (if (val-off-kind? v) CL-OFFKIND 0)
+         (if (= (val-kinds v) VK-NONE) CL-NOKINDS 0)))))))
+
+(defn ty-classes [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TTuple [o l] CL-TUPLE)
+    (TVal   [v]   (val-classes v))
+    (TBot [] 0) (TTop [] 0) (TCtrl [] 0) (TXCtrl [] 0)))
+
+(defn class-name [(bit i64)] (-> (slice u8))
+  (case bit
+    CL-TUPLE    "tuple"
+    CL-INVERTED "inverted int range (high)"
+    CL-FHIGH    "FSZ-HIGH float"
+    CL-FCON     "FSZ-CON float"
+    CL-WIDE     "non-default widening counter"
+    CL-OFFKIND  "refinement on an off kind bit"
+    CL-NOKINDS  "kinds = VK-NONE"
+    (do (ps (stderr) "\nclass-name: no such class\n") (abort) "")))
+
+;; The census as an assertion: every class must have been present. Reports the whole set so a
+;; failure says WHICH class went missing rather than that the mask was wrong.
+(defn expect-every-class [(seen i64)] (-> i64)
+  (let [w (stdout) (mut bit) 1 (mut missing) 0]
+    (loop
+      (if (> (load bit) CL-NOKINDS) (break)
+        (do (ps w "    ")
+            (ps w (if (= (& seen (load bit)) 0) "MISSING  " "present  "))
+            (ps w (class-name (load bit)))
+            (ps w "\n")
+            (if (= (& seen (load bit)) 0) (store! missing (+ (load missing) 1)) 0)
+            (store! bit (<< (load bit) 1))
+            0)))
+    (assert (= (load missing) 0))
+    (assert (= (& seen CL-ALL) CL-ALL))
+    0))
+
+; ---------------------------------------------------------------------------
+; Building the world the sweep ranges over
+; ---------------------------------------------------------------------------
+;; The sample set is 32 hand-listed types plus all 32 duals, the same set the M0 laws are checked
+;; over; the corpus is all 15 fixtures, built through `corpus-build!` so no tool can hold a
+;; private copy of one. Between them they are what makes "every interned type" mean something.
+(defn intern-the-samples! [] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (ty-sample-count)) (break)
+        (do (ty-sample (load i))
+            (ty-sample-dual (load i))
+            (store! i (+ (load i) 1))
+            0))))
+  (ty-sample-count))
+
+(defn build-the-whole-corpus! [] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (corpus-count)) (break)
+        (do (corpus-build! (load i))
+            (store! i (+ (load i) 1))
+            0))))
+  (corpus-count))
+
+; ===========================================================================
+; 1. Every interned type round-trips exactly
+; ===========================================================================
+(deftest every_interned_type_round_trips_exactly
+  (let [w (stdout)
+        samples (intern-the-samples!)
+        fixtures (build-the-whole-corpus!)
+        ; SNAPSHOT FIRST. A type that round-trips interns nothing new, but one that does NOT
+        ; interns a fresh id AND its dual, so the table can grow mid-sweep; reading `ty-count`
+        ; in the loop condition would chase its own tail.
+        n (ty-count)
+        (mut checked) 0
+        (mut seen) 0
+        (mut i) 0]
+    (fmt w "\n--- exact type form: exhaustive round trip ---\n")
+    (fmt w "  {d} sample types plus {d} duals, {d} corpus fixtures, {d} interned types\n"
+         samples samples fixtures n)
+    (loop
+      (if (>= (load i) n) (break)
+        (do (store! checked (+ (load checked) (expect-round-trip "exhaustive sweep" (load i))))
+            (store! seen (| (load seen) (ty-classes (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (fmt w "  {d} types printed, parsed back, and identical by id\n" (load checked))
+    (ps w "  census of the swept set:\n")
+    (expect-every-class (load seen))
+
+    ; every id in the table was visited, and the table was big enough for that to mean something
+    (assert (= (load checked) n))
+    (assert (>= n TYPE-FLOOR))
+    ; and the sweep minted nothing: a parse that returns an EXISTING id is the identity, while a
+    ; failure would have interned a new type and its dual
+    (assert (= (ty-count) n))))
+
+; ===========================================================================
+; 2. The debug form is measurably not a decodable format
+; ===========================================================================
+;; This is the "would it fail if the feature were removed" measurement, made mechanical. The
+;; debug printer consults a refinement's KIND BIT before printing it and renders float constants
+;; through `{f}`, so it is a faithful stand-in for "the exact printer was never written". Feeding
+;; every id's debug form back through the parser therefore says exactly how much work the exact
+;; printer is doing.
+;;
+;; Two named witnesses follow the count, because a count alone does not say what kind of defect is
+;; being avoided. Both are cases where the debug form PARSES CLEANLY into the WRONG TYPE, which is
+;; worse than failing: a format that fails is a bug report, and a format that lies is a miscompile.
+(deftest the_debug_form_is_measurably_not_a_decodable_format
+  (let [w (stdout)]
+    (intern-the-samples!)
+    (build-the-whole-corpus!)
+    (let [n (ty-count)
+          (mut miss) 0
+          (mut wrong) 0
+          (mut shown) 0
+          (mut i) 0]
+      (fmt w "\n--- the debug form is lossy, measured ---\n")
+      (loop
+        (if (>= (load i) n) (break)
+          (let [ba   (alloc-stack (array u8 4096))
+                d    (dbg-render (load i) (cast (ptr i8) ba) 4096)
+                back (ty-try-parse d)]
+            (if (= back (load i)) 0
+              (do (store! miss (+ (load miss) 1))
+                  ; parsed fine, just into something else: the dangerous half
+                  (if (= back TY-NO-ID) 0 (store! wrong (+ (load wrong) 1)))
+                  (if (>= (load shown) 3) 0
+                    (do (fmt w "    t{d} debug \"" (load i)) (ps w d)
+                        (fmt w "\" decodes to t{d}\n" back)
+                        (store! shown (+ (load shown) 1))
+                        0))
+                  0))
+            (store! i (+ (load i) 1))
+            0)))
+      (fmt w "  the debug form fails to decode back for {d} of {d} ids ({d} of those decode to the WRONG type)\n"
+           (load miss) n (load wrong))
+      ; if `ty-print-exact` were `ty-print`, test 1 would fail on every one of these
+      (assert (>= (load miss) DEBUG-LOSSY-FLOOR))
+      (assert (> (load wrong) 0)))
+
+    ; WITNESS ONE: `fmt`'s `{d}` renders INT64_MIN as "-0". `t-fun-con 63` is the bitset
+    ; INT64_MIN, the debug form writes `fun#-0`, and `-0` decodes to 0, which is the EMPTY
+    ; function set: a different type, reached without any error being reported.
+    (let [t (t-fun-con 63)
+          ba (alloc-stack (array u8 256))]
+      (let [d (dbg-render t (cast (ptr i8) ba) 256)
+            back (ty-try-parse d)]
+        (ps w "  witness: the {d} trap, debug \"") (ps w d)
+        (fmt w "\" -> t{d}, not t{d}\n" back t)
+        (assert (str-eq d "fun#-0"))
+        (assert (!= back TY-NO-ID))          ; it parses, which is what makes it dangerous
+        (assert (!= back t))
+        (assert (= back (t-fun-set 0)))))
+    (expect-exact "the INT64_MIN bitset needs every digit" (t-fun-con 63)
+                  "fun#-9223372036854775808")
+    (expect-round-trip "the INT64_MIN bitset" (t-fun-con 63))
+
+    ; WITNESS TWO: the widening counter. A partly widened range and a fresh one differ ONLY in
+    ; the counter, and the debug form omits it, so the debug string of `int=[0..10]` at fuel 1
+    ; decodes to the same range at fuel 0: a real type, silently the wrong one. This is the whole
+    ; reason the `w<n>` spelling exists, and it is the axis the corpus cannot exercise.
+    (let [t (ty-with-iwide (t-int-range 0 10) 1)
+          ba (alloc-stack (array u8 256))]
+      (assert (!= t (t-int-range 0 10)))     ; same interval, different fuel: two types
+      (let [d (dbg-render t (cast (ptr i8) ba) 256)
+            back (ty-try-parse d)]
+        (ps w "  witness: the widening counter, debug \"") (ps w d)
+        (fmt w "\" -> t{d}, not t{d}\n" back t)
+        (assert (str-eq d "int=[0..10]"))
+        (assert (= back (t-int-range 0 10)))
+        (assert (!= back t))))
+    ; The counter's DEFAULT depends on whether the interval was pinned, and both defaults have to
+    ; be reachable. A full interval at fuel 0 is the one the printer has to spell out.
+    (expect-exact "an unspent counter on a full interval" (t-int-range TY-IMIN TY-IMAX) "int w0")
+    (expect-round-trip "an unspent counter on a full interval" (t-int-range TY-IMIN TY-IMAX))
+    (assert (!= (t-int-range TY-IMIN TY-IMAX) (t-int)))
+    0))
+
+; ===========================================================================
+; 3. The named collisions, and the exact form separating them
+; ===========================================================================
+;; THE CLAIM IS ABOUT A SPECIFIC DEFECT, not about a checker returning non-zero. For each pair:
+;; the debug form gives ONE string for two distinct interned types (measured, not assumed), the
+;; exact form gives two different strings, and both members round-trip. That pins the debug
+;; form's lossiness as a demonstrated fact rather than a claim in a comment.
+(defn expect-collision [(label (slice u8)) (a i64) (b i64)] (-> i64)
+  (let [w  (stdout)
+        b1 (alloc-stack (array u8 1024))
+        b2 (alloc-stack (array u8 1024))
+        b3 (alloc-stack (array u8 1024))
+        b4 (alloc-stack (array u8 1024))
+        da (dbg-render a (cast (ptr i8) b1) 1024)
+        db (dbg-render b (cast (ptr i8) b2) 1024)
+        ea (raw-render a (cast (ptr i8) b3) 1024)
+        eb (raw-render b (cast (ptr i8) b4) 1024)]
+    (if (and (!= a b) (and (str-eq da db) (not (str-eq ea eb)))) 0
+      (do (tfail-head label)
+          (let [e (stderr)]
+            (fmt e "  expected two DISTINCT ids that the debug form collides and the exact form separates\n")
+            (fmt e "    t{d} debug \"" a) (ps e da) (ps e "\" exact \"") (ps e ea) (ps e "\"\n")
+            (fmt e "    t{d} debug \"" b) (ps e db) (ps e "\" exact \"") (ps e eb) (ps e "\"\n"))
+          (abort)
+          0))
+    (ps w "  ") (ps w label) (ps w "\n    both debug as \"") (ps w da) (ps w "\"\n")
+    (ps w "    exact  \"") (ps w ea) (ps w "\"\n")
+    (ps w "    exact  \"") (ps w eb) (ps w "\"\n")
+    ; and the whole point: each of them decodes back to itself
+    (expect-round-trip label a)
+    (expect-round-trip label b)
+    2))
+
+(deftest the_named_collisions_are_separated_by_the_exact_form
+  (let [w (stdout) (mut n) 0]
+    (ps w "\n--- collisions in the debug form, separated by the exact form ---\n")
+    ; The float axis. All three carry the same kind set `~flt`, whose flt BIT IS OFF, so the debug
+    ; printer shows none of them their float refinement: the axis top, the constant +0.0 and the
+    ; constant 3.5 are one string.
+    (let [a (ty-dual (t-flt))
+          b (ty-dual (t-flt-con 0.0))
+          c (ty-dual (t-flt-con 3.5))]
+      (store! n (+ (load n) (expect-collision "~flt with the float axis high vs =b0" a b)))
+      (store! n (+ (load n) (expect-collision "~flt with =b0 vs =b(3.5)" b c)))
+      (store! n (+ (load n) (expect-collision "~flt with the float axis high vs =b(3.5)" a c))))
+    ; The function-pointer axis, same shape: `~fun` has the fun bit off.
+    (let [a (ty-dual (t-fun))
+          b (ty-dual (t-fun-con 3))]
+      (store! n (+ (load n) (expect-collision "~fun with the empty fidx set vs ~{3}" a b))))
+    ; The shape axis.
+    (let [a (ty-dual (t-obj))
+          b (ty-dual (t-obj-shape 2))]
+      (store! n (+ (load n) (expect-collision "~obj with the empty shape set vs ~{2}" a b))))
+    ; And the one collision that needs no dual at all: the two signed zeros. `{f}` displays both
+    ; as 0.0 while the bit patterns are 0 and INT64_MIN.
+    (let [a (t-flt-con 0.0)
+          b (t-flt-con -0.0)]
+      (store! n (+ (load n) (expect-collision "+0.0 vs -0.0" a b))))
+    (fmt w "  {d} collision members, each round-tripping\n" (load n))
+    ; three groups plus the signed zeros: five pairs, ten members
+    (assert (>= (load n) 10))))
+
+; ===========================================================================
+; 4. Adversarial types the corpus cannot produce
+; ===========================================================================
+;; Every one of these is a form no corpus fixture and no sample builds, chosen because the printer
+;; could omit it entirely and still pass a round trip written over the corpus alone. The label on
+;; each says which way the printer could have been wrong.
+(deftest adversarial_types_the_corpus_cannot_build_round_trip
+  (let [w (stdout) (mut n) 0]
+    (ps w "\n--- adversarial exact forms ---\n")
+
+    ; PARTIAL WIDENING. The corpus holds counters 0, 3 and -3 only, and 0 and 3 are the two
+    ; defaults, so without 1 and 2 the counter could go unprinted altogether.
+    (store! n (+ (load n) (expect-round-trip "iwide 1" (ty-with-iwide (t-int-range 0 10) 1))))
+    (store! n (+ (load n) (expect-round-trip "iwide 2" (ty-with-iwide (t-int-range 0 10) 2))))
+    (expect-exact "iwide 1" (ty-with-iwide (t-int-range 0 10) 1) "int=[0..10] w1")
+    (expect-exact "iwide 2" (ty-with-iwide (t-int-range 0 10) 2) "int=[0..10] w2")
+    ; a counter on the NEGATIVE side, which is where `dual` lives
+    (store! n (+ (load n) (expect-round-trip "iwide -1" (ty-with-iwide (t-int-range 0 10) -1))))
+
+    ; THE INTERVAL EXTREMES, which the format writes as names. `min`/`max` are also the two
+    ; values a decimal writer is most likely to get wrong.
+    (store! n (+ (load n) (expect-round-trip "int=min" (t-int-con TY-IMIN))))
+    (store! n (+ (load n) (expect-round-trip "int=max" (t-int-con TY-IMAX))))
+    (store! n (+ (load n) (expect-round-trip "int=[min..0]" (t-int-range TY-IMIN 0))))
+    (store! n (+ (load n) (expect-round-trip "int=[0..max]" (t-int-range 0 TY-IMAX))))
+    (expect-exact "int=min" (t-int-con TY-IMIN) "int=min")
+    (expect-exact "int=max" (t-int-con TY-IMAX) "int=max")
+
+    ; FLOAT BIT PATTERNS. NaN is not reflexive under `fcmp` while interning needs exact identity,
+    ; and -0.0 is the bit pattern INT64_MIN, which is the `{d}` trap on the float axis.
+    (let [nan-bits 9221120237041090560]
+      (store! n (+ (load n) (expect-round-trip "flt=NaN" (t-flt-bits nan-bits))))
+      (expect-exact "flt=NaN" (t-flt-bits nan-bits) "flt=b9221120237041090560"))
+    (store! n (+ (load n) (expect-round-trip "flt=+0.0" (t-flt-con 0.0))))
+    (store! n (+ (load n) (expect-round-trip "flt=-0.0" (t-flt-con -0.0))))
+    (expect-exact "flt=+0.0" (t-flt-con 0.0) "flt=b0")
+    (expect-exact "flt=-0.0" (t-flt-con -0.0) "flt=b-9223372036854775808")
+    (assert (!= (t-flt-con 0.0) (t-flt-con -0.0)))
+
+    ; MULTI-BIT SETS, and the extreme bitset. The corpus has single-bit sets only, so a printer
+    ; that wrote a popcount or an index rather than the set would survive it.
+    (store! n (+ (load n) (expect-round-trip "fun#6, two targets" (t-fun-set 6))))
+    (store! n (+ (load n) (expect-round-trip "obj@5, two shapes"  (t-obj-shapes 5))))
+    (store! n (+ (load n) (expect-round-trip "fun#(bit 63)"       (t-fun-con 63))))
+    (store! n (+ (load n) (expect-round-trip "obj@(bit 63)"       (t-obj-shape 63))))
+    ; one bit off the axis BOTTOM, which is -1 and is the set the printer suppresses: a nearly
+    ; full set has to be written, and written as a negative decimal
+    (store! n (+ (load n) (expect-round-trip "fun#-2, every target but one" (t-fun-set -2))))
+    (store! n (+ (load n) (expect-round-trip "obj@-2, every shape but one"  (t-obj-shapes -2))))
+    (expect-exact "fun#6" (t-fun-set 6) "fun#6")
+    (expect-exact "obj@5" (t-obj-shapes 5) "obj@5")
+    (expect-exact "fun#-2" (t-fun-set -2) "fun#-2")
+
+    ; OFF-KIND REFINEMENTS built directly, rather than as somebody's dual: an `int` carrying a
+    ; float constant, and a `~dyn` carrying refinements on all four axes. The debug printer shows
+    ; the first as plain `int` and the second as plain `~dyn`.
+    (let [t (ty-intern (TVal (val-make VK-INT TY-IMIN TY-IMAX TY-WIDEN-MAX
+                                       FSZ-CON (f64-bits 3.5) -1 -1)))]
+      (store! n (+ (load n) (expect-round-trip "int carrying float bits" t)))
+      (expect-exact "int carrying float bits" t "int flt=b4615063718147915776")
+      (expect-debug "the debug form hides it"  t "int"))
+    (let [t (ty-intern (TVal (val-make VK-NONE 0 10 0 FSZ-CON (f64-bits 1.5) 3 5)))]
+      (store! n (+ (load n) (expect-round-trip "~dyn carrying every refinement" t)))
+      (expect-exact "~dyn carrying every refinement" t
+                    "~dyn int=[0..10] flt=b4609434218613702656 fun#3 obj@5")
+      (expect-debug "the debug form hides all of it" t "~dyn"))
+
+    ; TUPLES THE LATTICE HAS NO CONSTRUCTOR FOR IN THE CORPUS: a tuple member that is itself a
+    ; tuple (the shape that found the `ty-meet-tuples` miscompile), a member that is high
+    ; control, and arities the hand-written builders do not cover.
+    (let [t (t-tuple2 (t-xctrl) (t-tuple2 (t-ctrl) (t-int)))]
+      (store! n (+ (load n) (expect-round-trip "a tuple inside a tuple" t)))
+      (expect-exact "a tuple inside a tuple" t "[~ctrl,[ctrl,int]]"))
+    (let [ms (alloc-stack (array i64 4))]
+      (store! (index ms 0) (t-xctrl))
+      (store! (index ms 1) (ty-with-iwide (t-int-range 0 10) 1))
+      (store! (index ms 2) (t-flt-con -0.0))
+      (store! (index ms 3) (t-tuple2 (t-ctrl) (t-int)))
+      (let [t (t-tuple-list (slice-new [i64] (cast (ptr i64) (index ms 0)) 4))]
+        (store! n (+ (load n) (expect-round-trip "a 4-tuple of adversarial members" t)))
+        (expect-exact "a 4-tuple of adversarial members" t
+                      "[~ctrl,int=[0..10] w1,flt=b-9223372036854775808,[ctrl,int]]"))
+      ; a 1-member tuple, which no hand-written builder makes: with one member there is no comma
+      ; at all, so this is the arity where a member and a refinement separator look most alike
+      (let [t (t-tuple-list (slice-new [i64] (cast (ptr i64) (index ms 0)) 1))]
+        (store! n (+ (load n) (expect-round-trip "a 1-tuple" t)))
+        (expect-exact "a 1-tuple" t "[~ctrl]"))
+      ; a 0-member tuple: nothing in the lattice builds one, and the printer still has to be
+      ; total on every id `t-tuple-list` can mint
+      (let [t (t-tuple-list (slice-new [i64] (cast (ptr i64) (index ms 0)) 0))]
+        (store! n (+ (load n) (expect-round-trip "the empty tuple" t)))
+        (expect-exact "the empty tuple" t "[]")))
+
+    (fmt w "  {d} adversarial types round-tripped\n" (load n))
+    (assert (>= (load n) ADVERSARIAL-FLOOR))))
+
+; ===========================================================================
+; 5. The two separators denote two different types
+; ===========================================================================
+;; The design constraint the format rests on: refinements are space-separated and members are
+;; comma-separated, because with a space for both `[int flt=b1]` is simultaneously a 1-tuple whose
+;; member carries a float constant AND a 2-tuple, and no lookahead fixes a printer that emits one
+;; string for two types.
+;;
+;; This is stated as a structural claim, not a golden: the two texts parse to types of arity 1 and
+;; 2, they are different ids, and each round-trips. And the DEBUG tuple spelling is REFUSED by the
+;; parser rather than mis-read, which is the reason the two separators had to differ at all.
+(deftest the_two_separators_denote_two_different_types
+  (let [w (stdout)
+        one (ty-try-parse "[int flt=b1]")
+        two (ty-try-parse "[int,flt=b1]")]
+    (ps w "\n--- the member separator ---\n")
+    (assert (!= one TY-NO-ID))
+    (assert (!= two TY-NO-ID))
+    (assert (!= one two))
+    (fmt w "  \"[int flt=b1]\" -> t{d} (arity 1), \"[int,flt=b1]\" -> t{d} (arity 2)\n" one two)
+    (assert (= (tuple-arity-of one) 1))
+    (assert (= (tuple-arity-of two) 2))
+    ; the 1-tuple's single member is the off-kind value, so the space really did bind as a
+    ; refinement separator and not as a member separator
+    (assert (= (ty-kid (tuple-offset-of one) 0)
+               (ty-intern (TVal (val-make VK-INT TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-CON 1 -1 -1)))))
+    (expect-round-trip "the 1-tuple reading" one)
+    (expect-round-trip "the 2-tuple reading" two)
+    (expect-exact "the 1-tuple reading" one "[int flt=b1]")
+    (expect-exact "the 2-tuple reading" two "[int,flt=b1]")
+    ; the debug spelling of a tuple is not a valid exact form, and is refused
+    (assert (= (ty-try-parse "[ctrl int]") TY-NO-ID))
+    (assert (= (text-err) TERR-NO-RBRACK))))
+
+;; Structural readers for the two claims above. A tuple's arity is part of its identity, so asking
+;; for it is a contract question and not an implementation detail; asking a non-tuple is an error
+;; rather than a 0, which would make "the parse produced the wrong shape" look like an arity bug.
+(defn tuple-arity-of [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TTuple [o l] l)
+    (TVal [v] (do (tfail-head "expected a tuple, got a value") (ty-dump t) (abort) 0))
+    (TBot [] (do (tfail-head "expected a tuple, got ALL") (abort) 0))
+    (TTop [] (do (tfail-head "expected a tuple, got ANY") (abort) 0))
+    (TCtrl [] (do (tfail-head "expected a tuple, got ctrl") (abort) 0))
+    (TXCtrl [] (do (tfail-head "expected a tuple, got ~ctrl") (abort) 0))))
+
+(defn tuple-offset-of [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TTuple [o l] o)
+    (TVal [v] (do (tfail-head "expected a tuple, got a value") (ty-dump t) (abort) 0))
+    (TBot [] (do (tfail-head "expected a tuple, got ALL") (abort) 0))
+    (TTop [] (do (tfail-head "expected a tuple, got ANY") (abort) 0))
+    (TCtrl [] (do (tfail-head "expected a tuple, got ctrl") (abort) 0))
+    (TXCtrl [] (do (tfail-head "expected a tuple, got ~ctrl") (abort) 0))))
+
+; ===========================================================================
+; 6. The parser refuses to guess
+; ===========================================================================
+;; THE CODE IS THE ASSERTION. "parse failed" is satisfied by a parser that always fails, so every
+;; input below names the check that has to be the one to notice. Each also has to come back as
+;; TY-NO-ID: a parser that fell back to ALL, to ANY or to id 0 on malformed text would turn a
+;; format bug into an ALL-typed node three passes later with nothing to say about where it came
+;; from.
+;;
+;; The return value is the code's BIT, so the caller can measure how many DIFFERENT checks the
+;; table reached.
+(defn expect-terr [(s (slice u8)) (want i64)] (-> i64)
+  (let [t   (ty-try-parse s)
+        got (text-err)]
+    (if (and (= t TY-NO-ID) (= got want)) 0
+      (do (tfail-head "the parser did not report the check that should have noticed")
+          (let [w (stderr)]
+            (ps w "  input  = \"") (ps w s) (ps w "\"\n")
+            (ps w "  wanted ") (ps w (text-err-name want))
+            (ps w ", got ")     (ps w (text-err-name got))
+            (fmt w " at byte {d}\n" (text-err-pos))
+            (fmt w "  returned id {d} (TY-NO-ID is {d})\n" t TY-NO-ID)
+            (if (= t TY-NO-ID) 0 (do (ps w "  it produced a type, which is worse than failing:\n")
+                                     (ty-dump t) 0)))
+          (abort)
+          0))
+    (<< 1 want)))
+
+;; A tuple nested past the recursion budget. Built here rather than written as a literal because
+;; the input is 604 bytes of brackets, and it is checked inside this frame because the text lives
+;; in it.
+(defn expect-depth-refused [] (-> i64)
+  (let [buf (alloc-stack (array u8 1024))
+        depth 300
+        (mut i) 0]
+    (loop
+      (if (>= (load i) depth) (break)
+        (do (store! (index buf (load i)) (cast u8 CH-LBRACK))
+            (store! (index buf (+ depth (+ 4 (load i)))) (cast u8 CH-RBRACK))
+            (store! i (+ (load i) 1))
+            0)))
+    ; "ctrl" in the middle, so the input is a legal 300-deep 1-tuple and the only thing wrong
+    ; with it is its depth
+    (store! (index buf (+ depth 0)) (cast u8 99))    ; c
+    (store! (index buf (+ depth 1)) (cast u8 116))   ; t
+    (store! (index buf (+ depth 2)) (cast u8 114))   ; r
+    (store! (index buf (+ depth 3)) (cast u8 108))   ; l
+    (expect-terr (slice-new [u8] (cast (ptr u8) (index buf 0)) (+ (* 2 depth) 4))
+                 TERR-DEPTH)))
+
+(deftest the_parser_reports_a_named_code_and_never_guesses
+  (let [w (stdout) (mut seen) 0]
+    (ps w "\n--- malformed input, one named code each ---\n")
+    ; the seven the gate names
+    (store! seen (| (load seen) (expect-terr ""            TERR-UNKNOWN-FORM)))
+    (store! seen (| (load seen) (expect-terr "wat"         TERR-UNKNOWN-KIND)))
+    (store! seen (| (load seen) (expect-terr "int=["       TERR-BAD-BOUND)))
+    (store! seen (| (load seen) (expect-terr "int=[5..]"   TERR-BAD-BOUND)))
+    (store! seen (| (load seen) (expect-terr "int=[5..3"   TERR-NO-RBRACK)))
+    (store! seen (| (load seen) (expect-terr "int=5 junk"  TERR-BAD-REFINE)))
+    (store! seen (| (load seen) (expect-terr "[ctrl"       TERR-NO-RBRACK)))
+    ; and the rest of the codes, so the table measures more than two checks
+    (store! seen (| (load seen) (expect-terr "int|int"     TERR-DUP-KIND)))
+    (store! seen (| (load seen) (expect-terr "num|int"     TERR-DUP-KIND)))   ; num IS int|flt
+    (store! seen (| (load seen) (expect-terr "dyn#3"       TERR-ATTACHED-NO-AXIS)))
+    (store! seen (| (load seen) (expect-terr "fun=3"       TERR-BAD-SIGIL)))
+    (store! seen (| (load seen) (expect-terr "flt=3"       TERR-BAD-SIGIL)))  ; wants `=b<bits>`
+    (store! seen (| (load seen) (expect-terr "int=5 int=6" TERR-DUP-REFINE)))
+    (store! seen (| (load seen) (expect-terr "int=[3..3]"  TERR-BAD-RANGE)))
+    (store! seen (| (load seen) (expect-terr "int=[5..3]"  TERR-BAD-RANGE)))
+    (store! seen (| (load seen) (expect-terr "int=5 w9"    TERR-WIDEN-RANGE)))
+    (store! seen (| (load seen) (expect-terr "int=99999999999999999999" TERR-INT-RANGE)))
+    (store! seen (| (load seen) (expect-terr "fun#z"       TERR-BAD-INT)))
+    (store! seen (| (load seen) (expect-terr "int=[..5]"   TERR-BAD-BOUND)))
+    (store! seen (| (load seen) (expect-terr "int=[5.5]"   TERR-NO-DOTDOT)))
+    (store! seen (| (load seen) (expect-terr "ALL junk"    TERR-TRAILING)))
+    (store! seen (| (load seen) (expect-terr "ctrl~"       TERR-TRAILING)))
+    (store! seen (| (load seen) (expect-depth-refused)))
+
+    (fmt w "  {d} different named checks reached\n" (popcount64 (load seen)))
+    ; a table that tripped one code twenty times would satisfy every assertion above
+    (assert (>= (popcount64 (load seen)) TERR-CODE-FLOOR))
+    ; and no malformed input ever produced a usable id, in particular not ALL, ANY or 0
+    (assert (= (ty-try-parse "wat") TY-NO-ID))
+    (assert (!= (ty-try-parse "wat") (t-bot)))
+    (assert (!= (ty-try-parse "wat") (t-top)))))
+
+;; The strict entry point. `ty-parse` is what ordinary code calls, and on malformed text it must
+;; DIE rather than hand back a sentinel, because a returned TY-NO-ID handed to `ty-get` is an
+;; out-of-bounds read and a returned ALL is a miscompile hunt. Only a child process can observe
+;; that: if the abort were removed the child would reach `_exit(0)` and this test fails.
+(deftest ty_parse_aborts_instead_of_returning_a_plausible_type
+  (let [w (stdout) pid (fork)]
+    (if (= pid 0)
+        (do (ty-parse "int=[5..")
+            (_exit 0)
+            0)
+      (let [st (alloc-stack i32)]
+        (store! st 0)
+        (waitpid pid st 0)
+        (let [status (cast i64 (load st))
+              sig    (& status 127)
+              code   (>> status 8)]
+          (fmt w "\n--- ty-parse on malformed text ---\n  child wait status {d}: signal {d}, exit code {d}\n"
+               status sig code)
+          ; killed by a signal (abort), not returned from
+          (assert (!= sig 0))
+          0)))))
+
+; ===========================================================================
+; 7. The human-visible surface did not move
+; ===========================================================================
+;; Every golden string in the project and every label in the diagram gallery is produced by
+;; `ty-print`, so the first column below is what must not move: if it does, a golden moved and
+;; some other suite is now wrong for a reason nobody will connect to this file.
+;;
+;; The second column is the exact form, and the third is whether the two are the SAME STRING. The
+;; agreement flag is asserted in BOTH directions on purpose. A form that must agree and starts
+;; differing means the exact printer drifted on the common case. A form that legitimately differs
+;; and starts agreeing means the DEBUG printer changed, which is a golden moving by another route.
+;;
+;; THREE FORMS LEGITIMATELY DIFFER, and the gate's own list of "forms the two printers agree on"
+;; named two of them, so they are spelled out here rather than quietly dropped:
+;;
+;;   ~dyn                 the debug printer returns as soon as the kind set is empty, so every
+;;                        refinement the dual carries is invisible. The exact form has to print
+;;                        them or `~dyn` collides with every high value type.
+;;   [ctrl int]           members must not share the refinement separator (see test 5).
+;;   a float constant     `{f}` is a fixed 6-digit display and cannot round-trip; the exact form
+;;                        writes the bit pattern.
+;;
+;; None of the three appears in any golden string or any gallery label today, which is checked
+;; mechanically in test 8 rather than asserted here in prose.
+(defn expect-forms [(label (slice u8)) (t i64)
+                    (dbg-want (slice u8)) (exact-want (slice u8)) (agree bool)] (-> i64)
+  (expect-debug label t dbg-want)
+  (expect-exact label t exact-want)
+  (if (= (forms-agree? t) agree) 0
+    (do (tfail-head label)
+        (let [w (stderr)]
+          (ps w (if agree
+                  "  these two printers must produce the SAME string for this form and no longer do\n"
+                  "  these two printers differ on this form by design and have started agreeing\n")))
+        (ty-dump t)
+        (abort)
+        0))
+  ; the exact spelling, whatever it is, still has to decode
+  (expect-round-trip label t)
+  1)
+
+(deftest the_human_visible_forms_did_not_move
+  (let [w (stdout) (mut n) 0]
+    (ps w "\n--- the forms goldens and gallery labels are made of ---\n")
+    (store! n (+ (load n) (expect-forms "ALL"   (t-bot)   "ALL"   "ALL"   true)))
+    (store! n (+ (load n) (expect-forms "ANY"   (t-top)   "ANY"   "ANY"   true)))
+    (store! n (+ (load n) (expect-forms "ctrl"  (t-ctrl)  "ctrl"  "ctrl"  true)))
+    (store! n (+ (load n) (expect-forms "~ctrl" (t-xctrl) "~ctrl" "~ctrl" true)))
+    (store! n (+ (load n) (expect-forms "dyn"   (t-dyn)   "dyn"   "dyn"   true)))
+    (store! n (+ (load n) (expect-forms "int"   (t-int)   "int"   "int"   true)))
+    (store! n (+ (load n) (expect-forms "num"   (t-num)   "num"   "num"   true)))
+    (store! n (+ (load n) (expect-forms "bool"  (t-bool)  "bool"  "bool"  true)))
+    (store! n (+ (load n) (expect-forms "str"   (t-str)   "str"   "str"   true)))
+    (store! n (+ (load n) (expect-forms "int=5"  (t-int-con 5)  "int=5"  "int=5"  true)))
+    (store! n (+ (load n) (expect-forms "int=-7" (t-int-con -7) "int=-7" "int=-7" true)))
+    (store! n (+ (load n) (expect-forms "bool=1" (t-bool-con true) "bool=1" "bool=1" true)))
+    (store! n (+ (load n) (expect-forms "int=[0..10]" (t-int-range 0 10)
+                                        "int=[0..10]" "int=[0..10]" true)))
+    (store! n (+ (load n) (expect-forms "int=[-5..5]" (t-int-range -5 5)
+                                        "int=[-5..5]" "int=[-5..5]" true)))
+    (store! n (+ (load n) (expect-forms "fun#8" (t-fun-con 3) "fun#8" "fun#8" true)))
+    (store! n (+ (load n) (expect-forms "obj@4" (t-obj-shape 2) "obj@4" "obj@4" true)))
+    ; the three that differ, each pinned in both columns
+    (store! n (+ (load n) (expect-forms "~dyn" (t-nodyn)
+                                        "~dyn"
+                                        "~dyn int=~[min..max] w-3 flt^ fun#0 obj@0"
+                                        false)))
+    (store! n (+ (load n) (expect-forms "[ctrl int]" (t-tuple2 (t-ctrl) (t-int))
+                                        "[ctrl int]" "[ctrl,int]" false)))
+    (store! n (+ (load n) (expect-forms "flt=3.5" (t-flt-con 3.5)
+                                        "flt=3.5" "flt=b4615063718147915776" false)))
+    (fmt w "  {d} named forms pinned in both printers\n" (load n))
+    (assert (>= (load n) 19))))
+
+; ===========================================================================
+; 8. Every type a diagram label shows prints the same under both printers
+; ===========================================================================
+;; The mechanical version of "the human-visible surface did not move". `op-shows-type?` is the
+;; rule dot.coil uses to decide whether a node's label carries its type, so this walks the whole
+;; corpus and asserts that every type that actually reaches a gallery label is one the two
+;; printers spell identically. It is the claim the table above cannot make: a gallery label is
+;; produced by whatever type the analysis computed, not by a form anyone wrote down.
+;;
+;; It is also the check that would catch the tempting simplification of giving refinements a comma
+;; to match the members: 71 labels would change at once.
+(deftest every_gallery_label_prints_the_same_under_both_printers
+  (let [w (stdout) (mut labels) 0 (mut bad) 0 (mut i) 0]
+    (ps w "\n--- diagram labels, under both printers ---\n")
+    (loop
+      (if (>= (load i) (corpus-count)) (break)
+        (do (corpus-build! (load i))
+            (let [n (n-count) (mut k) 0]
+              (loop
+                (if (>= (load k) n) (break)
+                  (do (if (and (not (n-dead? (load k))) (op-shows-type? (n-op (load k))))
+                          (do (store! labels (+ (load labels) 1))
+                              (if (forms-agree? (n-ty (load k))) 0
+                                (do (store! bad (+ (load bad) 1))
+                                    (tfail-head (corpus-name (load i)))
+                                    (let [e (stderr)]
+                                      (fmt e "  n{d} " (load k))
+                                      (ps e (op-name (n-op (load k))))
+                                      (ps e " shows a type the two printers spell differently\n"))
+                                    (ty-dump (n-ty (load k)))
+                                    0))
+                              ; and the label's type decodes, which is what makes a diagram a
+                              ; readable artifact rather than a picture
+                              (expect-round-trip (corpus-name (load i)) (n-ty (load k)))
+                              0)
+                        0)
+                      (store! k (+ (load k) 1))
+                      0))))
+            (store! i (+ (load i) 1))
+            0)))
+    (fmt w "  {d} labelled types across {d} fixtures, {d} disagreements\n"
+         (load labels) (corpus-count) (load bad))
+    (assert (= (load bad) 0))
+    ; the walk really found labels: a corpus that stopped showing types would pass silently
+    (assert (>= (load labels) LABEL-FLOOR))))
+
+; ===========================================================================
+; 9. Printing is observation: it does not grow the type table
+; ===========================================================================
+;; `ty-print-exact` round-trips through the PARSER to decide whether it may emit at all, and the
+;; parser reserves a member window for every tuple it sees (`ty-tuple-open`). The kid array is
+;; append-only, so before `ty-tuple-close` learned to reclaim a window whose tuple already existed,
+;; PRINTING an interned tuple leaked two words per call: unbounded in the number of prints, with
+;; `ty-count` flat the whole time, which is exactly the shape src/text.coil's "the parser owns no
+;; memory at all... the only growth it causes is interning" claimed was impossible.
+;;
+;; It fails by +2N with the reclamation removed, so N is large enough that the number is not
+;; ambiguous, and the assertion is equality rather than a bound.
+(deftest printing_a_tuple_does_not_grow_the_kid_array
+  (let [w (stdout)
+        t  (t-tuple2 (t-ctrl) (t-int))
+        nt (t-tuple2 (t-tuple2 (t-ctrl) (t-int)) (t-flt))    ; a tuple member reserves twice over
+        ba (alloc-stack (array u8 4096))
+        n0 (do (ty-render t (cast (ptr i8) ba) 4096)          ; one warm-up print of each
+               (ty-render nt (cast (ptr i8) ba) 4096)
+               (ty-count))
+        k0 (ty-kids-len)
+        (mut i) 0]
+    (loop
+      (if (>= (load i) 500) (break)
+        (do (ty-render t  (cast (ptr i8) ba) 4096)
+            (ty-render nt (cast (ptr i8) ba) 4096)
+            (store! i (+ (load i) 1))
+            0)))
+    (fmt w "\n--- 1000 prints of two interned tuples ---\n")
+    (fmt w "  ty-count {d} -> {d}, kids {d} -> {d}\n" n0 (ty-count) k0 (ty-kids-len))
+    (assert (= (ty-count) n0))
+    (assert (= (ty-kids-len) k0))))
+
+; ===========================================================================
+; 10. The deepest tuple the lattice can mint is one the parser can read
+; ===========================================================================
+;; THE TWO BOUNDS ARE ONE BOUND. `parse-type` recurses on the C stack and gives up past
+;; TEXT-MAX-DEPTH, so a type nested deeper than that prints a perfectly unambiguous string that
+;; cannot be read back, and `ty-print-exact` would abort on a type that was legal to construct
+;; (reporting it, misleadingly, as a format ambiguity). `ty-tuple-close` therefore refuses to MINT
+;; one, using TY-MAX-TUPLE-DEPTH, and this gate pins the two numbers together and checks the
+;; boundary case really does round-trip.
+;;
+;; It fails if either bound moves independently: lower TEXT-MAX-DEPTH and the chain below stops
+;; parsing (TERR-DEPTH); raise TY-MAX-TUPLE-DEPTH and the equality assertion goes red.
+(deftest the_deepest_mintable_tuple_still_decodes
+  (assert (= TEXT-MAX-DEPTH TY-MAX-TUPLE-DEPTH))
+  (let [w (stdout) (mut t) (t-ctrl) (mut i) 0]
+    ; a chain of 1-tuples: the cheapest way to reach the depth bound, and the arity where a member
+    ; separator and a refinement separator look most alike
+    (loop
+      (if (>= (load i) TY-MAX-TUPLE-DEPTH) (break)
+        (do (store! t (t-tuple1 (load t)))
+            (store! i (+ (load i) 1))
+            0)))
+    (assert (= (ty-depth (load t)) TY-MAX-TUPLE-DEPTH))
+    (expect-round-trip "the deepest mintable tuple" (load t))
+    ; and its dual, which is a second chain of the same depth
+    (expect-round-trip "the deepest mintable tuple, dualised" (ty-dual (load t)))
+    (fmt w "\n--- a tuple nested {d} deep round-trips, both polarities ---\n"
+         (ty-depth (load t)))
+    0))
+
+; ===========================================================================
+; 11. The axis cross-product
+; ===========================================================================
+;; THE CLAIM THE SWEEP OVER THE INTERNING TABLE CANNOT MAKE. That sweep ranges over ~120 types:
+;; whatever the corpus and the sample set happen to intern. It cannot say that no PAIR of axis
+;; settings collides on one string, because most pairs never occur together in either. This does:
+;; every one of the 1024 kind sets, against three intervals, three widening counters, three float
+;; sizes, two function bitsets and two shape bitsets, each with its dual.
+;;
+;; WHY IT WOULD FAIL IF THE FEATURE WERE REMOVED: stop printing any one axis and that axis's two
+;; settings become one string, so two distinct interned types print identically and `ty-injective?`
+;; rejects both. The debug printer is the worked example, and it is measured in test 2.
+;;
+;; It is LAST in the file on purpose: it interns hundreds of thousands of types, and a sweep that
+;; ran after it would fold this cross-product into itself instead of being gated by name.
+(const XPROD-FLOOR i64 221184)
+
+;; Bits of 3.5, the one float constant that has to be spelled as a bit pattern rather than as a
+;; decimal (see the golden `flt=b4615063718147915776`).
+(const XPROD-FBITS i64 4615063718147915776)
+
+(defn xprod-check [(kinds i64) (lo i64) (hi i64) (iw i64)
+                   (fsz i64) (fbits i64) (fidxs i64) (shapes i64)] (-> i64)
+  (let [t (ty-intern (TVal (val-make kinds lo hi iw fsz fbits fidxs shapes)))]
+    (expect-round-trip "axis cross-product" t)
+    (expect-round-trip "axis cross-product (dual)" (ty-dual t))
+    2))
+
+(defn xprod-fsz-bits [(s i64)] (-> i64) (if (= s FSZ-CON) XPROD-FBITS 0))
+
+(deftest every_axis_combination_is_injective
+  (let [w (stdout) (mut checked) 0 (mut kinds) 0]
+    (loop
+      (if (> (load kinds) VK-MASK) (break)
+        (let [(mut iv) 0]
+          (loop
+            (if (>= (load iv) 3) (break)
+              (let [lo (case (load iv) 0 0 1 10 TY-IMIN)
+                    hi (case (load iv) 0 10 1 0 TY-IMAX)      ; 1 is INVERTED: a high interval
+                    (mut wi) 0]
+                (loop
+                  (if (>= (load wi) 3) (break)
+                    (let [iw (case (load wi) 0 0 1 1 TY-WIDEN-MAX)
+                          (mut fs) 0]
+                      (loop
+                        (if (>= (load fs) 3) (break)
+                          (let [fsz (case (load fs) 0 FSZ-LOW 1 FSZ-CON FSZ-HIGH)
+                                (mut fi) 0]
+                            (loop
+                              (if (>= (load fi) 2) (break)
+                                (let [fidxs (if (= (load fi) 0) -1 6)
+                                      (mut sh) 0]
+                                  (loop
+                                    (if (>= (load sh) 2) (break)
+                                      (do (store! checked
+                                                  (+ (load checked)
+                                                     (xprod-check (load kinds) lo hi iw fsz
+                                                                  (xprod-fsz-bits fsz)
+                                                                  fidxs
+                                                                  (if (= (load sh) 0) -1 5))))
+                                          (store! sh (+ (load sh) 1))
+                                          0)))
+                                  (store! fi (+ (load fi) 1))
+                                  0)))
+                            (store! fs (+ (load fs) 1))
+                            0)))
+                      (store! wi (+ (load wi) 1))
+                      0)))
+                (store! iv (+ (load iv) 1))
+                0)))
+          (store! kinds (+ (load kinds) 1))
+          0)))
+    (fmt w "\n--- axis cross-product ---\n")
+    (fmt w "  {d} types round-tripped, {d} interned\n" (load checked) (ty-count))
+    ; the enumeration really ran: a loop that stopped early would satisfy every individual
+    ; round trip and check almost nothing
+    (assert (>= (load checked) XPROD-FLOOR))))

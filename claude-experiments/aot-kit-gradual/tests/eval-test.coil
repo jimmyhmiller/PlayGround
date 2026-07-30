@@ -143,9 +143,9 @@
       (if (>= (load trial) 2) (break)
         (do (graph-reset! 1)
             (let [a   (a-arg (t-dyn))
-                  iff (n-peephole (n-new2 OP-IF 0 (g-start) a))
-                  t   (n-peephole (n-new1 OP-CPROJ 0 iff))
-                  f   (n-peephole (n-new1 OP-CPROJ 1 iff))
+                  arms (n-if-arms! (n-peephole (n-new2 OP-IF 0 (g-start) a)))
+                  t   (arms-t arms)
+                  f   (arms-f arms)
                   r   (n-new OP-REGION 0)]
               (n-add-def! r NO-NODE) (n-add-def! r t) (n-add-def! r f)
               (let [ph (n-new OP-PHI (t-dyn))]
@@ -174,9 +174,9 @@
       (n-peephole ph)
       (let [nx   (a-bin OP-ADD ph (a-int 1))
             test (a-bin OP-LT ph (a-int 5))
-            iff  (n-peephole (n-new2 OP-IF 0 lp test))
-            body (n-peephole (n-new1 OP-CPROJ 0 iff))
-            exit (n-peephole (n-new1 OP-CPROJ 1 iff))]
+            arms (n-if-arms! (n-peephole (n-new2 OP-IF 0 lp test)))
+            body (arms-t arms)
+            exit (arms-f arms)]
         (n-set-def! ph 2 nx)
         (n-set-def! lp 2 body)
         (let [ret (n-peephole (n-new2 OP-RETURN 0 exit ph))]
@@ -198,9 +198,9 @@
       (n-add-def! ph lp) (n-add-def! ph (a-int 0)) (n-add-def! ph NO-NODE)
       (n-peephole ph)
       (let [nx   (a-bin OP-ADD ph (a-int 1))
-            iff  (n-peephole (n-new2 OP-IF 0 lp keep))
-            body (n-peephole (n-new1 OP-CPROJ 0 iff))
-            exit (n-peephole (n-new1 OP-CPROJ 1 iff))]
+            arms (n-if-arms! (n-peephole (n-new2 OP-IF 0 lp keep)))
+            body (arms-t arms)
+            exit (arms-f arms)]
         (n-set-def! ph 2 nx)
         (n-set-def! lp 2 body)
         (let [ret (n-peephole (n-new2 OP-RETURN 0 exit ph))]
@@ -249,6 +249,183 @@
     ; bind it to something that does not: the cast is unsatisfied
     (ev-reset!) (ev-bind! a (RNull)) (ev-run-nobind BUDGET)
     (assert (= (ev-status) EV-CAST))))
+
+;; The live node with this op, or a hard error. Structural lookups read better than node ids,
+;; which shift whenever a builder gains a node.
+(defn find-live-op [(op i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut found) NO-NODE]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (and (not (n-dead? (load i))) (= (n-op (load i)) op)) (= (load found) NO-NODE))
+                (store! found (load i))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (if (= (load found) NO-NODE)
+        (do (let [w (stderr)] (ps w "\nfind-live-op: no live node with op ")
+              (ps w (op-name op)) (ps w "\n") (g-print-flat w))
+            (abort) NO-NODE)
+      (load found))))
+
+; ---------------------------------------------------------------------------
+; A dead branch nested inside a live one
+; ---------------------------------------------------------------------------
+;; `if (p) return 1; else { if (0) return 2; else return 3; }`
+;;
+;; The reason this is a separate gate and the flat `if(0)` fixture is not enough: peepholing a
+;; multi node's projections one at a time kills the multi in between, and the sibling's rewrite
+;; then reaches for the killed If's control input. On the flat fixture that input is Start, which
+;; is pinned, so the wrong answer happened to be the right node. Here it is an ordinary CProj, and
+;; getting it wrong left the surviving Return reading a DEAD node: `p = 0` reported EV-STUCK
+;; instead of 3. That is the observable half of the same defect `g-verify`'s VERR-DEAD-INPUT sees.
+(deftest a_dead_branch_nested_in_a_live_one_still_runs
+  (corpus-build! CX-NESTED-DEAD)
+  (let [p (find-live-op OP-ARG)]
+    ; the live outer branch still branches, and the inner one is gone entirely
+    (assert (= (n-ty p) (t-dyn)))
+    (ev-reset!) (ev-bind! p (RInt 1)) (ev-run-nobind BUDGET)
+    (assert (= (ev-status) EV-OK))
+    (assert (rt-eq? (ev-result) (RInt 1)))
+    ; the arm the inner if(0) selects: 3, and never `2`, never STUCK
+    (ev-reset!) (ev-bind! p (RInt 0)) (ev-run-nobind BUDGET)
+    (if (= (ev-status) EV-OK) 0 (fail "the nested surviving arm did not run"))
+    (assert (rt-eq? (ev-result) (RInt 3)))))
+
+; ---------------------------------------------------------------------------
+; An identity peephole may not change what the program does
+; ---------------------------------------------------------------------------
+;; `x+0`, `x-0`, `x*1` and `-(-x)` hold over the NUMBERS. A bool is not a number, and unlike a
+;; string it exists in the interpreter's value domain, so this class is observable TODAY rather than
+;; at M5. `ev-arith` deliberately reports EV-TYPE for a non-numeric operand instead of inventing an
+;; answer; an unguarded peephole hands back the bool itself and the optimised build answers `true`
+;; where the raw build reported a type error. Same program, two observable results.
+(defn expect-same-status [(label (slice u8)) (raw i64) (opt i64)] (-> i64)
+  (if (= raw opt) 0
+    (do (let [w (stderr)]
+          (ps w "\nRAW AND OPTIMISED DISAGREE: ") (ps w label)
+          (ps w "\n  raw:       ") (ps w (ev-status-name raw))
+          (ps w "\n  optimised: ") (ps w (ev-status-name opt)) (ps w "\n")
+          (g-print-flat w))
+        (abort) 0)))
+
+(defn bin-identity-both-ways [(label (slice u8)) (op i64) (k i64)] (-> i64)
+  ; RAW: analysed but never rewritten, so no identity can fire. This is the reference answer.
+  (graph-reset! 1)
+  (let [x (n-new1 OP-ARG (t-bool) (g-start))
+        n (n-new3 op 0 NO-NODE x (n-new1 OP-CONST (t-int-con k) (g-start)))
+        r (n-new2 OP-RETURN 0 (g-start) n)]
+    (n-add-def! (g-stop) r)
+    (g-analyze!)
+    (ev-reset!) (ev-bind! x (RBool true)) (ev-run-nobind BUDGET)
+    (let [raw (ev-status)]
+      ; OPTIMISED: peepholed as it is built, which is what a front end does
+      (graph-reset! 1)
+      (let [y (a-arg (t-bool))]
+        (a-ret (a-bin op y (a-int k)))
+        (ev-reset!) (ev-bind! y (RBool true)) (ev-run-nobind BUDGET)
+        (expect-same-status label raw (ev-status)))))
+  0)
+
+(deftest an_identity_peephole_preserves_the_answer_on_a_non_number
+  (bin-identity-both-ways "bool + 0" OP-ADD 0)
+  (bin-identity-both-ways "bool - 0" OP-SUB 0)
+  (bin-identity-both-ways "bool * 1" OP-MUL 1)
+  ; the guarded sibling, as a control: it agreed before the fix too
+  (bin-identity-both-ways "bool * 0" OP-MUL 0)
+
+  ; -(-x)
+  (graph-reset! 1)
+  (let [x (n-new1 OP-ARG (t-bool) (g-start))
+        m (n-new2 OP-MINUS 0 NO-NODE (n-new2 OP-MINUS 0 NO-NODE x))
+        r (n-new2 OP-RETURN 0 (g-start) m)]
+    (n-add-def! (g-stop) r)
+    (g-analyze!)
+    (ev-reset!) (ev-bind! x (RBool true)) (ev-run-nobind BUDGET)
+    (let [raw (ev-status)]
+      (graph-reset! 1)
+      (let [y (a-arg (t-bool))]
+        (a-ret (a-un OP-MINUS (a-un OP-MINUS y)))
+        (ev-reset!) (ev-bind! y (RBool true)) (ev-run-nobind BUDGET)
+        (expect-same-status "-(-bool)" raw (ev-status)))))
+
+  ; NON-VACUITY: the raw side really did report a defect rather than both sides agreeing on a value
+  (graph-reset! 1)
+  (let [x (n-new1 OP-ARG (t-bool) (g-start))
+        n (n-new3 OP-ADD 0 NO-NODE x (n-new1 OP-CONST (t-int-con 0) (g-start)))
+        r (n-new2 OP-RETURN 0 (g-start) n)]
+    (n-add-def! (g-stop) r)
+    (g-analyze!)
+    (ev-reset!) (ev-bind! x (RBool true)) (ev-run-nobind BUDGET)
+    (assert (= (ev-status) EV-TYPE))))
+
+; ---------------------------------------------------------------------------
+; A Cast nothing satisfies must not be optimised away
+; ---------------------------------------------------------------------------
+;; `if (p) a = 1; else a = null; return (int)a;`
+;;
+;; Built the way a parser has to build a merge: the Region and the Phi RAW, the Cast placed on the
+;; phi before anything has been analysed, everything on the worklist, and only then peepholed. At
+;; the moment the Cast is looked at, the phi is still ANY, and `ty-isa ANY int` is TRUE for every
+;; target, so an unguarded `cast-idealize` discharges the check on every seed. The program then
+;; RETURNS null on the arm where the annotation said int, instead of reporting that the compiler
+;; narrowed without proof. EV-CAST is the correct answer here: nothing ever proved `a` is an int.
+(defn build-raw-guarded-merge [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  ; The branch itself is built EAGERLY, which is what the corpus's own diamond fixtures do and what
+  ; a front end does. The MERGE is the part that has to be raw: a two-armed region with no phi yet
+  ; is a degenerate diamond and collapses on sight, so the region, the phi and the Cast on it all
+  ; exist before anything looks at them. That is the ordinary order, not an exotic one, and it is
+  ; the order in which the Cast is peepholed against a phi whose type is still ANY.
+  (let [p    (a-arg (t-dyn))
+        arms (n-if-arms! (n-peephole (n-new2 OP-IF 0 (g-start) p)))
+        r    (let [q (n-new OP-REGION 0)]
+               (n-add-def! q NO-NODE) (n-add-def! q (arms-t arms)) (n-add-def! q (arms-f arms)) q)]
+    (let [ph (n-new OP-PHI (t-dyn))]
+      (n-add-def! ph r)
+      (n-add-def! ph (a-int 1))
+      (n-add-def! ph (a-con (t-null)))
+      (let [c   (n-peephole (n-new2 OP-CAST (t-int) r ph))
+            ret (n-peephole (n-new2 OP-RETURN 0 r c))]
+        (n-add-def! (g-stop) ret)
+        (n-peephole (g-stop))
+        (wl-push! r) (wl-push! ph) (wl-push! c)
+        (iterate!)
+        p))))
+
+(defn live-casts [] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) OP-CAST))
+                (store! k (+ (load k) 1))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+(deftest a_cast_nothing_proved_is_kept_whatever_the_worklist_order
+  (let [(mut s) 0 (mut lost) 0 (mut wrong) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (let [p (build-raw-guarded-merge (+ 1 (load s)))]
+          (if (= (live-casts) 0) (store! lost (+ (load lost) 1)) 0)
+          ; RInt 0 is falsey, so control takes the arm that assigned null
+          (ev-reset!) (ev-bind! p (RInt 0)) (ev-run-nobind BUDGET)
+          (if (= (ev-status) EV-CAST) 0 (store! wrong (+ (load wrong) 1)))
+          (store! s (+ (load s) 1))
+          0)))
+    (if (and (= (load lost) 0) (= (load wrong) 0)) 0
+      (do (let [w (stderr)]
+            (fmt w "\nthe Cast was discharged on {d} of 200 seeds, and {d} runs did not report EV-CAST\n"
+                 (load lost) (load wrong))
+            (ps w "  ") (ev-print w) (ps w "\n")
+            (g-print-flat w))
+          (abort) 0))
+    ; the other arm satisfies the cast, which is what says the fixture is a guard and not a wall
+    (let [p (build-raw-guarded-merge 1)]
+      (ev-reset!) (ev-bind! p (RInt 1)) (ev-run-nobind BUDGET)
+      (assert (= (ev-status) EV-OK))
+      (assert (rt-eq? (ev-result) (RInt 1))))))
 
 ; ---------------------------------------------------------------------------
 ; THE DIFFERENTIAL PROPERTY

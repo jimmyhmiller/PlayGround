@@ -184,6 +184,140 @@
     (mk-ret (mk-bin OP-MUL a (mk-int 0))))
   (check-prog "num*0 survives" "return (arg*int=0);"))
 
+;; AN IDENTITY PEEPHOLE MUST NOT CHANGE THE TYPE OF THE VALUE IT REPLACES.
+;;
+;; `x+0`, `x-0`, `x*1` and `-(-x)` are identities over the NUMBERS and over nothing else. This is a
+;; dynamic language: `"3"+0` is `"30"`, and `-` `*` and unary `-` all coerce, so `"3"-0` is the
+;; number 3, not the string. `arith-compute` says exactly that (it reports `dyn` for a non-numeric
+;; `+` and `num` for the rest), so a peephole that hands back the operand replaces a node whose
+;; type the lattice already decided with a node of a DIFFERENT type, and the graph afterwards
+;; claims a value the language does not produce.
+;;
+;; So the property is mechanical and needs no golden: build the node raw, record what `n-compute`
+;; concluded, peephole it, and require the survivor's type to be the type that was computed. Four
+;; of the six identity rules failed this before the guard was added; the other two (`x*0` and
+;; `x==x`) already carried it.
+;;
+;; NON-VACUITY: the same table asserts the rules still FIRE on an integer operand, so a "fix" that
+;; just disabled the peepholes would fail here instead of passing.
+(defn identity-keeps-its-type [(label (slice u8)) (build i64)] (-> i64)
+  ; `build` is the raw, unpeepholed node; its computed type is the answer the lattice gave
+  (let [want (n-compute build)
+        got  (n-peephole build)]
+    (if (= (n-ty got) want) 0
+      (do (let [w (stderr)]
+            (ps w "\nIDENTITY PEEPHOLE CHANGED THE TYPE: ") (ps w label) (ps w "\n  computed: ")
+            (ty-print w want) (ps w "\n  after the peephole: ")
+            (ty-print w (n-ty got)) (ps w "\n")
+            (g-print-flat w))
+          (abort) 0))
+    0))
+
+(deftest identity-peepholes-do-not-change-a-non-numeric-type
+  ; a string is the clearest witness: every one of these identities is FALSE for it
+  (graph-reset! 1)
+  (let [a (mk-arg (t-str))]
+    (identity-keeps-its-type "str + 0" (n-new3 OP-ADD 0 NO-NODE a (mk-int 0)))
+    (identity-keeps-its-type "str - 0" (n-new3 OP-SUB 0 NO-NODE a (mk-int 0)))
+    (identity-keeps-its-type "str * 1" (n-new3 OP-MUL 0 NO-NODE a (mk-int 1)))
+    (identity-keeps-its-type "str * 0" (n-new3 OP-MUL 0 NO-NODE a (mk-int 0)))
+    (identity-keeps-its-type "-(-str)" (n-new2 OP-MINUS 0 NO-NODE (mk-un OP-MINUS a)))
+    (identity-keeps-its-type "str == str" (n-new3 OP-EQ 0 NO-NODE a a)))
+
+  ; a bool is non-numeric too, and unlike a string it exists in the interpreter's value domain,
+  ; which is what makes the differential half of this gate (eval-test) possible
+  (graph-reset! 1)
+  (let [b (mk-arg (t-bool))]
+    (identity-keeps-its-type "bool + 0" (n-new3 OP-ADD 0 NO-NODE b (mk-int 0)))
+    (identity-keeps-its-type "bool - 0" (n-new3 OP-SUB 0 NO-NODE b (mk-int 0)))
+    (identity-keeps-its-type "bool * 1" (n-new3 OP-MUL 0 NO-NODE b (mk-int 1)))
+    (identity-keeps-its-type "-(-bool)" (n-new2 OP-MINUS 0 NO-NODE (mk-un OP-MINUS b))))
+
+  ; AND THEY STILL FIRE where they are true. Without this half, deleting the four peepholes
+  ; outright would pass the test above.
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (assert (= (n-peephole (n-new3 OP-ADD 0 NO-NODE a (mk-int 0))) a))
+    (assert (= (n-peephole (n-new3 OP-SUB 0 NO-NODE a (mk-int 0))) a))
+    (assert (= (n-peephole (n-new3 OP-MUL 0 NO-NODE a (mk-int 1))) a))
+    (assert (= (n-peephole (n-new2 OP-MINUS 0 NO-NODE (mk-un OP-MINUS a))) a))
+    (assert (n-int-con? (n-peephole (n-new3 OP-MUL 0 NO-NODE a (mk-int 0))) 0))
+    (assert (= (n-ty (n-peephole (n-new3 OP-EQ 0 NO-NODE a a))) (t-bool-con true)))))
+
+; ---------------------------------------------------------------------------
+; Cast: the one rewrite that deletes a type check
+; ---------------------------------------------------------------------------
+;; DISCHARGING A CAST IS IRREVERSIBLE AND IT DELETES A GUARD, so it needs the PROVEN answer.
+;; `ty-isa` is `meet(a,b) == b` and `meet(ANY, t) == t`, so `ty-isa ANY t` is TRUE FOR EVERY t:
+;; an unanalysed input satisfies every conceivable cast. The whole HIGH half behaves that way, not
+;; just ANY, which is why the guard is `ty-high?` and not `!= t-top`.
+;;
+;; This is the ORDER-INDEPENDENCE half: build the program raw so nothing has a type yet, put every
+;; node on the worklist, and let `iterate!` decide the order. Unguarded, the Cast is discharged on
+;; roughly half the seeds and kept on the other half, which is exactly the promise `iterate!`
+;; documents (order comes from the seed, the result must not).
+(defn build-raw-cast [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [x (n-new1 OP-ARG (t-dyn) (g-start))
+        c (n-new2 OP-CAST (t-int) (g-start) x)
+        r (n-new2 OP-RETURN 0 (g-start) c)]
+    (n-add-def! (g-stop) r)
+    (wl-push! x) (wl-push! c) (wl-push! r) (wl-push! (g-stop)) (wl-push! (g-start))
+    (iterate!)
+    c))
+
+(defn count-live-op [(op i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) op))
+                (store! k (+ (load k) 1))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+(deftest a_cast_is_never_discharged_on_an_unanalysed_input
+  (let [(mut s) 0 (mut lost) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (do (build-raw-cast (+ 1 (load s)))
+            ; `dyn` is not `int`, so this Cast can never be discharged, whatever the order was
+            (if (= (count-live-op OP-CAST) 0) (store! lost (+ (load lost) 1)) 0)
+            (store! s (+ (load s) 1))
+            0)))
+    (if (= (load lost) 0) 0
+      (do (let [w (stderr)]
+            (fmt w "\nthe Cast was discharged on {d} of 200 worklist seeds\n" (load lost))
+            (g-print-flat w))
+          (abort) 0))
+    ; the fixture is not vacuous: the Cast really is in the graph to begin with
+    (build-raw-cast 1)
+    (assert (= (count-live-op OP-CAST) 1))))
+
+;; And the CONTRADICTION half, on the ordinary eager path. A phi whose declared type is `int` and
+;; whose every arm is `null` reports `~dyn`: high, but NOT `t-top`, so a guard written as
+;; `!= (t-top)` still discharges the Cast that nothing satisfies. `cast-compute` twelve lines away
+;; already refuses to narrow on a high input (Simple's freeze rule); this is the transformation
+;; half of the same rule.
+(deftest a_cast_survives_a_contradictory_phi
+  (graph-reset! 1)
+  (let [iff  (n-peephole (n-new2 OP-IF 0 (g-start) (mk-arg (t-dyn))))
+        arms (n-if-arms! iff)
+        r    (let [q (n-new OP-REGION 0)]
+               (n-add-def! q NO-NODE) (n-add-def! q (arms-t arms)) (n-add-def! q (arms-f arms)) q)
+        ph   (let [q (n-new OP-PHI (t-int))]
+               (n-add-def! q r) (n-add-def! q (mk-con (t-null))) (n-add-def! q (mk-con (t-null))) q)
+        c    (n-peephole (n-new2 OP-CAST (t-int) r ph))]
+    (let [ret (n-peephole (n-new2 OP-RETURN 0 r c))]
+      (n-add-def! (g-stop) ret) (n-peephole (g-stop)))
+    (wl-push! r) (wl-push! ph)
+    (iterate!)
+    ; the phi's type is high and contradicts `int`, so the check has NOT been discharged: the
+    ; compiler never proved anything and the Cast is the only record of that
+    (assert (ty-high? (n-ty ph)))
+    (assert (= (count-live-op OP-CAST) 1))))
+
 ; ---------------------------------------------------------------------------
 ; Commutativity and value numbering, together
 ; ---------------------------------------------------------------------------

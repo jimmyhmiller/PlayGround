@@ -47,14 +47,17 @@
 ;; The corpus is allowed to GROW; losing a fixture is a silent weakening of every later gate,
 ;; because "on the whole corpus" is only as strong as the corpus. Adding one means raising this
 ;; deliberately, in the same commit as the fixture.
-(const CORPUS-FLOOR i64 14)
+(const CORPUS-FLOOR i64 15)
 
-;; The lattice sample is 28 hand-listed types plus all 28 duals, and 433 of the 3136 ordered
+;; The lattice sample is 32 hand-listed types plus all 32 duals, and 468 of the 4096 ordered
 ;; pairs are strictly comparable. Both are floors for the same reason: narrowing the sample
-;; would leave every monotonicity test passing while checking less.
-(const SAMPLE-FLOOR      i64 56)
-(const MONO-PAIRS-FLOOR  i64 433)
-(const MONO-BIN-FLOOR    i64 48496)    ; 433 pairs x 56 others x 2 operand positions
+;; would leave every monotonicity test passing while checking less. The four types the M3 review
+;; added (a tuple of tuples and its near-twin, a 1-tuple and a 0-tuple) are what carry these from
+;; 28/433 to 32/468, and they are why `meet` not being a lower bound for nested tuples is now a
+;; law failure with printed witnesses instead of a silent miscompile.
+(const SAMPLE-FLOOR      i64 64)
+(const MONO-PAIRS-FLOOR  i64 468)
+(const MONO-BIN-FLOOR    i64 59904)    ; 468 pairs x 64 others x 2 operand positions
 
 ; ---------------------------------------------------------------------------
 ; Located failure reporting. A bare `assert` on a verifier result says a check went wrong but

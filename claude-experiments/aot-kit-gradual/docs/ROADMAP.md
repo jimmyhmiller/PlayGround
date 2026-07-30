@@ -27,9 +27,11 @@ tuples.
 `isa` is reflexive and transitive; `x isa ALL` and `ANY isa x` for all `x`; every ascending
 chain terminates.
 
-**Status: DONE.** `src/ty.coil`, gated by `tests/ty-test.coil`: 23 tests, laws checked
-exhaustively over 28 hand-listed types plus all 28 of their duals (every pair for the binary
-laws, every triple for associativity and `isa` transitivity).
+**Status: DONE.** `src/ty.coil`, gated by `tests/ty-test.coil`: 25 tests, laws checked
+exhaustively over 32 hand-listed types plus all 32 of their duals (every pair for the binary
+laws, every triple for associativity and `isa` transitivity). The sample set was 28 until the M3
+review found that no tuple in it had a tuple MEMBER, which is the one shape that made `meet` stop
+being a lower bound.
 
 Three things this milestone actually caught, which is the argument for gating on laws rather
 than on examples:
@@ -170,7 +172,131 @@ it has a real exit test now and counts to 5. And the interpreter's truthiness is
 against `ty-can-be-truthy?`, because an interpreter that takes a different branch than the compiler
 predicted is worse than no oracle at all.
 
-**Slice 3, the textual IR parser: still to do.**
+**Slice 3a, the exact textual TYPE form: DONE** (`src/text.coil`). Printer and parser live in one
+file because they are one format. `ty-print-exact` decides every axis BY FIELD VALUE, `ty-parse`
+rebuilds through `val-make`/`ty-intern` so no second canonicalisation exists, `ty-render` writes to
+a caller buffer, and `ty-injective?` answers "does this type's text decode back to it" — which
+`ty-print-exact` consults, hard-erroring rather than emitting an ambiguous string.
+
+Four things worth keeping from it:
+
+- **The debug printer is measurably non-injective, and it is now labelled as such.** `ty-print`
+  consults a refinement's KIND BIT before printing it, so an axis whose bit is off is invisible.
+  Two types *currently in the interning table* collide: `+0.0` and `-0.0` both print `flt=0.0`, and
+  `int=[0..10]` at widening counters 0, 1 and 2 are three types with one string. The exact form
+  therefore prints float constants as their signed decimal BIT PATTERN (`{f}` is a fixed 6-digit
+  display and NaN is not reflexive under `fcmp` while interning needs exact identity) and prints
+  the widening counter as `w<n>` whenever it differs from the default the interval implies.
+- **`fmt`'s `{d}` renders INT64_MIN as "-0".** Cosmetic in a dump, a correctness bug in an exact
+  format: `t-fun-con 63` is the bitset INT64_MIN and `fun#-0` decodes to 0. There is now one
+  decimal writer, `dec-print`, used by both printers.
+- **A tuple's members and a value's refinements cannot share a separator.** With a space for both,
+  `[int flt=b1]` is simultaneously a 1-tuple whose member carries a float constant and a 2-tuple,
+  and no lookahead can fix a printer that emits one string for two types. Refinements keep the
+  space (so every value's spelling, and therefore every golden string in the project, is identical
+  under both printers); members take a comma.
+- **It found a live miscompile in the lattice.** `ty-meet-tuples` pushed each member's meet into
+  the shared kid array as it computed it, but meeting a member INTERNS, and interning a tuple
+  appends to that same array, so a tuple of tuples ended up pointing at its inner tuple's members:
+  `[[ctrl int] flt] meet [[ctrl dyn] flt]` returned `[ctrl dyn]`, and `meet` was not a lower
+  bound. Nothing caught it because no tuple in the corpus has a tuple member. Fixed by making
+  every producer reserve its member window first (`ty-tuple-open`/`ty-tuple-put!`/`ty-tuple-close`),
+  which is also what lets a parsed tuple have unbounded arity — needed for M6's `Start`, one output
+  per parameter.
+
+Gate coverage the corpus alone would not give: the corpus contains no partial widening, no
+off-kind refinement and no extreme bitset, so a round-trip test written only over it would pass
+with the widening counter unprinted. The adversarial fixtures and the axis cross-product are the
+defence, and the cross-product is now a test rather than a sentence:
+`every_axis_combination_is_injective` in tests/text-test.coil enumerates all 1024 kind sets x 3
+intervals x 3 widening counters x 3 float sizes x 2 function sets x 2 shape sets, each with its
+dual, and pins the count at 221184 with `XPROD-FLOOR`. It runs in 1.4s. It fails if any axis stops
+being printed, because that axis's two settings then collide on one string and `ty-injective?`
+rejects both; verified by disabling the widening-counter print, which takes it and five other
+tests red. This entry previously CLAIMED that cross-product as existing coverage when the largest
+injectivity gate actually running was the 120-type sweep over the interning table.
+
+**The M3 adversarial review: eight findings, all fixed.** Worth keeping, because six of the eight
+were invisible to a green gate and three were live miscompiles:
+
+- **A Cast was discharged on an unanalysed input.** `ty-isa a b` is `meet(a,b) == b` and
+  `meet(ANY, t) == t`, so `ty-isa ANY t` is TRUE FOR EVERY TARGET. A raw graph starts at ANY, so
+  every Cast on it discharged itself. What that deletes is a TYPE CHECK, D4's only guard mechanism,
+  so it is LAW 3 in its most expensive form: `if (p) a = 1; else a = null; return (int)a;` answered
+  `null` when built merge-first and `EV-CAST` when the analysis ran first. Two answers for one
+  program. `t-top` alone is NOT the guard either: a phi whose declared `int` meets a `null` arm
+  reports `~dyn`, which is high but not ANY, and `ty-isa ~dyn int` is also true. The guard is
+  `ty-high?`, which is what `cast-compute` twelve lines away already used. Gated three ways: 200
+  worklist seeds (unguarded it discharged on 108, i.e. the answer depended on the seed), the
+  contradictory-phi structural case, and the differential run reporting EV-CAST rather than `null`.
+- **A multi node is IN PROGRESS until all of its projections exist**, and that is LAW 4 for a multi
+  node rather than for a merge. Peepholing an If's projections ONE AT A TIME folds the first to
+  XCtrl, which drops the If's last use, so the kill cascade takes the If itself; the sibling is
+  then peepholed against a corpse whose `ins` `n-kill!` cleared but whose `ty` it did not, so the
+  stale tuple still matched and the rewrite read index 0 of a zero-length list. On the flat
+  `if(0)` fixture that read returned Start, which M3 pins, so the wrong answer was accidentally the
+  right node and the corpus stayed green. Nested inside a live branch it returned a DEAD node: a
+  live Return whose control is dead, `VERR-DEAD-INPUT`, and `EV-STUCK` on the arm that should have
+  returned 3. Three layers now: `n-multi-open!`/`n-multi-close!` pin the multi across the window
+  (and `n-if-arms!` is the builder every call site uses), `cproj-idealize` aborts BY NAME on a dead
+  multi instead of reading stale state, and `n-in`/`n-out` are bounds-checked so an out-of-range
+  read can never again return a plausible node id. `15-nested-dead-branch` is the fixture, and it
+  found a SECOND layer while being written: the surviving arm is the If's own control input, so it
+  is used by nothing but the dying If at close time and has to be pinned across the collect too.
+- **Four arithmetic identities were false for their own operands.** `x+0`, `x-0`, `x*1` and `-(-x)`
+  all returned `x` with nothing established about `x`'s type, in a language where `"3"+0` is `"30"`
+  and `-` `*` and unary `-` coerce. Each replaced a node whose type the lattice had computed with a
+  node of a DIFFERENT type. Their siblings in the same block (`x*0`, `x==x`) already carried
+  `ty-int-only?`, so this was an inconsistency, not a decision. It is observable TODAY and not only
+  at M5, because `bool` is non-numeric and does exist in the interpreter's value domain: `ev-arith`
+  reports EV-TYPE while the unguarded peephole answered `true`.
+- **`meet` was not a lower bound for a tuple of tuples, and nothing in the suite could see it.**
+  The fix (reserve the member window) was already in, but `ty-sample` had no tuple with a tuple
+  member, so reverting `ty-meet-tuples` to the pushing form left the whole gate green. `ty-sample`
+  now carries the exact witness pair plus a 1-tuple and a 0-tuple, which puts them under all the
+  M0 laws and their duals: on the reverted producer, three laws break at once (associativity,
+  `a isa meet(a,b)`, `join(a,b) isa a`) with those two as the printed witnesses.
+- **Printing mutated the type table.** `ty-print-exact` round-trips through the PARSER to decide
+  whether it may emit, the parser reserves a member window for every tuple, and the kid array is
+  append-only, so printing an interned tuple leaked its reservation: unbounded in the number of
+  PRINTS, with `ty-count` flat the whole time. Same leak on every repeat construction, and
+  `if-compute` builds its result with `t-tuple2` on every visit, so an M3 fixpoint leaked per If
+  revisit. `ty-tuple-close` now looks the tuple up BEFORE interning and drops the whole tail on a
+  hit. Sound because a pre-existing outer tuple implies every member id pre-existed, hence nothing
+  in that subtree was newly pushed; checked rather than trusted by comparing `ty-count` across the
+  window, and it simply leaves the window in place if the table grew (leaking is the safe answer
+  there; a panic would be worse than the bug it guards).
+- **A legally interned type could be unprintable, and the abort blamed the wrong file.**
+  `ty-print-exact` reported "the exact form of this type is not injective" for a 300-deep tuple
+  whose 604-byte form is perfectly unambiguous; the real cause was the parser's TEXT-MAX-DEPTH
+  budget. Both halves are fixed. `ty-round-trip-check` returns a NAMED cause (RT-OK,
+  RT-PARSE-FAILED, RT-DIFFERENT-ID) and each gets its own message naming the file to read, so
+  "the format is ambiguous" is now said only when the text really decoded to a different type.
+  And the policy question the depth bound raises is answered rather than left open: the format is
+  part of the type's contract, so `TY-MAX-TUPLE-DEPTH` lives in src/ty.coil, `ty-tuple-close`
+  refuses to MINT a type deeper than the format can represent (at construction, with the caller on
+  the stack), and TEXT-MAX-DEPTH is defined as the same constant with a gate pinning them equal and
+  round-tripping a tuple at exactly the bound. Depth is recorded once per interned type, so the
+  check is O(arity). Arity stays unbounded, which is what M6's `Start` actually needs.
+
+**Open, found while gating the above: an irreversible rewrite still acts on a provisional `~ctrl`.**
+`region-dead-path` requires XCtrl exactly rather than merely high, which is the letter of LAW 3.
+But XCtrl is itself an optimistic answer when the If's PREDICATE is unanalysed: `if-compute` reads
+a high predicate as "no value can be here", reports `[~ctrl ~ctrl]`, and a Region peepholed at that
+moment loses both paths and takes the whole branch with it. Building a diamond FULLY raw and then
+running `iterate!` does exactly that; it is why the corpus's raw fixtures use `g-analyze!` (which
+changes no edges) and why the eager path never sees it. The honest guard is not local: the
+projection's own type is not ANY, so `n-inputs-analysed?` does not catch it, and the property
+needed is transitive. This is the case M7's phase structure exists for (analyse to a fixpoint, then
+transform), and it is recorded here rather than papered over with a partial local check. Slice 3b
+must not build a diamond fully raw until it is resolved.
+
+**Slice 3b, the graph round trip: still to do.** LAWS 3, 4 and 5 do not bite in 3a, because nothing
+in it constructs, rewrites or peepholes a graph. They bite in 3b: the graph parser has to build a
+loop's region and phis inside the in-progress window without letting a peephole fire, has to keep
+region and phi arity as one operation, and has to build a multi node's projections inside
+`n-multi-open!`/`n-multi-close!` (the review above turned forgetting that into a named abort rather
+than a miscompile).
 
 ## M4. Memory SSA and shapes
 

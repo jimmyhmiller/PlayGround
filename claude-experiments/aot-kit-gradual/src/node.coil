@@ -220,8 +220,21 @@
 (defn n-dead? [(n i64)] (-> bool) (load (field (nd n) dead)))
 (defn n-nins  [(n i64)] (-> i64)  (al-len [i64] (load (field (nd n) ins))))
 (defn n-nouts [(n i64)] (-> i64)  (al-len [i64] (load (field (nd n) outs))))
-(defn n-in    [(n i64) (i i64)] (-> i64) (al-get (load (field (nd n) ins)) i))
-(defn n-out   [(n i64) (i i64)] (-> i64) (al-get (load (field (nd n) outs)) i))
+;; BOUNDS ARE CHECKED, and this is not defensive programming for its own sake. `al-get` is an
+;; unchecked read and `al-clear!` only resets the length, so a read past the end returns whatever
+;; the buffer still holds: a real node id, from before the list was cleared. That is how
+;; `cproj-idealize` against a killed If (whose `ins` had been cleared by `n-kill!`) handed back a
+;; stale id that HAPPENED to be the right one on the flat fixture and the wrong one, a dead node,
+;; on a nested branch. A plausible value is the worst possible answer here; the index being out of
+;; range is a bug in the caller and has to say so.
+(defn n-in    [(n i64) (i i64)] (-> i64)
+  (if (or (< i 0) (>= i (n-nins n)))
+      (do (panic-corrupt "n-in: input index out of range") NO-NODE)
+    (al-get (load (field (nd n) ins)) i)))
+(defn n-out   [(n i64) (i i64)] (-> i64)
+  (if (or (< i 0) (>= i (n-nouts n)))
+      (do (panic-corrupt "n-out: use index out of range") NO-NODE)
+    (al-get (load (field (nd n) outs)) i)))
 
 (defn n-set-ty! [(n i64) (t i64)] (-> i64) (store! (field (nd n) ty) t) 0)
 
@@ -696,6 +709,68 @@
 
 (defn n-xctrl [] (-> i64) (n-peephole (n-new OP-XCTRL 0)))
 
+;; LAW 4 FOR A MULTI NODE. A merge is in progress until its last input arrives; an If is in
+;; progress until its last PROJECTION exists, and for the same reason: a peephole fired inside
+;; that window sees a node whose neighbourhood is only half built.
+;;
+;; The concrete failure. Build `if (0) return 2; else return 3;` one projection at a time. The
+;; true arm's type is XCtrl, so peepholing it folds it to XCtrl and `n-subsume!` kills the raw
+;; projection. That was the If's ONLY use, so `n-del-use!` reports the If unused and the kill
+;; cascade kills the If itself. The false arm is then created on a dead node and peepholed
+;; against a dead node: `n-kill!` cleared the If's inputs but not its TYPE, so the tuple still
+;; matches, the sibling still reads as XCtrl, and the rewrite reaches for the If's control input,
+;; which no longer exists. Before `n-in` was bounds-checked that read returned a stale buffer
+;; word, and on a NESTED dead branch the stale word was itself a dead node: the surviving Return
+;; ended up with a dead control input and the arm that should have run reported EV-STUCK.
+;;
+;; So the multi is PINNED across the whole window. `n-del-use!` reports a pinned node as still
+;; used, which is the existing mechanism the roots and every `n-subsume!` replacement already
+;; rely on, so nothing new has to be invented for it.
+;;
+;; The pin is not a substitute for dead-code elimination: an If both of whose projections
+;; resolved to something else really is garbage, and leaving it live would hold its predicate
+;; alive and print a branch the program no longer has. `n-multi-close!` collects it, which is why
+;; the graph this produces is the same graph the naive build produced in the cases where the naive
+;; build happened to work (node NUMBERING can differ, since the pin changes nothing about when
+;; nodes are created but a caller may now create the two projections adjacently; nothing in the
+;; suite encodes a node id, deliberately).
+(defn n-multi-open! [(m i64)] (-> i64) (n-keep! m) m)
+
+(defn n-multi-close! [(m i64)] (-> i64)
+  (n-unkeep! m)
+  ; still pinned means an OUTER window is open on the same node, and that window owns the collect
+  (if (and (and (not (n-dead? m)) (= (n-keeps m) 0)) (= (n-nouts m) 0)) (n-kill! m) 0)
+  m)
+
+;; An If's two control projections, built and peepholed as ONE operation, which is the way every
+;; caller should get them: the open/close pair above is the primitive, and forgetting to use it is
+;; what `cproj-idealize`'s named abort exists to catch. A multi with an arity the IR does not build
+;; by hand yet (M6's `Start`, one output per parameter) opens and closes the window itself.
+(defstruct Arms [(t i64) (f i64)])
+(defn arms-t [(a Arms)] (-> i64) (load (field a t)))
+(defn arms-f [(a Arms)] (-> i64) (load (field a f)))
+
+(defn n-if-arms! [(iff i64)] (-> Arms)
+  (n-multi-open! iff)
+  (let [(mut r) (zeroed Arms)]
+    (store! (field r t) (n-peephole (n-new1 OP-CPROJ 0 iff)))
+    (store! (field r f) (n-peephole (n-new1 OP-CPROJ 1 iff)))
+    ; THE ARMS ARE PINNED ACROSS THE CLOSE, and this is the second half of the same bug rather
+    ; than belt and braces. Closing the window may kill the If, and the sibling-is-dead rewrite
+    ; hands back the If's OWN CONTROL INPUT, so the surviving arm is at that moment used by
+    ; nothing but the If that is about to die. On a flat `if(0)` that input is Start, which is
+    ; pinned, and the fixture looked correct; nested inside another branch it is an ordinary
+    ; CProj, and the cascade killed the arm we were about to return. The caller then wired a live
+    ; Return to a dead node: `g-verify` says VERR-DEAD-INPUT and the arm that should have run
+    ; reports EV-STUCK. Held only in these two slots, the arms need exactly what `n-peephole`
+    ; gives a replacement across `n-subsume!`.
+    (n-keep! (load (field r t)))
+    (n-keep! (load (field r f)))
+    (n-multi-close! iff)
+    (n-unkeep! (load (field r t)))
+    (n-unkeep! (load (field r f)))
+    (load r)))
+
 ; ============================================================================
 ; JavaScript truthiness
 ; ============================================================================
@@ -912,17 +987,31 @@
 (defn cproj-idealize [(n i64)] (-> i64)
   (let [m (n-in n 0) idx (n-aux n)]
     (if (= m NO-NODE) NO-NODE
-      (match (ty-get (n-ty m))
-        (TTuple [off len]
-          ; XCtrl, not merely high: see the note on phi-single-input
-          (if (and (< idx len) (= (ty-kid off idx) (t-xctrl))) (n-xctrl)
-            ; the sibling is dead, so the If does not branch: this projection IS its control
-            (if (and (and (= (n-op m) OP-IF) (= len 2))
-                     (= (ty-kid off (- 1 idx)) (t-xctrl)))
-                (n-in m 0)
-              NO-NODE)))
-        (TBot [] NO-NODE) (TTop [] NO-NODE) (TCtrl [] NO-NODE) (TXCtrl [] NO-NODE)
-        (TVal [v] NO-NODE)))))
+      ; A LIVE projection whose multi node has been KILLED is graph corruption, and it is
+      ; reachable by building a multi's projections one at a time: peepholing the first one to
+      ; XCtrl drops the multi's last use, so the kill cascade takes the multi with it, and the
+      ; sibling is then peepholed against a corpse. `n-kill!` clears `ins` but leaves `ty`, so
+      ; the stale tuple below still matches and the read of input 0 returns a buffer word. Named
+      ; abort, not NO-NODE: NO-NODE would leave a live Return whose control is a dead node, which
+      ; is the miscompile (a whole arm of the program silently vanishes) rather than a warning.
+      ; The window that prevents it is `n-multi-open!`/`n-multi-close!`.
+      (if (n-dead? m)
+          (do (panic-corrupt "cproj-idealize: the multi node was killed before all of its projections existed; build them inside n-multi-open!/n-multi-close!")
+              NO-NODE)
+        (match (ty-get (n-ty m))
+          (TTuple [off len]
+            ; every read of the tuple is bounds-checked against the arity the TYPE declares: aux
+            ; is a slot index and a slot index past the end is a malformed node, not a rewrite
+            (if (or (< idx 0) (>= idx len)) NO-NODE
+              ; XCtrl, not merely high: see the note on phi-single-input
+              (if (= (ty-kid off idx) (t-xctrl)) (n-xctrl)
+                ; the sibling is dead, so the If does not branch: this projection IS its control
+                (if (and (and (= (n-op m) OP-IF) (= len 2))
+                         (= (ty-kid off (- 1 idx)) (t-xctrl)))
+                    (n-in m 0)
+                  NO-NODE))))
+          (TBot [] NO-NODE) (TTop [] NO-NODE) (TCtrl [] NO-NODE) (TXCtrl [] NO-NODE)
+          (TVal [v] NO-NODE))))))
 
 ;; The one value every live path contributes, ignoring self-references (a loop phi fed by its
 ;; own back edge), or NO-NODE when the paths disagree.
@@ -976,7 +1065,23 @@
 (defn cast-idealize [(n i64)] (-> i64)
   ; The cast is discharged: the input already satisfies it, so the check costs nothing. This is
   ; how a proven type annotation disappears from the graph entirely.
-  (if (ty-isa (n-in-ty n 1) (n-aux n)) (n-in n 1) NO-NODE))
+  ;
+  ; ANALYSIS versus TRANSFORMATION, for the fifth time in this file, and the most expensive one:
+  ; what this deletes is a TYPE CHECK, the only mechanism D4 gives for a guard. So it needs the
+  ; PROVEN answer, not a provisional one.
+  ;
+  ; `ty-isa` reads backwards from subtyping intuition: `isa a b` is `meet(a,b) == b`, and
+  ; `meet(ANY, x) == x`, so `ty-isa ANY t` is TRUE FOR EVERY TARGET t. An unanalysed input still
+  ; sits at ANY (that is what `n-new` seeds a type to, and what `n-in-ty` reports for a missing
+  ; input), so without a guard every Cast on a raw graph discharges itself. `t-top` alone is not
+  ; the test either: the whole HIGH half behaves the same way, and the extra cases are exactly
+  ; the contradiction cases a guard exists for. A phi whose declared `int` meets a `null` arm
+  ; reports `~dyn`, `ty-isa ~dyn int` is true, and the Cast that nothing satisfies disappears
+  ; instead of reporting that the compiler narrowed without proof.
+  ;
+  ; `cast-compute` twelve lines up already guards on exactly this condition (Simple's freeze
+  ; rule). The compute half was right and the irreversible half was not.
+  (if (and (not (ty-high? (n-in-ty n 1))) (ty-isa (n-in-ty n 1) (n-aux n))) (n-in n 1) NO-NODE))
 
 ; ============================================================================
 ; idealize: local rewrites
@@ -1019,28 +1124,49 @@
     (store! (field (nd n) hash) 0)
     n))
 
+;; AN IDENTITY IS AN IDENTITY OVER A DOMAIN, AND THE DOMAIN HAS TO BE PROVEN.
+;;
+;; This is a dynamic language: `+` on a non-number concatenates or calls valueOf, and `- * /`
+;; coerce. `arith-compute` already says so, which is why it reports `dyn` for a non-numeric `+`
+;; and `num` for the others. So none of the four identities below holds for an arbitrary operand:
+;; "3"+0 is "30", "3"-0 is the NUMBER 3, "3"*1 is 3, and -(-"3") is 3. Not one of those is the
+;; string "3".
+;;
+;; Replacing the node by its operand is irreversible, and it replaces a node whose type the
+;; lattice already computed with a node of a DIFFERENT type, so the graph afterwards claims a
+;; value the language does not produce. That is a miscompile, not a lost optimisation, and it is
+;; observable today: the interpreter reports EV-TYPE for arithmetic on a bool (rather than
+;; inventing an answer), while the unguarded peephole hands back the bool itself.
+;;
+;; `mul-idealize`'s `x * 0` and `cmp-idealize`'s `x == x` right below already carry the guard, so
+;; the missing ones were an inconsistency rather than a decision. `ty-int-only?` is the right
+;; test even where all numerics would be sound (x-0, x*1, -(-x)), because it is what the siblings
+;; use; and for `+` it is REQUIRED rather than merely consistent, since -0.0 + 0 is +0.0 and so 0
+;; is not an identity for floats either.
 (defn add-idealize [(n i64)] (-> i64)
-  (let [r (n-in n 2)]
-    (if (n-int-con? r 0) (n-in n 1) NO-NODE)))   ; x + 0 = x
+  (let [l (n-in n 1) r (n-in n 2)]
+    ; x + 0 = x, integers only: on a non-number `+` concatenates, and for floats -0.0 + 0 is +0.0
+    (if (and (n-int-con? r 0) (ty-int-only? (n-ty l))) l NO-NODE)))
 
 (defn sub-idealize [(n i64)] (-> i64)
   (let [l (n-in n 1) r (n-in n 2)]
-    (if (n-int-con? r 0) l                       ; x - 0 = x
+    (if (and (n-int-con? r 0) (ty-int-only? (n-ty l))) l    ; x - 0 = x, numbers only: "3"-0 is 3
       ; x - x = 0, but only for integers: NaN - NaN is NaN, not 0
       (if (and (= l r) (ty-int-only? (n-ty l))) (n-const (t-int-con 0))
         NO-NODE))))
 
 (defn mul-idealize [(n i64)] (-> i64)
   (let [l (n-in n 1) r (n-in n 2)]
-    (if (n-int-con? r 1) l                       ; x * 1 = x
+    (if (and (n-int-con? r 1) (ty-int-only? (n-ty l))) l    ; x * 1 = x, numbers only
       ; x * 0 = 0 only when x cannot be NaN or an infinity, so integers only
       (if (and (n-int-con? r 0) (ty-int-only? (n-ty l))) (n-const (t-int-con 0))
         NO-NODE))))
 
 (defn minus-idealize [(n i64)] (-> i64)
-  ; -(-x) = x, for integers; for floats it also holds, but only because negation is exact
+  ; -(-x) = x once x is known numeric; on a non-number the INNER minus already coerced, so the
+  ; pair is not the identity at all
   (let [a (n-in n 1)]
-    (if (= (n-op a) OP-MINUS) (n-in a 1) NO-NODE)))
+    (if (and (= (n-op a) OP-MINUS) (ty-int-only? (n-ty (n-in a 1)))) (n-in a 1) NO-NODE)))
 
 (defn cmp-idealize [(n i64)] (-> i64)
   (let [l (n-in n 1) r (n-in n 2)]

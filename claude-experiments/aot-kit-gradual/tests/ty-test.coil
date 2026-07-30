@@ -309,6 +309,61 @@
                       (t-tuple3 (t-ctrl) (t-int) (t-int)))
              (t-bot))))
 
+;; THE SHAPE THAT MADE `meet` STOP BEING A LOWER BOUND, named rather than left to be inferred from
+;; a law failure. Meeting a member INTERNS it, and interning a tuple appends to the same kid array
+;; the outer member window lives in, so a producer that pushed as it went described the INNER tuple:
+;; `[[ctrl int] flt] meet [[ctrl dyn] flt]` came back as `[ctrl dyn]`.
+;;
+;; The pair also lives in `ty-sample` (28 and 29), which puts it under all nine law tests and their
+;; duals. Reverting `ty-meet-tuples` to the pushing form breaks three of those laws at once
+;; (associativity, `a isa meet(a,b)`, and `join(a,b) isa a`) with these two as the witnesses, which
+;; is how we know neither this assertion nor the sample entries are decoration.
+(deftest a-tuple-whose-member-is-a-tuple-meets-componentwise
+  (assert (= (ty-meet (t-tuple2 (t-tuple2 (t-ctrl) (t-int)) (t-flt))
+                      (t-tuple2 (t-tuple2 (t-ctrl) (t-dyn)) (t-flt)))
+             (t-tuple2 (t-tuple2 (t-ctrl) (t-dyn)) (t-flt))))
+  ; and the lower-bound law directly, on the same pair
+  (let [a (t-tuple2 (t-tuple2 (t-ctrl) (t-int)) (t-flt))
+        b (t-tuple2 (t-tuple2 (t-ctrl) (t-dyn)) (t-flt))]
+    (assert (ty-isa a (ty-meet a b)))
+    (assert (ty-isa b (ty-meet a b))))
+  ; the two arities only `t-tuple-list` can mint, so the sample entries are not vacuous either
+  (assert (= (ty-meet (t-tuple1 (t-int)) (t-tuple1 (t-flt))) (t-tuple1 (t-num))))
+  (assert (= (ty-meet (t-tuple0) (t-tuple0)) (t-tuple0)))
+  (assert (= (ty-meet (t-tuple0) (t-tuple1 (t-int))) (t-bot))))
+
+;; THE MEMBER WINDOW IS RECLAIMED WHEN THE TUPLE ALREADY EXISTS. The kid array is append-only and
+;; `ty-tuple-open` has to reserve before the members can be known, so every REPEAT construction of
+;; an interned tuple used to abandon its reservation: growth unbounded in the number of CALLS, with
+;; `ty-count` flat the whole time. `if-compute` builds its result with `t-tuple2` on every visit, so
+;; an M3 fixpoint leaked two words per If revisit.
+;;
+;; It fails by exactly +2N if the reclamation is removed, which is why the loop count is large
+;; enough to be unmistakable and the assertion is equality rather than a bound.
+(deftest building-an-interned-tuple-does-not-grow-the-kid-array
+  (let [a (t-tuple2 (t-ctrl) (t-int))
+        b (t-tuple2 (t-ctrl) (t-dyn))
+        ; intern each shape ONCE first, so the snapshot below is taken with every one of them
+        ; already in the table: this gate is about REPEATS, and a first construction legitimately
+        ; grows both the table and the kid array
+        w1 (t-tuple1 (t-ctrl))
+        w0 (t-tuple0)
+        wm (ty-meet a b)
+        n0 (ty-count)
+        k0 (ty-kids-len)
+        (mut i) 0]
+    (loop
+      (if (>= (load i) 500) (break)
+        (do (t-tuple2 (t-ctrl) (t-int))       ; already interned: nothing new to record
+            (ty-meet a b)                     ; and neither is the meet
+            (t-tuple1 (t-ctrl))
+            (t-tuple0)
+            (store! i (+ (load i) 1))
+            0)))
+    ; the types themselves are unchanged, which is what makes the kid growth pure leak
+    (assert (= (ty-count) n0))
+    (assert (= (ty-kids-len) k0))))
+
 (deftest floats-are-a-three-element-chain
   (assert (= (ty-meet (t-flt-con 1.5) (t-flt-con 1.5)) (t-flt-con 1.5)))
   (assert (= (ty-meet (t-flt-con 1.5) (t-flt-con 2.5)) (t-flt)))

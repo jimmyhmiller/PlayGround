@@ -21,7 +21,6 @@
 (defn mk-int [(v i64)] (-> i64) (n-const (t-int-con v)))
 (defn mk-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
 (defn mk-if [(ctrl i64) (pred i64)] (-> i64) (n-peephole (n-new2 OP-IF 0 ctrl pred)))
-(defn mk-cproj [(iff i64) (idx i64)] (-> i64) (n-peephole (n-new1 OP-CPROJ idx iff)))
 (defn new-region2 [(a i64) (b i64)] (-> i64)
   (let [r (n-new OP-REGION 0)]
     (n-add-def! r NO-NODE) (n-add-def! r a) (n-add-def! r b) r))
@@ -69,8 +68,9 @@
 (deftest a_diamond_dominates_from_the_branch
   (graph-reset! 1)
   (let [iff (mk-if (g-start) (mk-arg (t-dyn)))
-        t   (mk-cproj iff 0)
-        f   (mk-cproj iff 1)
+        arms-iff (n-if-arms! iff)
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)
         r   (n-peephole (new-region2 t f))]
     (ret-to r (mk-int 7))
     (iterate!)
@@ -81,8 +81,9 @@
   ; a diamond that survives, because the arms carry different values
   (graph-reset! 1)
   (let [iff (mk-if (g-start) (mk-arg (t-dyn)))
-        t   (mk-cproj iff 0)
-        f   (mk-cproj iff 1)
+        arms-iff (n-if-arms! iff)
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)
         r   (new-region2 t f)
         ph  (let [p (n-new OP-PHI (t-dyn))]
               (n-add-def! p r) (n-add-def! p (mk-int 1)) (n-add-def! p (mk-int 2)) p)]
@@ -118,9 +119,10 @@
       (n-add-def! ph NO-NODE)
       (n-peephole ph)
       (let [nx  (mk-bin OP-ADD ph (mk-int 1))
-            iff (mk-if lp (mk-arg (t-dyn)))
-            body (mk-cproj iff 0)
-            exit (mk-cproj iff 1)]
+            iff  (mk-if lp (mk-arg (t-dyn)))
+            arms-iff (n-if-arms! iff)
+            body (arms-t arms-iff)
+            exit (arms-f arms-iff)]
         (n-set-def! ph 2 nx)
         (n-set-def! lp 2 body)
         (ret-to exit ph)
@@ -154,13 +156,13 @@
       (n-add-def! inner outer)
       (n-add-def! inner NO-NODE)
       (n-peephole inner)
-      (let [iin  (mk-if inner (mk-arg (t-dyn)))
-            ibody (mk-cproj iin 0)
-            iexit (mk-cproj iin 1)]
+      (let [arms-iin (n-if-arms! (mk-if inner (mk-arg (t-dyn))))
+            ibody (arms-t arms-iin)
+            iexit (arms-f arms-iin)]
         (n-set-def! inner 2 ibody)
-        (let [iout (mk-if iexit (mk-arg (t-dyn)))
-              obody (mk-cproj iout 0)
-              oexit (mk-cproj iout 1)]
+        (let [arms-iout (n-if-arms! (mk-if iexit (mk-arg (t-dyn))))
+              obody (arms-t arms-iout)
+              oexit (arms-f arms-iout)]
           (n-set-def! outer 2 obody)
           (ret-to oexit (mk-int 0))
           (iterate!)
