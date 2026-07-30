@@ -126,6 +126,81 @@ impl Parinfer {
         !in_string && stack.is_empty()
     }
 
+    /// Byte ranges of the file's top-level segments, in order and contiguous
+    /// (their concatenation is the whole source).
+    ///
+    /// A new segment starts at a line that begins a top-level form: no leading
+    /// whitespace, first character an opener, and not inside a string literal.
+    /// Blank and comment-only lines immediately *preceding* such a line are
+    /// leading trivia of the segment they introduce, not a tail of the previous
+    /// one — so a repaired segment always ends on a code line and a synthesized
+    /// closer can never land after a comment.
+    ///
+    /// Note this deliberately does not consult paren depth. When some form is
+    /// broken, depth downstream of it is meaningless; a column-0 opener is the
+    /// same top-level boundary signal the dedent rule in `balance` already uses.
+    fn top_level_segments(source: &str) -> Vec<std::ops::Range<usize>> {
+        let mut starts: Vec<usize> = Vec::new();
+        let mut in_string = false;
+        let mut escape_next = false;
+        // Start of the current run of blank/comment-only lines, i.e. the trivia
+        // that would introduce the next top-level form.
+        let mut trivia_start: Option<usize> = None;
+        let mut offset = 0usize;
+
+        for line in source.split_inclusive('\n') {
+            let line_start = offset;
+            offset += line.len();
+            let content = line.trim_end_matches(['\n', '\r']);
+            let trimmed = content.trim();
+
+            if !in_string {
+                if trimmed.is_empty() || trimmed.starts_with(';') {
+                    trivia_start = trivia_start.or(Some(line_start));
+                } else {
+                    let starts_form = content.chars().next().is_some_and(|c| matches!(c, '(' | '[' | '{'));
+                    if starts_form {
+                        starts.push(trivia_start.unwrap_or(line_start));
+                    }
+                    trivia_start = None;
+                }
+            }
+
+            // Track string state across the line so a column-0 `(` inside a
+            // multi-line string is not mistaken for a top-level form.
+            let mut in_comment = false;
+            for ch in content.chars() {
+                if escape_next {
+                    escape_next = false;
+                    continue;
+                }
+                if ch == '\\' && !in_comment {
+                    escape_next = true;
+                    continue;
+                }
+                if ch == '"' && !in_comment {
+                    in_string = !in_string;
+                    continue;
+                }
+                if !in_string && ch == ';' {
+                    in_comment = true;
+                }
+            }
+            escape_next = false;
+        }
+
+        // Anything before the first top-level form is its own leading segment.
+        if starts.first().copied() != Some(0) {
+            starts.insert(0, 0);
+        }
+        starts
+            .iter()
+            .enumerate()
+            .map(|(i, &start)| start..starts.get(i + 1).copied().unwrap_or(source.len()))
+            .filter(|r| !r.is_empty())
+            .collect()
+    }
+
     pub fn balance(&self) -> Result<String> {
         // If the input is already well-formed there are no missing/extra parens to
         // fix, so preserve it verbatim. The indentation-driven balancing below
@@ -140,11 +215,37 @@ impl Parinfer {
             return Ok(self.source.clone());
         }
 
-        let lines: Vec<&str> = self.source.lines().collect();
+        // Repair is per top-level form. The whole-file check above only spares a
+        // file where *nothing* is broken; without this, one damaged form sends
+        // every other form through the indentation reflow too, which rewrites
+        // valid neighbours whose indentation doesn't track nesting (a `cond`
+        // whose result is indented past its multi-line predicate, for instance).
+        // Well-formed segments pass through byte-for-byte; only the broken ones
+        // are reflowed, and their synthesized closers stay inside them.
+        let mut out = String::with_capacity(self.source.len());
+        for range in Self::top_level_segments(&self.source) {
+            let segment = &self.source[range];
+            if Self::is_well_formed(segment) {
+                out.push_str(segment);
+            } else {
+                // Balance the segment's lines, then restore its trailing newline
+                // (the line-based pass works on `lines()`, which drops it).
+                let body = segment.strip_suffix('\n').unwrap_or(segment);
+                out.push_str(&Self::balance_region(body)?);
+                if segment.len() != body.len() {
+                    out.push('\n');
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Indentation-driven (Parinfer-style) repair of one region of source.
+    fn balance_region(source: &str) -> Result<String> {
+        let lines: Vec<&str> = source.lines().collect();
         let mut result_lines = Vec::new();
         let mut delim_stack: Vec<DelimInfo> = Vec::new();
         let mut in_string = false;
-        let mut in_comment = false;
         // Set when the final line ends on a dangling `\` (an incomplete character
         // literal). Like an unclosed string, that is an unterminated token we can't
         // sensibly complete, so it blocks auto-closing at EOF and keeps balancing
@@ -157,8 +258,8 @@ impl Parinfer {
             let mut new_line = String::new();
             let mut escape_next = false;
 
-            // Reset comment state at start of each line (comments don't span lines)
-            in_comment = false;
+            // Comments don't span lines, so this is per-line state.
+            let mut in_comment = false;
 
             // Check if line ends with multiple closing delimiters
             let trimmed = line.trim_end();
@@ -263,8 +364,14 @@ impl Parinfer {
             trailing_escape = escape_next;
 
             // After processing the line, check if we need to auto-close delimiters
-            // based on indentation of the next non-empty line
-            if !in_string && !in_comment && !escape_next {
+            // based on indentation of the next non-empty line.
+            //
+            // A trailing line comment does NOT block this: comments end at the
+            // newline, so the structure is closed here regardless — the closers
+            // just have to go *before* the comment (see `insert_closers`). Gating
+            // on `in_comment` used to defer them to some later line, or drop them
+            // entirely when the last code line of the region carried a comment.
+            if !in_string && !escape_next {
                 let next_indent = Self::find_next_indent(&lines, line_idx);
 
                 // Check if next line starts with closing delimiters
@@ -311,7 +418,7 @@ impl Parinfer {
                         if next_indent < line_indent && dedents_past_opener {
                             let delim_type = open_info.delim_type;
                             delim_stack.pop();
-                            new_line.push(delim_type.close_char());
+                            Self::insert_closer(&mut new_line, delim_type.close_char());
                         } else {
                             break;
                         }
@@ -322,19 +429,70 @@ impl Parinfer {
             result_lines.push(new_line);
         }
 
-        // Close any remaining open delimiters at the end of file
-        // Add them all to the last line (Lisp convention)
+        // Close any remaining open delimiters at the end of the region, on its
+        // last line that carries code (Lisp convention). Comment-only and blank
+        // trailing lines are skipped, and closers go before a trailing comment,
+        // so a synthesized closer is never swallowed by comment text.
         // Only if we're not inside a string (unclosed strings leave delimiters
         // unclosed) and not on a dangling char-literal escape.
-        if !in_string && !in_comment && !trailing_escape {
-            if let Some(last_line) = result_lines.last_mut() {
+        if !in_string && !trailing_escape && !delim_stack.is_empty() {
+            let last_code = result_lines
+                .iter()
+                .rposition(|l| !Self::is_blank_or_comment(l))
+                .or_else(|| result_lines.len().checked_sub(1));
+            if let Some(line) = last_code.and_then(|i| result_lines.get_mut(i)) {
                 while let Some(open_info) = delim_stack.pop() {
-                    last_line.push(open_info.delim_type.close_char());
+                    Self::insert_closer(line, open_info.delim_type.close_char());
                 }
             }
         }
 
         Ok(result_lines.join("\n"))
+    }
+
+    /// Append a closing delimiter to the code on `line`, before any trailing
+    /// line comment and before trailing whitespace.
+    fn insert_closer(line: &mut String, closer: char) {
+        let at = Self::code_end(line);
+        line.insert(at, closer);
+    }
+
+    /// Byte index just past the last code character on `line`: before a trailing
+    /// `;` comment (one outside a string literal) and before trailing whitespace.
+    /// Whitespace that is part of a token — inside a string, or escaped as a
+    /// character literal like `\ ` — counts as code, so a closer is never
+    /// inserted into the middle of one.
+    fn code_end(line: &str) -> usize {
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut end = 0;
+        for (idx, ch) in line.char_indices() {
+            let past = idx + ch.len_utf8();
+            if escape_next {
+                escape_next = false;
+                end = past;
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    escape_next = true;
+                    end = past;
+                }
+                '"' => {
+                    in_string = !in_string;
+                    end = past;
+                }
+                ';' if !in_string => break,
+                _ if in_string || !ch.is_whitespace() => end = past,
+                _ => {}
+            }
+        }
+        end
+    }
+
+    fn is_blank_or_comment(line: &str) -> bool {
+        let trimmed = line.trim();
+        trimmed.is_empty() || trimmed.starts_with(';')
     }
 
     fn find_next_indent(lines: &[&str], current_idx: usize) -> usize {
@@ -764,6 +922,112 @@ mod tests {
             .filter(|(a, b)| a != b)
             .collect();
         assert_eq!(diffs, vec![("  (* y 2)", "  (* y 2))")]);
+    }
+
+    #[test]
+    fn test_valid_form_after_broken_form_is_untouched() {
+        // Reported bug: `locally-broken` is missing one `)` on its `loop`. The
+        // following form is already balanced, in normal Coil style — a multiline
+        // `cond` predicate whose result is indented PAST the predicate's own
+        // column. Repairing the first form must not reflow the second: only
+        // broken top-level forms go through the indentation pass.
+        let source = "\
+(defn locally-broken [(n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (store! i (iadd (load i) 1))))
+    (load i)))
+
+(defn already-valid [(decl i64) (actual i64)] (-> i64)
+  (cond (and (icmp-eq decl 5)
+             (not (and (icmp-eq decl 6)
+                       (icmp-eq actual 7))))
+          (iadd decl actual)
+        :else 0))
+";
+        let broken = source.replacen("(load i) 1))))", "(load i) 1)))", 1);
+        assert!(!Parinfer::is_well_formed(&broken), "perturbation must break it");
+        assert_eq!(Parinfer::new(&broken).balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_unclosed_opener_closes_at_same_indent_sibling() {
+        // `(module compile` is missing its closer and the next line is a sibling
+        // at the SAME indent (column 0), so there is no dedent to trigger the
+        // close. The closer must still land on line 1 instead of riding the stack
+        // and nesting every following form.
+        let source = "\
+(module compile
+(import \"a.coil\" :use *)
+(const MAX 100)
+
+(defstruct Foo
+  [(x i64)])";
+        let expected = "\
+(module compile)
+(import \"a.coil\" :use *)
+(const MAX 100)
+
+(defstruct Foo
+  [(x i64)])";
+        assert_eq!(Parinfer::new(source).balance().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_closer_goes_before_trailing_comment() {
+        // A synthesized closer must be inserted before a trailing line comment,
+        // never after it — appended after, it would be swallowed by the comment
+        // and the output would still be unbalanced.
+        let source = "(defn f [] (-> i64)\n  (g 1)  ; trailing note";
+        let expected = "(defn f [] (-> i64)\n  (g 1))  ; trailing note";
+        let out = Parinfer::new(source).balance().unwrap();
+        assert_eq!(out, expected);
+        assert!(Parinfer::is_well_formed(&out));
+    }
+
+    #[test]
+    fn test_broken_segment_ending_in_comment_line_is_closed() {
+        // The region's last code line carries a comment and is followed by
+        // comment-only lines. Closers belong on the code line, before its
+        // comment; a comment must not block the close entirely.
+        let source = "\
+(defsum Type
+  (TInt [(bits i64)]
+  (TBool []))  ; last variant
+
+; trailing prose
+";
+        let out = Parinfer::new(source).balance().unwrap();
+        assert!(Parinfer::is_well_formed(&out), "must be repaired: {out:?}");
+        assert!(out.contains("; last variant"), "comment kept: {out:?}");
+        assert!(out.ends_with("; trailing prose\n"), "trivia kept: {out:?}");
+        assert_eq!(
+            Parinfer::new(&out).balance().unwrap(),
+            out,
+            "idempotent"
+        );
+    }
+
+    #[test]
+    fn test_segmentation_ignores_column_zero_paren_inside_string() {
+        // A multi-line string with a column-0 `(` is not a top-level form start,
+        // so the form containing it must not be split (and, being well-formed,
+        // must survive the repair of the broken form after it verbatim).
+        let source = "\
+(defn ir [] (-> i64)
+  (llvm-ir i64 []
+\"(this is not a form
+ret i64 0\"))
+
+(defn broken [] (-> i64)
+  (g 1)
+";
+        let out = Parinfer::new(source).balance().unwrap();
+        assert!(out.starts_with(
+            "(defn ir [] (-> i64)\n  (llvm-ir i64 []\n\"(this is not a form\nret i64 0\"))\n"
+        ), "string form untouched: {out:?}");
+        assert!(Parinfer::is_well_formed(&out), "broken form repaired: {out:?}");
     }
 
     #[test]
