@@ -49,8 +49,9 @@
 ; ============================================================================
 ; The grammar
 ; ============================================================================
-;;   type    := "ALL" | "ANY" | "ctrl" | "~ctrl" | tuple | value
+;;   type    := "ALL" | "ANY" | "ctrl" | "~ctrl" | mem | tuple | value
 ;;   tuple   := "[" ( type ("," type)* )? "]"
+;;   mem     := "mem#" dec " " type          ; the type must be a value, "ANY" or "ALL"
 ;;   value   := kinds attached? (" " label spec)*
 ;;   kinds   := "dyn" | "~dyn" | "~"? name ("|" name)*
 ;;   name    := "undefined"|"null"|"bool"|"int"|"num"|"flt"|"str"|"sym"|"bigint"|"obj"|"fun"
@@ -158,6 +159,18 @@
 ;; separate "unknown top-level form", because there is no way to tell one from a misspelled kind.
 (const TERR-UNKNOWN-FORM     i64 17)
 
+;; The memory production. `mem` is matched as a WORD and then `#` is required, rather than the
+;; whole `mem#` being one literal, so a text that starts `mem` and then goes wrong is reported as
+;; a broken memory form instead of falling through to the value parser and coming back as
+;; TERR-UNKNOWN-KIND about a kind nobody wrote.
+(const TERR-MEM-NO-HASH      i64 18)  ; `mem` not followed by the alias bitset's `#`
+(const TERR-MEM-NO-SPACE     i64 19)  ; `mem#N` with no space and contents after it
+;; The contents parsed, but to something `t-mem` refuses to hold: a control edge, a tuple, or
+;; another memory type. This is a report about the INPUT, not an assertion: `mem#1 ctrl` is a text
+;; a hand-written graph can easily contain, and the alternative to naming it here is `t-mem`'s
+;; abort with nothing to say about which text caused it.
+(const TERR-MEM-CONTENTS     i64 20)
+
 (defn text-err-name [(c i64)] (-> (slice u8))
   (case c
     TERR-NONE             "TERR-NONE"
@@ -178,6 +191,9 @@
     TERR-TUPLE-COUNT      "TERR-TUPLE-COUNT"
     TERR-TRAILING         "TERR-TRAILING"
     TERR-UNKNOWN-FORM     "TERR-UNKNOWN-FORM"
+    TERR-MEM-NO-HASH      "TERR-MEM-NO-HASH"
+    TERR-MEM-NO-SPACE     "TERR-MEM-NO-SPACE"
+    TERR-MEM-CONTENTS     "TERR-MEM-CONTENTS"
     "TERR-?"))
 
 ; ============================================================================
@@ -421,7 +437,13 @@
     (TCtrl  [] (ps w "ctrl"))
     (TXCtrl [] (ps w "~ctrl"))
     (TVal   [v] (val-write-exact w v))
-    (TTuple [off len] (tuple-write-exact w off len))))
+    (TTuple [off len] (tuple-write-exact w off len))
+    ; THE SAME WRITER THE DEBUG PRINTER USES, from src/ty.coil, for the same reason the int axis
+    ; shares `int-range-print`: a memory type has no kind bits to consult, so there is nothing for
+    ; an exact printer to decide differently, and one spelling is one thing to keep injective. The
+    ; recursion into the contents goes through `ty-print`, whose value form is lossy — which is
+    ; exactly why `mem-print` is the DEBUG form and this arm writes the contents itself.
+    (TMem [a c] (do (ps w "mem#") (dec-print w a) (ps w " ") (ty-write-exact w c) 0))))
 
 ; ============================================================================
 ; Parsing
@@ -663,14 +685,43 @@
             ; a type that was perfectly legal to construct
             (ty-tuple-close tb)))))))
 
+;; The memory form. THE DEPTH COUNTER IS BUMPED even though a legal memory type nests exactly one
+;; level, because the CHECK that the contents is a value happens after the contents has been
+;; parsed, and a hostile `mem#1 mem#1 mem#1 …` would otherwise recurse on the C stack until it
+;; overflowed rather than reporting TERR-MEM-CONTENTS. Same mechanism as `parse-tuple`, same
+;; reason: this parser recurses, so every recursive production pays into one budget.
+(defn parse-mem [(c (ptr Cur))] (-> i64)
+  (let [p (text-state)]
+    (if (>= (load (field p depth)) TEXT-MAX-DEPTH) (do (text-fail! c TERR-DEPTH) TY-NO-ID)
+      (do (store! (field p depth) (+ (load (field p depth)) 1))
+          (let [t (parse-mem-body c)]
+            (store! (field p depth) (- (load (field p depth)) 1))
+            t)))))
+
+(defn parse-mem-body [(c (ptr Cur))] (-> i64)
+  (if (not (cur-eat-ch? c CH-HASH)) (do (text-fail! c TERR-MEM-NO-HASH) TY-NO-ID)
+    (let [bits (parse-dec c)]
+      (if (not (text-ok?)) TY-NO-ID
+        (if (not (cur-eat-ch? c CH-SPACE)) (do (text-fail! c TERR-MEM-NO-SPACE) TY-NO-ID)
+          (let [inner (parse-type c)]
+            (if (not (text-ok?)) TY-NO-ID
+              ; asked BEFORE `t-mem`, so a malformed text is a named parse failure and not an abort
+              ; inside the constructor with no byte offset to report
+              (if (not (ty-mem-contents-ok? inner))
+                  (do (text-fail! c TERR-MEM-CONTENTS) TY-NO-ID)
+                (t-mem bits inner)))))))))
+
+;; `mem` is tried before the value parser because no kind name begins with it, so there is no text
+;; that both productions could claim.
 (defn parse-type [(c (ptr Cur))] (-> i64)
   (if (cur-eat? c "ALL") (t-bot)
     (if (cur-eat? c "ANY") (t-top)
       (if (cur-eat? c "~ctrl") (t-xctrl)              ; before "ctrl", and before "~" + names
         (if (cur-eat? c "ctrl") (t-ctrl)
-          (if (= (cur-peek c) CH-LBRACK) (parse-tuple c)
-            (if (cur-eof? c) (do (text-fail! c TERR-UNKNOWN-FORM) TY-NO-ID)
-              (parse-value c))))))))
+          (if (cur-eat? c "mem") (parse-mem c)
+            (if (= (cur-peek c) CH-LBRACK) (parse-tuple c)
+              (if (cur-eof? c) (do (text-fail! c TERR-UNKNOWN-FORM) TY-NO-ID)
+                (parse-value c)))))))))
 
 ; ============================================================================
 ; Entry points

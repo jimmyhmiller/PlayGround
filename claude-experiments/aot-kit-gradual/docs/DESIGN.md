@@ -221,6 +221,42 @@ load. Shape *sets* let a polymorphic site stay precise (two shapes, two inline p
 of collapsing to a dictionary lookup. Shape transitions (adding a field) are edges in a shape
 graph built at compile time from the whole program.
 
+**The table**, `src/shape.coil`. Shape 0 is the field-less root. `shape-transition s name ty`
+returns the shape with that field added, and is **memoised on `(s, name)`**, so the transition
+graph a whole-program build produces is a function of the program and not of visit order, and
+re-adding a field is the same edge. Fields live in a reserved window of one side array addressed
+by `(off, len)`, exactly as tuple members do and for exactly the reason recorded at
+`ty-tuple-open`: a producer that interns while filling a window corrupts it, so windows are
+reserved and then written in place, and a slot nobody filled is a named panic.
+
+**Layout is stated once.** Field `i` of any shape sits at `8 * (SHAPE-HEADER-WORDS + i)` with
+`SHAPE-HEADER-WORDS = 1`, which is the only statement anywhere of where the hidden-class word
+sits. The stride is 8 because [D3](DECISIONS.md#d3-nan-boxing-with-boxunbox-as-real-ir-nodes)
+makes a dynamic value one 64-bit word, so there is no per-field size and no alignment arithmetic.
+
+**Bounds, with named failures.** `SHAPE-MAX` and `ALIAS-MAX` are both 64 and both live in
+`src/ty.coil`, because both are the width of a single-word bitset *in the lattice*: `Val.shapes`
+and `TMem.aliases`. They are not policy numbers. Allocating the 65th aborts by name at the site
+that turns a number into a bit (`t-obj-shape`, `t-mem-alias`, and `shape-transition`), because
+`1 << 64` is not "shape 64", it is the EMPTY set, which is the *top* of that axis and reads as
+"no object fits" — an optimistic analysis handed that would delete live code. Given that a
+transition is 4a's only alias allocator and the transition graph is a tree, aliases always equal
+shapes − 1, so `SHAPE-MAX` is reached one edge before `ALIAS-MAX` can be; that relation is
+asserted rather than assumed (`shape-alias-invariant-ok?`) precisely because 4b adds a second
+alias allocator (the header word) and it stops holding then.
+
+**Two things a shape id does not do.** It is opaque to `meet`, exactly as a `fidx` is, so the
+lattice never asks whether a shape exists and "is this a defined shape" is answerable only by the
+table. And a shape never appears *in* a type; only its id does. So the shape table has no
+round-trippable textual form yet, and `shape-print` is deliberately a debug form only.
+
+**"This shape does not carry that field" is a legitimate answer, not a stub.** `shape-find-field`
+returns absent, and Simple's `Load.compute` depends on that: a field missing from the pointer's
+shape lifts to TOP on a high pointer and falls to the declared type on a low one, which is how a
+two-shape site keeps two inline paths. Every other refusal in the table is a named hard error: a
+duplicate field on a chain, an existing edge whose declared type disagrees, a field declared to
+hold something a memory word cannot hold, an undefined shape id, and both bounds.
+
 ---
 
 ## 4. Memory, effects, and objects
@@ -235,6 +271,46 @@ out of ordinary dataflow on the memory edges, with no separate alias analysis pa
 is that allocation must name every alias it touches: a `New` node takes the memory of every
 alias it initialises and produces a projection per alias, which is what makes a freshly
 allocated object's fields provably not aliased with anything else.
+
+### The memory type
+
+A memory state is a lattice element in its own right: `TMem(aliases, contents)`, a separate
+production of `Ty` rather than an axis of `Val`, because memory is not a value — it never boxes,
+never flows through arithmetic, and `meet`ing it with a value is a genuine "unrelated types were
+mixed" and falls to `ALL`. It prints as `mem#<alias-bits> <contents>`. The contents is restricted
+to a value, `ANY` or `ALL`, since a field holds one NaN-boxed word.
+
+**The alias axis is a bitset, and Simple's collapse rule is deliberately not adopted.** Simple's
+`TypeMem.xmeet` reads `alias == that._alias ? alias : 1`: two unequal aliases collapse to its
+"all of memory" alias. Here `meet` is bitwise OR and `dual` is complement, which is what §3's
+uniformity rule already demands of *every* axis, and the reason is arithmetic rather than taste:
+
+```
+  meet(mem#1 dyn, mem#2 dyn) = mem#3 dyn        (bitwise OR: alias classes {0} and {1})
+  mem#3 dyn  isa  mem#-1 dyn   and   mem#3 dyn != mem#-1 dyn
+```
+
+so `mem#3 dyn` is a lower bound of both inputs and lies **strictly above** the collapse rule's
+answer. The collapse rule therefore returns a lower bound that is not the *greatest* one, and it
+is not self-dual, so `dual-reverses-isa` fails on the pair. Note which law does *not* catch it:
+`meet-is-a-lower-bound` still passes, because the collapse answer is still a lower bound. And note
+the failure mode that matters more: with no memory type in `ty-sample`, **nothing** fails, which is
+exactly how M3's `ty-meet-tuples` bug sat behind a green suite because no tuple in the sample had a
+tuple member. The axis choice and the sample entries are therefore one change, not a change and a
+follow-up.
+
+**Widening reaches the contents.** `ty-iwide`, `ty-with-iwide`, `ty-widen` and `ty-widen-from` all
+delegate through `TMem` into its contents. They used to answer 0 / identity for every non-`TVal`,
+and a memory `Phi` on a loop back edge meets a fresh memory type every iteration: with the counter
+invisible, no widening ever lands and the interval creeps by one step per round for ever. The
+symptom is a hang inside a loop-phi fixpoint with nothing reported, which is the worst class of bug
+this project has hit, and the fix is three match arms.
+
+**The delimiter constraint on the printed form is hard, not cosmetic.** `mem#…` contains neither
+`:` nor `<`, because `src/gtext.coil` splits a graph line by scanning for the first `<` after the
+head and the first `:` after ` <- `. A type that printed `mem#2:int` would make every graph line
+carrying memory report `GERR-NO-SEP`. `mem@2` and `mem<2>` were both rejected for that reason, and
+the constraint is asserted byte-wise by a gate rather than left as a comment.
 
 ---
 
@@ -382,6 +458,7 @@ is the natural host here.
 | Value lattice | int / float / pointer / struct | kind bitset with per-kind refinements; `Dyn` is a real element; unions first class |
 | Numbers | separate int and float types | `int` and `flt` kinds unified as `number`, split back apart by inference |
 | Objects | declared structs, fixed layout | shapes (hidden classes) with a compile-time transition graph, and shape sets |
+| Memory type's alias axis | `alias == that.alias ? alias : 1` collapses to "all of memory" | a bitset: `meet` is OR, `dual` is complement. The collapse rule is not a greatest lower bound and is not self-dual; see §4 for the two-line counterexample |
 | Type annotations | checked by the front end | discharged by whole-program inference, guarded where not provable |
 | Polymorphism | monomorphic by construction | speculative specialisation with a retained generic version |
 | GC | `calloc`, never freed | safepoints with relocating projections, abstract barriers, stack maps, verified invariants |

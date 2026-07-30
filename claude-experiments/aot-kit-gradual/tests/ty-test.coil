@@ -420,6 +420,198 @@
   (assert (fcmp-eq (bits-f64 (f64-bits -12.25)) -12.25)))
 
 ; ---------------------------------------------------------------------------
+; Memory types (M4 slice 4a)
+; ---------------------------------------------------------------------------
+;; THE LAWS ABOVE ARE ONLY ABOUT MEMORY IF THE SAMPLE SET CONTAINS MEMORY, and that is exactly the
+;; shape of the M3 finding this file already carries: `ty-meet-tuples` was not a lower bound for a
+;; year of commits and every law stayed green because no tuple in the sample had a tuple member. So
+;; the composition of `ty-sample` is asserted, not assumed: the nine law tests are checked over
+;; 41 * 2 types, and this census says which of them are the ones the memory axis needs.
+(defn ty-mem? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TMem [a c] true)
+    (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+    (TVal [v] false) (TTuple [o l] false)))
+
+;; The alias bitset, or 0 for anything that is not a memory state. Only ever called behind
+;; `ty-mem?`, and the non-memory answer is a legitimate "no alias set here" rather than a stub: a
+;; census needs a total function to fold with.
+(defn ty-mem-aliases [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TMem [a c] a)
+    (TBot [] 0) (TTop [] 0) (TCtrl [] 0) (TXCtrl [] 0) (TVal [v] 0) (TTuple [o l] 0)))
+
+(defn ty-mem-contents [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TMem [a c] c)
+    (TBot [] TY-NO-ID) (TTop [] TY-NO-ID) (TCtrl [] TY-NO-ID) (TXCtrl [] TY-NO-ID)
+    (TVal [v] TY-NO-ID) (TTuple [o l] TY-NO-ID)))
+
+;; How many shape bits a value type names, or 0 for anything else. A two-shape object type is what
+;; a shape-polymorphic site keeps instead of collapsing to a dictionary lookup, so the sample has
+;; to contain one or `meet` on the shape axis is only ever exercised on single bits.
+(defn ty-shape-bits [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (popcount64 (& (val-shapes v) -1)))
+    (TBot [] 0) (TTop [] 0) (TCtrl [] 0) (TXCtrl [] 0) (TTuple [o l] 0) (TMem [a c] 0)))
+
+;; Does this tuple have a MEMORY member? 4b's `New` produces exactly that shape (control, then the
+;; memory it initialised), so the composite is under the laws before the node exists.
+(defn ty-tuple-has-mem? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TTuple [off len]
+      (let [(mut i) 0 (mut found) false]
+        (loop
+          (if (or (>= (load i) len) (load found)) (break)
+            (do (if (ty-mem? (ty-kid off (load i))) (store! found true) 0)
+                (store! i (+ (load i) 1))
+                0)))
+        (load found)))
+    (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+    (TVal [v] false) (TMem [a c] false)))
+
+(deftest the_sample_set_carries_memory_and_multi_shape_object_types
+  (let [w (stdout) n (ty-sample-count)
+        (mut mems) 0 (mut multi-alias) 0 (mut full-alias) 0 (mut empty-alias) 0
+        (mut pinned) 0 (mut multi-shape) 0 (mut tuple-mem) 0 (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [t (ty-sample (load i))
+              a (ty-mem-aliases t)]
+          (if (ty-mem? t)
+              (do (store! mems (+ (load mems) 1))
+                  (if (> (popcount64 a) 1) (store! multi-alias (+ (load multi-alias) 1)) 0)
+                  (if (= a -1) (store! full-alias (+ (load full-alias) 1)) 0)
+                  (if (= a 0) (store! empty-alias (+ (load empty-alias) 1)) 0)
+                  ; a memory state whose CONTENTS is a constant, which is what a store of a literal
+                  ; produces and is the only entry that exercises the contents axis below `dyn`
+                  (if (ty-const? (ty-mem-contents t)) (store! pinned (+ (load pinned) 1)) 0)
+                  0)
+            0)
+          (if (> (ty-shape-bits t) 1) (store! multi-shape (+ (load multi-shape) 1)) 0)
+          (if (ty-tuple-has-mem? t) (store! tuple-mem (+ (load tuple-mem) 1)) 0)
+          (store! i (+ (load i) 1))
+          0)))
+    (fmt w "\n--- the sample set's memory census over {d} entries ---\n" n)
+    (fmt w "  {d} memory types: {d} multi-alias, {d} all-of-memory, {d} empty-alias, {d} pinned contents\n"
+         (load mems) (load multi-alias) (load full-alias) (load empty-alias) (load pinned))
+    (fmt w "  {d} multi-shape object types, {d} tuples with a memory member\n"
+         (load multi-shape) (load tuple-mem))
+    ; Every one of these is a class the nine laws above would otherwise never see. Removing the
+    ; memory entries from `ty-sample` is precisely how the collapse rule could be reinstated with a
+    ; green suite, so the sample's composition is a gate and not a convention.
+    (assert (>= (load mems) 5))
+    (assert (>= (load multi-alias) 2))
+    (assert (>= (load full-alias) 1))
+    (assert (>= (load empty-alias) 1))
+    (assert (>= (load pinned) 1))
+    (assert (>= (load multi-shape) 1))
+    (assert (>= (load tuple-mem) 1))
+    ; and the duals are in the sample too, which is where the alias complement lives
+    (assert (ty-mem? (ty-sample-dual 34)))
+    (assert (= (ty-mem-aliases (ty-sample-dual 34)) (bits-dual (ty-mem-aliases (ty-sample 34)) -1)))))
+
+;; THE MEMORY SUBLATTICE'S SHAPE. A memory state is not a value: it never boxes, never flows through
+;; arithmetic, and meeting it with anything else is a genuine "unrelated types were mixed".
+(deftest a_memory_state_is_unrelated_to_every_other_production
+  (let [m (t-mem-alias 0 (t-dyn))]
+    (assert (= (ty-meet m (t-int)) (t-bot)))
+    (assert (= (ty-meet m (t-dyn)) (t-bot)))
+    (assert (= (ty-meet m (t-ctrl)) (t-bot)))
+    (assert (= (ty-meet m (t-xctrl)) (t-bot)))
+    (assert (= (ty-meet m (t-tuple2 (t-ctrl) (t-int))) (t-bot)))
+    ; ANY is the meet identity and ALL absorbs, here as everywhere
+    (assert (= (ty-meet m (t-top)) m))
+    (assert (= (ty-meet m (t-bot)) (t-bot)))
+    ; the two extremes of the sublattice are each other's dual
+    (assert (= (ty-dual (t-mem-none)) (t-mem-all)))
+    (assert (= (ty-dual (t-mem-all)) (t-mem-none)))
+    ; and `high` is a question about BOTH axes: the empty alias set with ANY contents, and nothing
+    ; else, is the top
+    (assert (ty-high? (t-mem-none)))
+    (assert (not (ty-high? (t-mem-all))))
+    (assert (not (ty-high? m)))
+    (assert (not (ty-high? (t-mem 0 (t-dyn)))))            ; empty aliases, LOW contents
+    (assert (ty-high? (t-mem 0 (t-nodyn))))                ; empty aliases, high contents
+    ; a memory state is never a constant: there is no Const node whose runtime value is one, and
+    ; saying otherwise would license `n-peephole` to put one in the graph
+    (assert (not (ty-const? (t-mem-alias 0 (t-int-con 7)))))
+    (assert (not (ty-const? (t-mem-all))))))
+
+;; THE ALIAS AXIS IS A BITSET, AND THIS IS THE ARITHMETIC THAT SAYS WHY (DESIGN.md §4). Simple's
+;; `TypeMem.xmeet` reads `alias == that._alias ? alias : 1`: two unequal aliases collapse to its
+;; "all of memory" alias. That answer is a lower bound but not the GREATEST one, so it is not a
+;; meet at all.
+(deftest memory_meets_by_union_so_the_collapse_rule_is_not_the_greatest_lower_bound
+  (let [a (t-mem-alias 0 (t-dyn))
+        b (t-mem-alias 1 (t-dyn))
+        u (ty-meet a b)]
+    ; the union, spelled as the bitset DESIGN.md writes: classes {0} and {1} meet to {0,1}
+    (assert (= u (t-mem 3 (t-dyn))))
+    (assert (= (ty-mem-aliases u) 3))
+    ; it is a lower bound of both
+    (assert (ty-isa a u))
+    (assert (ty-isa b u))
+    ; and it lies STRICTLY ABOVE the collapse rule's answer, which is what makes that rule wrong:
+    ; a greatest lower bound cannot have another lower bound above it
+    (assert (ty-isa u (t-mem -1 (t-dyn))))
+    (assert (!= u (t-mem -1 (t-dyn))))
+    (assert (!= u (t-mem-all)))
+    ; the contents axis meets on its own, independently of the aliases
+    (assert (= (ty-meet (t-mem-alias 0 (t-int-con 3)) (t-mem-alias 0 (t-int-con 5)))
+               (t-mem-alias 0 (t-int-range 3 5))))
+    (assert (= (ty-meet (t-mem-alias 0 (t-int)) (t-mem-alias 1 (t-flt)))
+               (t-mem 3 (t-num))))))
+
+;; SIMPLE'S RULE, IMPLEMENTED HERE, so the reason the axis is a bitset is a test and not a comment.
+;; Without this the bitset could be "simplified" back to the collapse rule and the suite would only
+;; go red if a memory type happened to still be in `ty-sample`.
+;;
+;; The reference representation is a pair (alias NUMBER, contents id), which is what Simple carries;
+;; `ref-alias-meet` is its `xmeet` line verbatim and alias 1 is its "all of memory".
+(defn ref-alias-meet [(aa i64) (ab i64)] (-> i64) (if (= aa ab) aa 1))
+
+;; `a isa b` is `meet(a,b) == b`, componentwise on that representation.
+(defn ref-mem-isa? [(aa i64) (ca i64) (ab i64) (cb i64)] (-> bool)
+  (and (= (ref-alias-meet aa ab) ab) (= (ty-meet ca cb) cb)))
+
+(deftest dual_reverses_isa_on_memory_and_the_collapse_rule_does_not
+  (let [w (stdout)]
+    ; ---- THE HAND-COMPUTED WITNESS, under the reference rule ----
+    ; a = mem#{2} int      b = mem#{1} ALL
+    ; meet(a,b): the aliases are unequal so they collapse to 1; meet(int, ALL) = ALL. That is b, so
+    ; a isa b.
+    (assert (= (ref-alias-meet 2 1) 1))
+    (assert (= (ty-meet (t-int) (t-bot)) (t-bot)))
+    (assert (ref-mem-isa? 2 (t-int) 1 (t-bot)))
+    ; ~b = mem#{1} ANY     ~a = mem#{2} ~int    (Simple's dual keeps the alias and dualises the
+    ; contents). meet(~b, ~a) collapses to alias 1 again and meet(ANY, ~int) = ~int, so the answer
+    ; is mem#{1} ~int, which is NOT ~a: the alias is 1 and ~a's is 2.
+    (assert (= (ty-dual (t-bot)) (t-top)))
+    (assert (= (ty-meet (t-top) (ty-dual (t-int))) (ty-dual (t-int))))
+    (assert (= (ref-alias-meet 1 2) 1))
+    (assert (not (ref-mem-isa? 1 (t-top) 2 (ty-dual (t-int)))))
+    ; so under the collapse rule `a isa b` is true while `~b isa ~a` is false: dual is not
+    ; order-reversing, which is a lattice law and not a matter of taste
+    (ps w "\n--- Simple's collapse rule on mem#2 int vs mem#1 ALL: a isa b, but not ~b isa ~a ---\n")
+
+    ; ---- THE SAME WITNESS IN THIS LATTICE ----
+    (let [a (t-mem-alias 2 (t-int))
+          b (t-mem-alias 1 (t-bot))]
+      ; the union, so a is NOT below b at all, and the law holds because both sides are false
+      (assert (= (ty-meet a b) (t-mem (| (<< 1 2) (<< 1 1)) (t-bot))))
+      (assert (not (ty-isa a b)))
+      (assert (not (ty-isa (ty-dual b) (ty-dual a))))
+      (assert (= (ty-isa a b) (ty-isa (ty-dual b) (ty-dual a))))
+      ; AND A PAIR WHERE IT REALLY DOES HOLD, so the equality above is not two falses agreeing:
+      ; widen b's alias set to contain a's and the order relation appears, in both polarities
+      (let [b2 (t-mem (| (<< 1 2) (<< 1 1)) (t-bot))]
+        (assert (ty-isa a b2))
+        (assert (ty-isa (ty-dual b2) (ty-dual a)))
+        (assert (= (ty-isa a b2) (ty-isa (ty-dual b2) (ty-dual a))))))
+    0))
+
+; ---------------------------------------------------------------------------
 ; Termination: an ascending chain has to stop climbing
 ; ---------------------------------------------------------------------------
 (deftest widening-terminates
@@ -453,6 +645,73 @@
           (if (not (ty-isa a w1)) (fail1 "widening did not make a less specific" a) 0)
           (store! i (+ (load i) 1))
           0)))))
+
+;; A MEMORY TYPE HAS TO CARRY ITS CONTENTS' WIDENING FUEL, and this is the cheap version of a bug
+;; that is otherwise very expensive. `ty-iwide`, `ty-with-iwide` and `ty-widen-spent` used to answer
+;; 0 / return the type unchanged for every non-`TVal`. 4b's memory Phi on a loop back edge meets a
+;; fresh memory type every iteration; if the counter inside it is invisible then no widening ever
+;; lands, the interval creeps by one step per round for ever, and the symptom is a HANG inside a
+;; loop-phi fixpoint with nothing reported.
+;;
+;; WHY IT WOULD FAIL IF THE FEATURE WERE REMOVED: with `ty-iwide` blind to `TMem`, the fuel read out
+;; of `prev` is 0 on every trip, `ty-widen-from` therefore always answers "one more step", the loop
+;; below never settles and `settled-at` stays -1. The shape of the loop is the loop phi's: the fuel
+;; comes from the PREVIOUS type, not from the meet, because integer arithmetic mints a fresh type
+;; with a full tank.
+(deftest widening_reaches_a_fixpoint_through_a_memory_type
+  (let [w (stdout)]
+    ; the counter is visible through the wrapper, on both a fresh and an already-spent contents
+    (assert (= (ty-iwide (t-mem-alias 0 (t-int-con 7))) 0))
+    (assert (= (ty-iwide (t-mem-alias 0 (t-int))) TY-WIDEN-MAX))
+    (assert (= (ty-iwide (t-mem-alias 0 (t-int-con 7))) (ty-iwide (t-int-con 7))))
+    (assert (= (ty-iwide (t-mem-alias 0 (t-int))) (ty-iwide (t-int))))
+    ; and setting it reaches the contents, leaving the alias set alone
+    (let [t (ty-with-iwide (t-mem-alias 0 (t-int-range 0 10)) 2)]
+      (assert (= (ty-iwide t) 2))
+      (assert (= (ty-mem-aliases t) 1))
+      (assert (= t (t-mem-alias 0 (ty-with-iwide (t-int-range 0 10) 2)))))
+
+    ; the loop-phi fixpoint, over a memory state whose contents is an induction variable
+    (let [(mut t) (t-mem-alias 0 (t-int-con 0)) (mut i) 1 (mut settled-at) -1]
+      (loop
+        (if (> (load i) 200) (break)
+          (let [next (ty-widen-from (load t)
+                                    (ty-meet (load t) (t-mem-alias 0 (t-int-con (load i)))))]
+            (if (and (= next (load t)) (= (load settled-at) -1))
+                (store! settled-at (load i)) 0)
+            (store! t next)
+            (store! i (+ (load i) 1))
+            0)))
+      (fmt w "\n--- a memory type's contents widened to a fixpoint at step {d}: " (load settled-at))
+      (ty-print w (load t))
+      (ps w " ---\n")
+      (assert (!= (load settled-at) -1))
+      (assert (< (load settled-at) 10))
+      ; it settles on the bottom of the interval axis with the alias set and the kinds intact: the
+      ; fuel was spent inside the memory type, not around it
+      (assert (= (load t) (t-mem-alias 0 (t-int))))
+      (assert (= (ty-mem-aliases (load t)) 1)))
+
+    ; and `ty-widen` alone reaches a fixpoint on every memory sample, which the sweep in
+    ; `widening-terminates` also covers now that the sample set carries them
+    (let [n (nsamples) (mut mems) 0 (mut i) 0]
+      (loop
+        (if (>= (load i) n) (break)
+          (let [a (sample (load i))]
+            (if (ty-mem? a)
+                (let [w1 (ty-widen a) w2 (ty-widen w1) w3 (ty-widen w2)
+                      w4 (ty-widen w3) w5 (ty-widen w4)]
+                  (if (!= w5 w4) (fail1 "a memory type did not reach a widening fixpoint" a) 0)
+                  (if (not (ty-isa a w1)) (fail1 "widening a memory type made it MORE specific" a) 0)
+                  (store! mems (+ (load mems) 1))
+                  0)
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+      (fmt w "  {d} memory types widened to a fixpoint\n" (load mems))
+      ; the sweep really found memory types: with none in the sample this test would be four
+      ; assertions about `t-mem-alias 0` and nothing else
+      (assert (>= (load mems) 10)))))
 
 ; ---------------------------------------------------------------------------
 ; The printer is readable, and total

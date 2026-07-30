@@ -585,7 +585,11 @@
     (TTop   [] VK-NONE)
     (TCtrl  [] VK-NONE)
     (TXCtrl [] VK-NONE)
-    (TTuple [o l] VK-NONE)))
+    (TTuple [o l] VK-NONE)
+    ; a memory state is not a value, so it joins control and tuples: no kinds at all, which is what
+    ; makes `ty-numeric?` and `ty-int-only?` false for it and keeps the int-axis readers below
+    ; unreachable on one
+    (TMem [a c] VK-NONE)))
 
 (defn ty-numeric? [(t i64)] (-> bool)
   (let [k (ty-kinds-of t)] (and (!= k VK-NONE) (= (& k (^ VK-NUM -1)) 0))))
@@ -595,11 +599,11 @@
 (defn ty-int-lo [(t i64)] (-> i64)
   (match (ty-get t) (TVal [v] (val-ilo v))
     (TBot [] TY-IMIN) (TTop [] TY-IMAX) (TCtrl [] TY-IMIN) (TXCtrl [] TY-IMIN)
-    (TTuple [o l] TY-IMIN)))
+    (TTuple [o l] TY-IMIN) (TMem [a c] TY-IMIN)))
 (defn ty-int-hi [(t i64)] (-> i64)
   (match (ty-get t) (TVal [v] (val-ihi v))
     (TBot [] TY-IMAX) (TTop [] TY-IMIN) (TCtrl [] TY-IMAX) (TXCtrl [] TY-IMAX)
-    (TTuple [o l] TY-IMAX)))
+    (TTuple [o l] TY-IMAX) (TMem [a c] TY-IMAX)))
 
 (defn add-ovf? [(a i64) (b i64) (s i64)] (-> bool)
   ; overflow exactly when the operands share a sign and the result's sign differs
@@ -838,7 +842,8 @@
              (and (!= (& k VK-FLT) 0)
                   (or (!= (val-fsz v) FSZ-CON) (fbits-falsey? (val-fbits v))))))))
     (TBot   [] true)                ; ALL includes every falsey value
-    (TTop   [] false) (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false)))
+    (TTop   [] false) (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false)
+    (TMem [a c] false)))                ; a memory state is never a condition
 
 (defn ty-can-be-truthy? [(t i64)] (-> bool)
   (match (ty-get t)
@@ -850,7 +855,8 @@
              (and (!= (& k VK-FLT) 0)
                   (or (!= (val-fsz v) FSZ-CON) (not (fbits-falsey? (val-fbits v)))))))))
     (TBot   [] true)
-    (TTop   [] false) (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false)))
+    (TTop   [] false) (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false)
+    (TMem [a c] false)))                ; a memory state is never a condition
 
 ; ============================================================================
 ; Control-flow compute
@@ -930,7 +936,12 @@
       (TXCtrl [] (t-top))
       (TBot   [] (t-bot))
       (TCtrl  [] (t-bot))
-      (TVal [v] (if (val-high? v) (t-top) (t-bot))))))
+      (TVal [v] (if (val-high? v) (t-top) (t-bot)))
+      ; A Proj reading a memory state is a malformed node: memory is not a multi-output. The answer
+      ; follows the TVal arm rather than inventing one, so an optimistic input still reports ANY and
+      ; only a settled one falls to ALL. Memory's own projections (a `New`'s per-alias outputs)
+      ; arrive in 4b as projections of a TUPLE, which the arm above already handles.
+      (TMem [a c] (if (ty-high? t) (t-top) (t-bot))))))
 
 ;; A Phi's type is the meet over the paths that are actually LIVE, joined with its declared
 ;; type (aux). Reading a dead path's value would poison the result with a value that cannot
@@ -1088,7 +1099,7 @@
                       (n-in m 0)
                     NO-NODE)))))
           (TBot [] NO-NODE) (TTop [] NO-NODE) (TCtrl [] NO-NODE) (TXCtrl [] NO-NODE)
-          (TVal [v] NO-NODE))))))
+          (TVal [v] NO-NODE) (TMem [a c] NO-NODE))))))
 
 ;; The one value every live path contributes, ignoring self-references (a loop phi fed by its
 ;; own back edge), or NO-NODE when the paths disagree.

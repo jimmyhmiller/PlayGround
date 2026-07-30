@@ -41,6 +41,10 @@
 (import "../src/node.coil"   :use *)
 (import "../src/dot.coil"    :use *)
 (import "../src/corpus.coil" :use *)
+;; ONLY for `CH-COLON` and `CH-LT`. Test 12 asserts that no memory type's exact form contains either
+;; byte, and the bytes it scans for have to be the ones src/gtext.coil's line grammar actually splits
+;; on: two copies of `58` would let one of them move on its own.
+(import "../src/gtext.coil"  :use *)
 (import "assert.coil"    :use *)
 (import "control.coil"   :use *)
 (import "io.coil"        :use *)
@@ -71,9 +75,10 @@
 
 ;; Adversarial fixtures, and the number of DIFFERENT parse failures the malformed table reaches.
 ;; A table that tripped one code twenty times would satisfy every individual assertion and test
-;; one check.
+;; one check. It measures 19 today; the floor went 12 -> 15 with slice 4a, because the memory
+;; production adds three codes of its own and the count must not be able to lose them silently.
 (const ADVERSARIAL-FLOOR i64 20)
-(const TERR-CODE-FLOOR   i64 12)
+(const TERR-CODE-FLOOR   i64 15)
 
 ;; Types shown on a diagram label, across the whole corpus. 74 today.
 (const LABEL-FLOOR i64 60)
@@ -144,6 +149,11 @@
     (match (ty-get t)
       (TVal   [v]   (val-dump v))
       (TTuple [o l] (do (fmt w "    tuple of {d} member(s) at kid offset {d}\n" l o) 0))
+      ; both axes, because either one can be what failed to encode: the alias bitset is written as a
+      ; signed decimal and the contents is a type of its own
+      (TMem   [a c] (do (fmt w "    memory over alias bits {d} (popcount {d}), contents t{d}\n"
+                             a (popcount64 a) c)
+                        0))
       (TBot [] 0) (TTop [] 0) (TCtrl [] 0) (TXCtrl [] 0))
     0))
 
@@ -227,7 +237,10 @@
 (const CL-WIDE     i64 16)    ; a widening counter that is not the one the interval implies
 (const CL-OFFKIND  i64 32)    ; a refinement on an axis whose kind bit is OFF
 (const CL-NOKINDS  i64 64)    ; kinds = VK-NONE, the top of the value sublattice
-(const CL-ALL      i64 127)
+(const CL-MEM      i64 128)   ; a memory type, so `mem#<bits> <contents>` is exercised
+(const CL-MEMMULTI i64 256)   ; a memory type over MORE THAN ONE alias class: the bitset, not a
+                              ; number, which is the axis decision DESIGN.md §4 rests on
+(const CL-ALL      i64 511)
 
 ;; A refinement carried on an axis whose KIND BIT is off. These exist because `dual` maps an axis
 ;; bottom to an axis top, so the redundancy is the price of an involutive dual (see ty.coil), and
@@ -262,6 +275,9 @@
   (match (ty-get t)
     (TTuple [o l] CL-TUPLE)
     (TVal   [v]   (val-classes v))
+    ; the CONTENTS' classes count too: a memory type over an off-kind value exercises both the mem
+    ; form and the value form, and there is no reason for the census to lose the inner one
+    (TMem   [a c] (| CL-MEM (| (if (> (popcount64 a) 1) CL-MEMMULTI 0) (ty-classes c))))
     (TBot [] 0) (TTop [] 0) (TCtrl [] 0) (TXCtrl [] 0)))
 
 (defn class-name [(bit i64)] (-> (slice u8))
@@ -273,6 +289,8 @@
     CL-WIDE     "non-default widening counter"
     CL-OFFKIND  "refinement on an off kind bit"
     CL-NOKINDS  "kinds = VK-NONE"
+    CL-MEM      "a memory type"
+    CL-MEMMULTI "a memory type over several alias classes"
     (do (ps (stderr) "\nclass-name: no such class\n") (abort) "")))
 
 ;; The census as an assertion: every class must have been present. Reports the whole set so a
@@ -280,7 +298,7 @@
 (defn expect-every-class [(seen i64)] (-> i64)
   (let [w (stdout) (mut bit) 1 (mut missing) 0]
     (loop
-      (if (> (load bit) CL-NOKINDS) (break)
+      (if (> (load bit) CL-MEMMULTI) (break)
         (do (ps w "    ")
             (ps w (if (= (& seen (load bit)) 0) "MISSING  " "present  "))
             (ps w (class-name (load bit)))
@@ -633,6 +651,7 @@
   (match (ty-get t)
     (TTuple [o l] l)
     (TVal [v] (do (tfail-head "expected a tuple, got a value") (ty-dump t) (abort) 0))
+    (TMem [a c] (do (tfail-head "expected a tuple, got a memory state") (ty-dump t) (abort) 0))
     (TBot [] (do (tfail-head "expected a tuple, got ALL") (abort) 0))
     (TTop [] (do (tfail-head "expected a tuple, got ANY") (abort) 0))
     (TCtrl [] (do (tfail-head "expected a tuple, got ctrl") (abort) 0))
@@ -642,6 +661,7 @@
   (match (ty-get t)
     (TTuple [o l] o)
     (TVal [v] (do (tfail-head "expected a tuple, got a value") (ty-dump t) (abort) 0))
+    (TMem [a c] (do (tfail-head "expected a tuple, got a memory state") (ty-dump t) (abort) 0))
     (TBot [] (do (tfail-head "expected a tuple, got ALL") (abort) 0))
     (TTop [] (do (tfail-head "expected a tuple, got ANY") (abort) 0))
     (TCtrl [] (do (tfail-head "expected a tuple, got ctrl") (abort) 0))
@@ -725,6 +745,20 @@
     (store! seen (| (load seen) (expect-terr "ALL junk"    TERR-TRAILING)))
     (store! seen (| (load seen) (expect-terr "ctrl~"       TERR-TRAILING)))
     (store! seen (| (load seen) (expect-depth-refused)))
+    ; THE MEMORY PRODUCTION, one code per way it can go wrong. `mem` is matched as a WORD and the
+    ; `#` is then required, so a text that starts `mem` and goes wrong is reported as a broken
+    ; memory form instead of falling through to the value parser and coming back as an unknown kind.
+    (store! seen (| (load seen) (expect-terr "mem"         TERR-MEM-NO-HASH)))
+    (store! seen (| (load seen) (expect-terr "mem 1 int"   TERR-MEM-NO-HASH)))
+    (store! seen (| (load seen) (expect-terr "mem#1"       TERR-MEM-NO-SPACE)))
+    ; the contents parsed fine and is something a memory word cannot hold. This one is a report
+    ; about the INPUT, not an assertion: `mem#1 ctrl` is a text a hand-written graph can contain,
+    ; and the alternative to naming it is `t-mem`'s abort with no position to point at
+    (store! seen (| (load seen) (expect-terr "mem#1 ctrl"  TERR-MEM-CONTENTS)))
+    (store! seen (| (load seen) (expect-terr "mem#1 [ctrl,int]" TERR-MEM-CONTENTS)))
+    (store! seen (| (load seen) (expect-terr "mem#1 mem#1 int"  TERR-MEM-CONTENTS)))
+    ; and the alias bitset is a decimal like every other bitset in the format
+    (store! seen (| (load seen) (expect-terr "mem#z dyn"   TERR-BAD-INT)))
 
     (fmt w "  {d} different named checks reached\n" (popcount64 (load seen)))
     ; a table that tripped one code twenty times would satisfy every assertion above
@@ -940,7 +974,242 @@
     0))
 
 ; ===========================================================================
-; 11. The axis cross-product
+; 11. The memory form: the alias bitset crossed with the contents (M4 slice 4a)
+; ===========================================================================
+;; THE CLAIM THE SWEEP OVER THE INTERNING TABLE CANNOT MAKE FOR MEMORY. `ty-sample` carries seven
+;; memory types, all of them over small alias sets with unrefined contents, so a printer that wrote
+;; a popcount instead of the bitset, or that lost the contents' refinements, would survive it. This
+;; is the product: eight alias bitsets against ten contents, each with its dual.
+;;
+;; The alias sets are chosen for the ways a decimal writer goes wrong (bit 63 alone is INT64_MIN,
+;; which is the `{d}` defect `fun#-0` already paid for) and for the ways a set could be mistaken for
+;; a number (the empty set, one class, two classes, all of memory, all but one, an alternating set).
+(const MEM-ALIAS-SETS i64 8)
+(const MEM-CONTENTS   i64 10)
+
+;; Floors. 80 product members, each with its dual, so 160 round trips; the text floor is what says
+;; the comparison was made against real bytes rather than against two empty slices.
+(const MEM-PRODUCT-FLOOR i64 160)
+(const MEM-BYTES-FLOOR   i64 1500)
+
+(defn mem-alias-set [(i i64)] (-> i64)
+  (case i
+    0 0                       ; the empty set: the TOP of the axis, and `t-mem-none`'s
+    1 1                       ; one class, bit 0
+    2 2                       ; a different single class
+    3 3                       ; two classes: the union Simple's collapse rule gets wrong
+    4 -1                      ; all of memory: the axis bottom
+    5 (<< 1 63)               ; ONLY bit 63, i.e. INT64_MIN: the `{d}` trap, on this axis
+    6 -2                      ; every class but one, so a nearly-full set written as a negative
+    7 6148914691236517205     ; 0x5555…: alternating, so a popcount or an index cannot fake it
+    (do (tfail-head "mem-alias-set: no such alias set") (abort) 0)))
+
+(defn mem-contents-of [(i i64)] (-> i64)
+  (case i
+    0 (t-top)                                   ; the contents ANY, which `t-mem-none` carries
+    1 (t-bot)                                   ; and ALL, which `t-mem-all` carries
+    2 (t-dyn)
+    3 (t-nodyn)                                 ; the value top: every refinement inverted
+    4 (t-int)
+    5 (t-int-con TY-IMIN)                       ; the interval extreme, spelled as a name
+    6 (ty-with-iwide (t-int-range 0 10) 1)      ; a PARTIAL widening counter inside a memory type,
+                                                ; which is what 4b's memory phi will carry
+    7 (t-flt-con -0.0)                          ; the float bit pattern that is INT64_MIN
+    8 (t-obj-shapes 6)                          ; a two-shape object type: 4c's polymorphic contents
+    9 (ty-intern (TVal (val-make VK-NONE 0 10 0 FSZ-CON (f64-bits 1.5) 3 5)))   ; off-kind everything
+    (do (tfail-head "mem-contents-of: no such contents") (abort) 0)))
+
+;; How long the exact form of a type is, so the identity claim has a byte count under it. Returns
+;; the length rather than the text, because the buffer is a frame slot and must not escape.
+(defn exact-len [(t i64)] (-> i64)
+  (let [ba (alloc-stack (array u8 4096))]
+    (slice-len (raw-render t (cast (ptr i8) ba) 4096))))
+
+(deftest every_memory_type_round_trips_over_the_alias_and_contents_product
+  (let [w (stdout) (mut checked) 0 (mut bytes) 0 (mut seen) 0 (mut ai) 0]
+    (ps w "\n--- the memory form over the alias x contents product ---\n")
+    (loop
+      (if (>= (load ai) MEM-ALIAS-SETS) (break)
+        (let [(mut ci) 0]
+          (loop
+            (if (>= (load ci) MEM-CONTENTS) (break)
+              (let [t (t-mem (mem-alias-set (load ai)) (mem-contents-of (load ci)))
+                    d (ty-dual t)]
+                (store! checked (+ (load checked) (expect-round-trip "the memory product" t)))
+                (store! checked (+ (load checked) (expect-round-trip "the memory product (dual)" d)))
+                (store! bytes (+ (load bytes) (+ (exact-len t) (exact-len d))))
+                (store! seen (| (load seen) (| (ty-classes t) (ty-classes d))))
+                (store! ci (+ (load ci) 1))
+                0)))
+          (store! ai (+ (load ai) 1))
+          0)))
+    (fmt w "  {d} memory types printed, parsed back and identical by id, over {d} bytes of text\n"
+         (load checked) (load bytes))
+    ; the spelling itself, so a reader can see what the round trip is preserving. `mem#<bits>` with
+    ; the bitset as a SIGNED decimal, exactly as the function-pointer axis writes `fun#-1`.
+    (expect-exact "one alias class"  (t-mem-alias 0 (t-dyn)) "mem#1 dyn")
+    (expect-exact "two alias classes" (t-mem 3 (t-int))      "mem#3 int")
+    (expect-exact "all of memory"    (t-mem-all)             "mem#-1 ALL")
+    (expect-exact "the memory top"   (t-mem-none)            "mem#0 ANY")
+    (expect-exact "bit 63 alone"     (t-mem (<< 1 63) (t-dyn))
+                  "mem#-9223372036854775808 dyn")
+    ; THE CONTENTS GOES THROUGH THE EXACT WRITER, NOT THE DEBUG ONE. `mem-print` in src/ty.coil
+    ; recurses into `ty-print`, which is lossy, so an exact arm that reused it would print a float
+    ; constant as `3.5` and the round trip would come back with a different type. The two forms
+    ; therefore DISAGREE on this one, and that disagreement is the assertion.
+    (expect-debug "a float constant in memory, debug" (t-mem-alias 0 (t-flt-con 3.5))
+                  "mem#1 flt=3.5")
+    (expect-exact "a float constant in memory, exact" (t-mem-alias 0 (t-flt-con 3.5))
+                  "mem#1 flt=b4615063718147915776")
+    (assert (not (forms-agree? (t-mem-alias 0 (t-flt-con 3.5)))))
+    ; and on an unrefined contents they agree, which is what keeps a graph line readable
+    (assert (forms-agree? (t-mem-alias 0 (t-dyn))))
+
+    ; the product really covered the classes it was built to cover
+    (assert (= (& (load seen) CL-MEM) CL-MEM))
+    (assert (= (& (load seen) CL-MEMMULTI) CL-MEMMULTI))
+    (assert (= (& (load seen) CL-OFFKIND) CL-OFFKIND))
+    (assert (= (& (load seen) CL-WIDE) CL-WIDE))
+    (assert (>= (load checked) MEM-PRODUCT-FLOOR))
+    (assert (>= (load bytes) MEM-BYTES-FLOOR))))
+
+; ===========================================================================
+; 12. No memory type's text can break a graph line
+; ===========================================================================
+;; THE FORM CONTAINS NEITHER `:` NOR `<`, AND THAT IS A CONSTRAINT, NOT A TASTE. src/gtext.coil
+;; splits a graph line by scanning for the first `<` after the head and the first `:` after ` <- `,
+;; so a type whose text carried either byte would make every graph line carrying memory report
+;; GERR-NO-SEP or GERR-NO-ARROW instead of parsing. `mem@2` and `mem<2>` were both rejected for that
+;; reason.
+;;
+;; It is asserted BYTE-WISE over the whole product rather than as a golden string, because a golden
+;; pins one spelling while this pins the property: the moment the form becomes the more natural
+;; `mem#2:int`, every one of the 160 members fails here, in the file that owns the format, instead of
+;; failing later as a graph-line error in another suite.
+;;
+;; The scanner is self-tested first. A `count-byte` that always answered 0 would satisfy every
+;; assertion below and check nothing, which is the same vacuity the debug-form measurement in test 2
+;; is designed against.
+(defn count-byte [(s (slice u8)) (b i64)] (-> i64)
+  (let [n (slice-len s) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (= (cast i64 (slice-get s (load i))) b) (store! k (+ (load k) 1)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+;; Returns the number of bytes it scanned, so the caller can floor it.
+(defn expect-no-line-separators [(label (slice u8)) (t i64)] (-> i64)
+  (let [ba  (alloc-stack (array u8 4096))
+        txt (raw-render t (cast (ptr i8) ba) 4096)
+        nc  (count-byte txt CH-COLON)
+        nl  (count-byte txt CH-LT)
+        nh  (count-byte txt CH-HASH)]
+    (if (and (= nc 0) (= nl 0)) 0
+      (do (tfail-head label)
+          (let [w (stderr)]
+            (ps w "  a type's exact form contains a byte src/gtext.coil's line grammar scans for\n")
+            (ps w "    text  = \"") (ps w txt) (ps w "\"\n")
+            (fmt w "    {d} colon(s), {d} '<'\n" nc nl)
+            (ps w "    every graph line carrying this type would report GERR-NO-SEP or GERR-NO-ARROW\n"))
+          (ty-dump t)
+          (abort)
+          0))
+    ; POSITIVE CONTROL: a memory form always carries the `#` sigil, so a scan that found nothing at
+    ; all was a scan of the wrong bytes
+    (if (>= nh 1) 0
+      (do (tfail-head label)
+          (ps (stderr) "  a memory type's exact form has no '#': the scan did not see the mem form\n")
+          (ty-dump t)
+          (abort)
+          0))
+    (slice-len txt)))
+
+(deftest no_memory_type_spells_a_graph_line_separator
+  (let [w (stdout) (mut bytes) 0 (mut checked) 0]
+    ; the scanner can find both bytes when they are there
+    (assert (= (count-byte "a:b:c" CH-COLON) 2))
+    (assert (= (count-byte "a<b" CH-LT) 1))
+    (assert (= (count-byte "n0: Start <- : ctrl" CH-COLON) 2))
+    (assert (= (count-byte "dyn" CH-COLON) 0))
+    ; and the bytes it is scanning for are the ones gtext actually splits on
+    (assert (= CH-COLON 58))
+    (assert (= CH-LT 60))
+
+    ; the whole product, both polarities
+    (let [(mut ai) 0]
+      (loop
+        (if (>= (load ai) MEM-ALIAS-SETS) (break)
+          (let [(mut ci) 0]
+            (loop
+              (if (>= (load ci) MEM-CONTENTS) (break)
+                (let [t (t-mem (mem-alias-set (load ai)) (mem-contents-of (load ci)))]
+                  (store! bytes (+ (load bytes) (expect-no-line-separators "the memory product" t)))
+                  (store! bytes (+ (load bytes)
+                                   (expect-no-line-separators "the memory product (dual)"
+                                                              (ty-dual t))))
+                  (store! checked (+ (load checked) 2))
+                  (store! ci (+ (load ci) 1))
+                  0)))
+            (store! ai (+ (load ai) 1))
+            0))))
+
+    ; THE SAMPLE SET SEPARATELY, because the table sweep below cannot make this claim: the product
+    ; above already interned 160 memory types, so "the table contains memory types" would be
+    ; satisfied by them alone and would say nothing about `ty-sample` still carrying any.
+    (let [(mut sample-mems) 0 (mut i) 0]
+      (loop
+        (if (>= (load i) (ty-sample-count)) (break)
+          (do (if (ty-mem? (ty-sample (load i)))
+                  (do (store! bytes (+ (load bytes)
+                                       (expect-no-line-separators "a sampled memory type"
+                                                                  (ty-sample (load i)))))
+                      (store! bytes (+ (load bytes)
+                                       (expect-no-line-separators "a sampled memory type (dual)"
+                                                                  (ty-sample-dual (load i)))))
+                      (store! sample-mems (+ (load sample-mems) 1))
+                      (store! checked (+ (load checked) 2))
+                      0)
+                0)
+              (store! i (+ (load i) 1))
+              0)))
+      (fmt w "\n  {d} of the {d} sample types are memory states\n"
+           (load sample-mems) (ty-sample-count))
+      (assert (>= (load sample-mems) 7)))
+
+    ; and then every memory type in the whole interning table, which is the exhaustive form
+    (let [samples (intern-the-samples!) n (ty-count) (mut table-mems) 0 (mut i) 0]
+      (loop
+        (if (>= (load i) n) (break)
+          (do (if (ty-mem? (load i))
+                  (do (store! bytes (+ (load bytes)
+                                       (expect-no-line-separators "an interned memory type"
+                                                                  (load i))))
+                      (store! table-mems (+ (load table-mems) 1))
+                      (store! checked (+ (load checked) 1))
+                      0)
+                0)
+              (store! i (+ (load i) 1))
+              0)))
+      (fmt w "\n--- the memory form carries no graph-line separator ---\n")
+      (fmt w "  {d} scans, {d} memory types in a table of {d} ids built from {d} samples, {d} bytes\n"
+           (load checked) (load table-mems) n samples (load bytes))
+      ; the table sweep found memory types rather than walking past them all
+      (assert (>= (load table-mems) 7)))
+    (assert (>= (load checked) MEM-PRODUCT-FLOOR))
+    (assert (>= (load bytes) MEM-BYTES-FLOOR))))
+
+;; The predicate the sweep above needs. It is here rather than in src/ty.coil because "is this a
+;; memory type" is a question a test asks about a class of type, not something any pass needs.
+(defn ty-mem? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TMem [a c] true)
+    (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+    (TVal [v] false) (TTuple [o l] false)))
+
+; ===========================================================================
+; 13. The axis cross-product
 ; ===========================================================================
 ;; THE CLAIM THE SWEEP OVER THE INTERNING TABLE CANNOT MAKE. That sweep ranges over ~120 types:
 ;; whatever the corpus and the sample set happen to intern. It cannot say that no PAIR of axis

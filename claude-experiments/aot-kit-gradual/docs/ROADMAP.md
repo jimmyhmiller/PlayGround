@@ -719,6 +719,48 @@ known shape.
 removal all demonstrated by golden tests; differential tests green; a shape-polymorphic site
 keeps two inline paths instead of collapsing.
 
+**Slice 4a, the shape table and the memory type in the lattice: the lattice and table half is
+written** (`src/shape.coil` new; `src/ty.coil`, `src/text.coil` extended; `src/node.coil` and
+`src/eval.coil` gained the arms the new `Ty` variant forces). Gated by `tests/shape-test.coil`
+plus additions to `tests/ty-test.coil` and `tests/text-test.coil`.
+
+- `src/shape.coil`: shape 0 is the field-less root; `shape-transition s name ty` is memoised on
+  `(s, name)`; the alias is allocated at the edge that introduces the field and inherited by every
+  descendant, which is what makes a store through `{x}` and a load through `{x,y}` name the same
+  word; offsets are `8 * (SHAPE-HEADER-WORDS + i)`; `shape-reset!` mirrors `graph-reset!`.
+- `src/ty.coil`: `TMem(aliases, contents)` with the alias axis as a **bitset**, not Simple's
+  collapse (see DESIGN.md §4 for the counterexample and why the samples are part of the same
+  change); `SHAPE-MAX`/`ALIAS-MAX` as named bounds with named aborts; `ty-iwide`/`ty-with-iwide`/
+  `ty-widen`/`ty-widen-from` now reach a memory type's contents; `ty-sample` grew 32 → 41.
+- `src/text.coil`: `mem#<bits> <contents>`, printed and parsed, with `TERR-MEM-NO-HASH`,
+  `TERR-MEM-NO-SPACE` and `TERR-MEM-CONTENTS`. The form contains neither `:` nor `<` because
+  `gtext`'s line grammar scans for both.
+
+**What 4a deliberately does NOT assert**, said plainly because "it typechecks and the lattice laws
+pass" is available almost for free here and would prove close to nothing:
+
+- **There is no memory OP.** `op-memory?` is still legitimately `false` for every op, which is the
+  precedent this roadmap already set for it. Nothing produces or consumes a `TMem`, so no `compute`
+  is exercised on one and `ty-high?`'s answer for a partly-empty alias set is untested against
+  monotonicity. 4b is where that becomes a claim.
+- **The reserve-then-fill discipline on the field window is prophylactic.** Nothing in 4a can
+  re-enter the shape table while a window is open, so replacing it with push-as-you-go would not go
+  red. What IS gated is the consequence that bit the type table: a repeat construction must not grow
+  the side array, and a window with a hole panics by name.
+- **`ALIAS-MAX` cannot fire in 4a.** A transition is the only alias allocator and the transition
+  graph is a tree, so aliases = shapes − 1 and `SHAPE-MAX` reports one edge earlier. The tree
+  relation is asserted (`shape-alias-invariant-ok?`) instead of the bound being claimed reachable,
+  and the 65th-bit aborts that ARE provokable are `t-obj-shape 64` and `t-mem-alias 64`.
+- **Laws 3, 4 and 5 barely apply**, and where they bite next is worth recording now rather than
+  rediscovering. 4a adds no rewrite, no merge and no region/phi pairing. **Law 5 acquires a second
+  instance in 4b**: a memory Phi's arity is locked to its region exactly as a value Phi's is, so
+  `region-remove-path!` must drop memory-phi inputs in the same operation or a memory phi reads the
+  wrong arm — a miscompile that typechecks. **Law 3 acquires new consumers in 4c**: load-after-store
+  forwarding, store-after-store elimination and dead-allocation removal are all irreversible and
+  must each ask `n-ty-proven?`. Simple's `Load.idealize` decides aliasing from pointer identity and
+  from `neverAlias` on two distinct `New`s, both structural and safe, but its offset-overlap test
+  reads a TYPE and is exactly the shape Law 3 forbids acting on provisionally.
+
 ## M5. Dynamic values end to end
 
 NaN boxing, `Box`/`Unbox`, `TypeTest`, the full value lattice with unions. `dyn` grows objects,

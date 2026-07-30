@@ -238,7 +238,11 @@
                   (ev-fail! EV-TYPE n))))))))
     (TBot [] (ev-fail! EV-TYPE n)) (TTop [] (ev-fail! EV-TYPE n))
     (TCtrl [] (ev-fail! EV-TYPE n)) (TXCtrl [] (ev-fail! EV-TYPE n))
-    (TTuple [o l] (ev-fail! EV-TYPE n))))
+    (TTuple [o l] (ev-fail! EV-TYPE n))
+    ; A memory state has no runtime representation as an `RtVal` and never will: 4b's Load is what
+    ; turns memory into a value, and it does so through an alias and an offset rather than by
+    ; evaluating the memory edge itself. A typed failure, not a guess.
+    (TMem [a c] (ev-fail! EV-TYPE n))))
 
 (defn ev-arg [(n i64)] (-> RtVal)
   (let [p (ev)]
@@ -509,7 +513,8 @@
     (TTop [] (do (ev-no-value-for t) (RUndef)))
     (TCtrl [] (do (ev-no-value-for t) (RUndef)))
     (TXCtrl [] (do (ev-no-value-for t) (RUndef)))
-    (TTuple [o l] (do (ev-no-value-for t) (RUndef)))))
+    (TTuple [o l] (do (ev-no-value-for t) (RUndef)))
+    (TMem [a c] (do (ev-no-value-for t) (RUndef)))))
 
 (defn abs64 [(x i64)] (-> i64) (if (< x 0) (- 0 x) x))
 
