@@ -1,0 +1,377 @@
+;; The M0 gate: the lattice laws.
+;;
+;; Every `compute()` in the optimiser is a function into this lattice, so a law that fails
+;; here is a miscompile everywhere. The laws are checked exhaustively over a sample set
+;; that puts every axis at its top, centreline and bottom, together with every one of those
+;; types' duals (high types are the easiest to get wrong, so they are generated rather than
+;; hand-listed).
+;;
+;;   coil test tests/ty-test.coil
+(module tytest)
+
+(import "../src/ty.coil" :use *)
+(import "assert.coil"    :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "alloc.coil"     :use *)
+
+; ---------------------------------------------------------------------------
+; The sample set: every listed type, then every one of their duals.
+; ---------------------------------------------------------------------------
+(defn nsamples [] (-> i64) (* (ty-sample-count) 2))
+
+(defn sample [(i i64)] (-> i64)
+  (if (< i (ty-sample-count)) (ty-sample i) (ty-sample-dual (- i (ty-sample-count)))))
+
+; ---------------------------------------------------------------------------
+; Located failure reporting. A bare `assert` inside a nested loop tells you a law broke
+; but not on which types, which is the only thing you actually need.
+; ---------------------------------------------------------------------------
+(defn fail-head [(law (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "\nLATTICE LAW VIOLATED: ") (ps w law) (ps w "\n")))
+
+(defn show [(label (slice u8)) (t i64)] (-> i64)
+  (let [w (stderr)]
+    (ps w "  ") (ps w label) (ps w " = ")
+    (ty-print w t) (fmt w "   (id {d})\n" t)
+    0))
+
+(defn fail1 [(law (slice u8)) (a i64)] (-> i64)
+  (fail-head law) (show "a" a) (abort) 0)
+(defn fail2 [(law (slice u8)) (a i64) (b i64)] (-> i64)
+  (fail-head law) (show "a" a) (show "b" b) (abort) 0)
+(defn fail3 [(law (slice u8)) (a i64) (b i64) (c i64)] (-> i64)
+  (fail-head law) (show "a" a) (show "b" b) (show "c" c) (abort) 0)
+
+; ---------------------------------------------------------------------------
+; dual is an involution
+; ---------------------------------------------------------------------------
+(deftest dual-is-involutive
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [a (sample (load i))]
+          (if (!= (ty-dual (ty-dual a)) a) (fail1 "dual(dual(a)) != a" a) 0)
+          (store! i (+ (load i) 1))
+          0)))))
+
+(deftest dual-swaps-the-extremes
+  (assert (= (ty-dual (t-bot)) (t-top)))
+  (assert (= (ty-dual (t-top)) (t-bot)))
+  (assert (= (ty-dual (t-ctrl)) (t-xctrl)))
+  (assert (= (ty-dual (t-xctrl)) (t-ctrl))))
+
+; ---------------------------------------------------------------------------
+; meet: idempotent, commutative, associative
+; ---------------------------------------------------------------------------
+(deftest meet-is-idempotent
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [a (sample (load i))]
+          (if (!= (ty-meet a a) a) (fail1 "meet(a,a) != a" a) 0)
+          (store! i (+ (load i) 1))
+          0)))))
+
+(deftest meet-is-commutative
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j))]
+                (if (!= (ty-meet a b) (ty-meet b a)) (fail2 "meet(a,b) != meet(b,a)" a b) 0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))))
+
+(deftest meet-is-associative
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [(mut k) 0]
+                (loop
+                  (if (>= (load k) n) (break)
+                    (let [a (sample (load i)) b (sample (load j)) c (sample (load k))]
+                      (if (!= (ty-meet (ty-meet a b) c) (ty-meet a (ty-meet b c)))
+                          (fail3 "meet(meet(a,b),c) != meet(a,meet(b,c))" a b c) 0)
+                      (store! k (+ (load k) 1))
+                      0)))
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))))
+
+; ---------------------------------------------------------------------------
+; The extremes really are extreme
+; ---------------------------------------------------------------------------
+(deftest top-is-the-meet-identity-and-bottom-absorbs
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [a (sample (load i))]
+          (if (!= (ty-meet a (t-top)) a)       (fail1 "meet(a,ANY) != a" a) 0)
+          (if (!= (ty-meet a (t-bot)) (t-bot)) (fail1 "meet(a,ALL) != ALL" a) 0)
+          ; ANY is the most specific type (no value fits) and ALL the least, so every type
+          ; is at or above ALL, and ANY is at or above every type.
+          (if (not (ty-isa a (t-bot)))         (fail1 "a isa ALL is false" a) 0)
+          (if (not (ty-isa (t-top) a))         (fail1 "ANY isa a is false" a) 0)
+          (store! i (+ (load i) 1))
+          0)))))
+
+;; The orientation itself, pinned so it cannot silently flip. `isa` reads backwards from the
+;; usual subtyping intuition: ALL means "any value at all", so it is the LEAST specific type.
+(deftest isa-orientation-is-specificity
+  (assert (ty-isa (t-int-con 7) (t-int)))          ; a constant is more specific than int
+  (assert (not (ty-isa (t-int) (t-int-con 7))))
+  (assert (ty-isa (t-int) (t-num)))                ; int is more specific than number
+  (assert (not (ty-isa (t-num) (t-int))))
+  (assert (ty-isa (t-dyn) (t-bot)))                ; dyn is above ALL
+  (assert (not (ty-isa (t-bot) (t-dyn))))
+  (assert (ty-isa (t-top) (t-dyn)))                ; ANY is above everything
+  (assert (ty-isa (t-nodyn) (t-dyn))))             ; ~dyn is above every value type
+
+; ---------------------------------------------------------------------------
+; isa: reflexive, transitive, and consistent with meet
+; ---------------------------------------------------------------------------
+(deftest isa-is-reflexive
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [a (sample (load i))]
+          (if (not (ty-isa a a)) (fail1 "a isa a is false" a) 0)
+          (store! i (+ (load i) 1))
+          0)))))
+
+(deftest meet-is-a-lower-bound
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j)) m (ty-meet a b)]
+                ; meet is the greatest LOWER bound, so both inputs sit at or above it
+                (if (not (ty-isa a m)) (fail2 "a isa meet(a,b) is false" a b) 0)
+                (if (not (ty-isa b m)) (fail2 "b isa meet(a,b) is false" a b) 0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))))
+
+(deftest isa-is-transitive
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [(mut k) 0]
+                (loop
+                  (if (>= (load k) n) (break)
+                    (let [a (sample (load i)) b (sample (load j)) c (sample (load k))]
+                      (if (and (ty-isa a b) (and (ty-isa b c) (not (ty-isa a c))))
+                          (fail3 "a isa b and b isa c but not a isa c" a b c) 0)
+                      (store! k (+ (load k) 1))
+                      0)))
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))))
+
+; ---------------------------------------------------------------------------
+; join is the dual of meet, and behaves like an upper bound
+; ---------------------------------------------------------------------------
+(deftest join-is-an-upper-bound
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j)) j2 (ty-join a b)]
+                ; join is the least UPPER bound, so it sits at or above both inputs
+                (if (not (ty-isa j2 a)) (fail2 "join(a,b) isa a is false" a b) 0)
+                (if (not (ty-isa j2 b)) (fail2 "join(a,b) isa b is false" a b) 0)
+                (if (!= j2 (ty-join b a)) (fail2 "join(a,b) != join(b,a)" a b) 0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))))
+
+(deftest dual-reverses-isa
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [(mut j) 0]
+          (loop
+            (if (>= (load j) n) (break)
+              (let [a (sample (load i)) b (sample (load j))]
+                ; dual is an order-reversing bijection: a isa b iff ~b isa ~a
+                (if (!= (ty-isa a b) (ty-isa (ty-dual b) (ty-dual a)))
+                    (fail2 "a isa b differs from ~b isa ~a" a b) 0)
+                (store! j (+ (load j) 1))
+                0)))
+          (store! i (+ (load i) 1))
+          0)))))
+
+; ---------------------------------------------------------------------------
+; Interning
+; ---------------------------------------------------------------------------
+(deftest interning-gives-identity
+  ; the same construction is the same id, so structural equality is id equality
+  (assert (= (t-int-range 0 10) (t-int-range 0 10)))
+  (assert (= (t-int-con 7) (t-int-con 7)))
+  (assert (!= (t-int-con 7) (t-int-con 8)))
+  (assert (= (t-flt-con 3.5) (t-flt-con 3.5)))
+  (assert (!= (t-flt-con 3.5) (t-flt-con 3.25)))
+  ; tuples intern by their members, not by where the members sit in the kid array
+  (assert (= (t-tuple2 (t-ctrl) (t-int)) (t-tuple2 (t-ctrl) (t-int))))
+  (assert (!= (t-tuple2 (t-ctrl) (t-int)) (t-tuple2 (t-ctrl) (t-flt))))
+  ; the seeded ids are stable, which is what makes printed IR comparable across runs
+  (assert (= (t-bot) 0))
+  (assert (= (t-top) 1))
+  (assert (= (t-ctrl) 2))
+  (assert (= (t-xctrl) 3)))
+
+; ---------------------------------------------------------------------------
+; The value axis actually refines
+; ---------------------------------------------------------------------------
+(deftest kinds-union-on-meet
+  ; number is int | flt, and meeting the halves produces exactly it
+  (assert (= (ty-meet (t-int) (t-flt)) (t-num)))
+  (assert (ty-isa (t-int) (t-num)))
+  (assert (ty-isa (t-flt) (t-num)))
+  (assert (not (ty-isa (t-num) (t-int))))
+  ; a union is a real element, distinct from dyn: this is `number | undefined`
+  (let [maybe-num (ty-meet (t-num) (t-undef))]
+    (assert (!= maybe-num (t-dyn)))
+    (assert (ty-isa (t-num) maybe-num))
+    (assert (ty-isa maybe-num (t-dyn)))
+    (assert (not (ty-isa (t-str) maybe-num))))
+  ; every value type is below dyn
+  (assert (ty-isa (t-str) (t-dyn)))
+  (assert (ty-isa (t-obj) (t-dyn)))
+  (assert (ty-isa (t-fun) (t-dyn))))
+
+(deftest int-ranges-widen-on-meet
+  (assert (= (ty-meet (t-int-con 3) (t-int-con 5)) (t-int-range 3 5)))
+  (assert (= (ty-meet (t-int-range 0 10) (t-int-range 5 20)) (t-int-range 0 20)))
+  (assert (ty-isa (t-int-con 7) (t-int-range 0 10)))
+  (assert (not (ty-isa (t-int-con 70) (t-int-range 0 10))))
+  (assert (ty-isa (t-int-range 0 10) (t-int))))
+
+(deftest constants-are-constant
+  (assert (ty-const? (t-int-con 7)))
+  (assert (ty-const? (t-flt-con 1.5)))
+  (assert (ty-const? (t-bool-con true)))
+  (assert (ty-const? (t-undef)))
+  (assert (ty-const? (t-null)))
+  (assert (ty-const? (t-fun-con 3)))
+  (assert (not (ty-const? (t-int))))
+  (assert (not (ty-const? (t-int-range 0 10))))
+  (assert (not (ty-const? (t-dyn))))
+  (assert (not (ty-const? (t-num)))))
+
+(deftest high-means-no-value-fits
+  (assert (ty-high? (t-top)))
+  (assert (ty-high? (t-xctrl)))
+  (assert (ty-high? (t-nodyn)))
+  (assert (not (ty-high? (t-bot))))
+  (assert (not (ty-high? (t-ctrl))))
+  (assert (not (ty-high? (t-dyn))))
+  (assert (not (ty-high? (t-int))))
+  ; ~dyn is the top of the value sublattice: meeting it is the identity on values
+  (assert (= (ty-meet (t-nodyn) (t-int)) (t-int)))
+  (assert (= (ty-meet (t-nodyn) (t-dyn)) (t-dyn)))
+  (assert (= (ty-meet (t-nodyn) (t-int-range 0 10)) (t-int-range 0 10))))
+
+(deftest unrelated-kinds-fall-to-bottom
+  ; control is not a value, and a tuple is not either
+  (assert (= (ty-meet (t-ctrl) (t-int)) (t-bot)))
+  (assert (= (ty-meet (t-xctrl) (t-int)) (t-bot)))
+  (assert (= (ty-meet (t-tuple2 (t-ctrl) (t-int)) (t-int)) (t-bot)))
+  ; but control meets control: reachable is the low element and wins
+  (assert (= (ty-meet (t-ctrl) (t-xctrl)) (t-ctrl))))
+
+(deftest tuples-meet-componentwise
+  (assert (= (ty-meet (t-tuple2 (t-ctrl) (t-int-con 3))
+                      (t-tuple2 (t-ctrl) (t-int-con 5)))
+             (t-tuple2 (t-ctrl) (t-int-range 3 5))))
+  ; different arities are unrelated
+  (assert (= (ty-meet (t-tuple2 (t-ctrl) (t-int))
+                      (t-tuple3 (t-ctrl) (t-int) (t-int)))
+             (t-bot))))
+
+(deftest floats-are-a-three-element-chain
+  (assert (= (ty-meet (t-flt-con 1.5) (t-flt-con 1.5)) (t-flt-con 1.5)))
+  (assert (= (ty-meet (t-flt-con 1.5) (t-flt-con 2.5)) (t-flt)))
+  (assert (ty-isa (t-flt-con 1.5) (t-flt)))
+  ; NaN is a fine constant here: the axis stores bit patterns, not f64s, so identity holds
+  (let [nan-bits 9221120237041090560]
+    (assert (= (t-flt-bits nan-bits) (t-flt-bits nan-bits)))
+    (assert (ty-const? (t-flt-bits nan-bits)))))
+
+(deftest f64-bits-round-trip
+  (assert (fcmp-eq (bits-f64 (f64-bits 3.5)) 3.5))
+  (assert (fcmp-eq (bits-f64 (f64-bits 0.0)) 0.0))
+  (assert (= (f64-bits 0.0) 0))
+  (assert (fcmp-eq (bits-f64 (f64-bits -12.25)) -12.25)))
+
+; ---------------------------------------------------------------------------
+; Termination: an ascending chain has to stop climbing
+; ---------------------------------------------------------------------------
+(deftest widening-terminates
+  ; A loop induction variable's range would creep upward forever without the widening
+  ; counter. Feed 200 successive constants in and it must settle, fast.
+  (let [(mut t) (t-int-con 0) (mut i) 1 (mut settled-at) -1]
+    (loop
+      (if (> (load i) 200) (break)
+        (let [next (ty-widen (ty-meet (load t) (t-int-con (load i))))]
+          (if (and (= next (load t)) (= (load settled-at) -1))
+              (store! settled-at (load i)) 0)
+          (store! t next)
+          (store! i (+ (load i) 1))
+          0)))
+    ; it must settle, and settle early: the counter allows only TY-WIDEN-MAX bumps
+    (assert (!= (load settled-at) -1))
+    (assert (< (load settled-at) 10))
+    (assert (= (load t) (t-int))))
+  ; widening any sample reaches a fixpoint, and never climbs
+  (let [n (nsamples) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [a (sample (load i))
+              w1 (ty-widen a)
+              w2 (ty-widen w1)
+              w3 (ty-widen w2)
+              w4 (ty-widen w3)
+              w5 (ty-widen w4)]
+          (if (!= w5 w4) (fail1 "widening did not reach a fixpoint in 5 steps" a) 0)
+          ; widening makes a type LESS specific, so the original sits at or above the result
+          (if (not (ty-isa a w1)) (fail1 "widening did not make a less specific" a) 0)
+          (store! i (+ (load i) 1))
+          0)))))
+
+; ---------------------------------------------------------------------------
+; The printer is readable, and total
+; ---------------------------------------------------------------------------
+(deftest printing-is-total
+  ; every sample and every dual prints without crashing; eyeball the output with
+  ;   coil test tests/ty-test.coil
+  (let [w (stdout) n (nsamples) (mut i) 0]
+    (ps w "\n--- lattice sample ---\n")
+    (loop
+      (if (>= (load i) n) (break)
+        (let [a (sample (load i))]
+          (fmt w "  {d}\t" a) (ty-print w a) (ps w "\n")
+          (store! i (+ (load i) 1))
+          0)))
+    (fmt w "--- {d} types interned ---\n" (ty-count))
+    0))
