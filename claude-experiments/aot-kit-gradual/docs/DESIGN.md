@@ -6,9 +6,26 @@ at languages that layer types over a dynamic base. Written in [Coil](https://git
 The performance target is "as good as V8, without a JIT". The decisions that make that
 plausible are recorded in [DECISIONS.md](DECISIONS.md); this document is the architecture.
 
+**This document describes the whole intended architecture, including parts that do not exist yet.**
+That is deliberate, because several of the choices in the built parts only make sense against the
+unbuilt ones: the GC contract shapes the IR before there is a collector, and the backend's narrow
+`MachNode` interface is why the node set looks the way it does. But it means you cannot read this as
+a map of the source tree, so each section is marked:
+
+| | |
+|---|---|
+| **BUILT** | in the tree, with a gate behind it |
+| **PARTIAL** | some of it exists; the section says which |
+| **DESIGNED** | not written yet; this is the intended shape |
+
+For what actually exists today, see the status table in [ROADMAP.md](ROADMAP.md) and the module map
+in [../README.md](../README.md).
+
 ---
 
 ## 1. Shape of the pipeline
+
+**PARTIAL.** Parse, Specialise, Select, GCM, LocalSched, RegAlloc, Encode and Export do not exist. Opto exists as peepholes plus `g-analyze!`; the interprocedural pass is M7. Verify and LoopTree are built.
 
 ```
   source (dyn, later TypeScript)
@@ -58,6 +75,8 @@ inside `LoopTree`.
 ---
 
 ## 2. The IR core
+
+**BUILT.** `src/node.coil`.
 
 ### Nodes
 
@@ -133,6 +152,8 @@ a shape we have not yet validated is worse than a little duplication.
 ---
 
 ## 3. The type lattice
+
+**BUILT.** `src/ty.coil`, gated by `tests/ty-test.coil`.
 
 This is where the design departs from Simple most, and it is the piece most worth getting
 right first: `compute()` for every op is a function into this lattice, so an error here is an
@@ -261,6 +282,8 @@ hold something a memory word cannot hold, an undefined shape id, and both bounds
 
 ## 4. Memory, effects, and objects
 
+**PARTIAL.** Shapes, their alias classes and the memory type are built (`src/shape.coil`, `src/ty.coil`). `New`, `Load`, `Store` and `MemMerge` are not: that is M4's remaining work and the next thing to do.
+
 Memory is in SSA form, split into **alias classes**. Each field of each shape gets an alias
 number; a `Store` produces a new memory value for exactly its alias, and a `Load` consumes
 the memory of exactly its alias. `MemMerge` and memory `Phi`s join them at control flow
@@ -316,6 +339,8 @@ the constraint is asserted byte-wise by a gate rather than left as a comment.
 
 ## 5. The GC contract
 
+**DESIGNED.** No safepoints, barriers or stack maps exist. The IR is built so they can be added without touching every pass, which is the whole point of [D2](DECISIONS.md#d2-gc-abstract-ir-nodes-collector-policy-chosen-at-lowering), and the verifier is where R1 and R2 will land.
+
 Per [D2](DECISIONS.md#d2-gc-abstract-ir-nodes-collector-policy-chosen-at-lowering) the IR is
 built for a moving collector even before one exists.
 
@@ -369,6 +394,8 @@ build the moment a pass breaks it.
 
 ## 6. Specialisation
 
+**DESIGNED.** M9. The mechanism it needs, a guard as ordinary control flow with a `Cast` on the taken edge, is built and is a diagram fixture.
+
 After the optimistic interprocedural pass there is a call graph and, for each function, the
 set of argument types that actually reach it.
 
@@ -386,6 +413,8 @@ being good; a bad model makes slow code, not wrong code.
 ---
 
 ## 7. Backend
+
+**DESIGNED.** M10. Nothing here exists yet.
 
 Target arm64 (Apple silicon) first, since that is the development machine.
 
@@ -410,6 +439,8 @@ maps.
 ---
 
 ## 8. Development tooling
+
+**PARTIAL.** The verifier, the interpreter, both textual forms and the Graphviz output are built. `--dump-after`, per-phase timing and the live graph viewer are not.
 
 Tooling is a day-one deliverable, not a follow-up, because a sea-of-nodes graph is
 unreadable without it.

@@ -142,3 +142,144 @@ tested identity.
 golden tests readable diffs instead of opaque blobs, it gives every phase a `--dump-after`
 for free, and it is the only practical way to file a reduced reproduction of an optimiser
 bug.
+
+---
+
+# Laws learned by breaking them
+
+D1 to D7 were decided up front. Everything below was learned the hard way, each after a bug that a
+fully green test suite could not see. They are laws in the same sense: code that contradicts one is
+a bug in the code.
+
+If you are new here, **D8 and D9 are the two that will cost you a day.**
+
+---
+
+## D8. A rewrite may only act on a PROVEN type, and proven is narrower than it sounds
+
+**Decision.** `compute` is an optimistic analysis and may act on any type it currently holds. Every
+*irreversible* rewrite must first ask `n-ty-proven?`, which is **transitive** over the node's whole
+input cone and is a **fixpoint** test, not a "not ANY" test.
+
+**The insight that took three attempts to state.** The first version was "an analysis may act on a
+provisional type; a transformation may not", which is right but not actionable. The second was
+"require `~ctrl` exactly, never merely high", which is **wrong**, and it was written into a review
+checklist as if settled. The correct statement:
+
+> **`ANY` is the ABSENCE of information. Every other high type is a CLAIM someone computed.**
+> `~ctrl` is just the high element of the control axis, so satisfying "exactly `~ctrl`" proves
+> nothing on its own.
+
+`region-compute` seeded its meet with `~ctrl`, so a merge nobody had analysed reported *provably
+unreachable* out of nothing, and six rewrites believed it.
+
+**Why transitive.** `phi-compute` deliberately skips high paths, which is load-bearing for loops, and
+that hides provisionality below any local check. A node can hold a perfectly reasonable-looking type
+computed from an input that is still ANY.
+
+**Why a fixpoint and not just "not ANY".** A stale LOW type is exactly as provisional. With only the
+ANY test, a flat diamond still compiled to `return 1` on 9 of 40 worklist seeds, through
+`n-int-con?`, which asks "is this operand the literal 0" and believed a phi that momentarily
+reported `int=0`.
+
+**Consequence.** A proof-gated rewrite is *deferred*, not declined, so `iterate!` sweeps: nothing
+else would re-queue it.
+
+**What it was costing, all on a green gate.** A merge whose input is a merge compiled to one wrong
+constant on 55 of 200 seeds. Two merges feeding a merge deleted the entire program on 31 of 200,
+with `Stop` left with no inputs, `g-verify` clean, and the printer omitting dead nodes so the diagram
+merely looked smaller. `cast-idealize` discharged a `Cast` on an unanalysed input, and since
+`ty-isa ANY t` is true for every target, every `Cast` on a raw graph deleted itself: that is D4's
+only guard mechanism erasing itself. Four `compute`s were made to RISE by a `ty-high?` that answered
+a per-axis question with a single-axis test, which aborted the compiler on a 14-node program.
+
+---
+
+## D9. Construction has contracts, and they are checked where they can be
+
+**Decision.** Building a graph is not free-form. Three windows must be respected, and the code
+hard-errors on the parts of them that are cheap to detect.
+
+**The in-progress window for merges.** A merge with a null final input reports CONTROL, and a `Phi`
+on it reports its DECLARED type. A loop body must be built *and peepholed* inside that window, and
+the phis closed before the control back edge. `n-set-def!` panics by name if control closes first.
+
+Get it wrong and the loop is **deleted with no error reported**: the phi momentarily reads `int=0`
+because its back-edge value has no type yet, `i + 1` folds to the literal `1`, the phi loses its
+only other user, and the whole loop goes. Every step is locally justified.
+
+**The multi window for `If`.** An `If` is in progress until *all* of its projections exist. Peephole
+them one at a time and the first folds to `~ctrl`, the `If` loses its last use, the kill cascade
+takes it, and the sibling then rewrites against a corpse whose inputs were cleared but whose type
+was not: a stale buffer word. Flat, that word happened to be pinned `Start` and the answer was
+accidentally right. One level of nesting down it was a dead node. Use `n-if-arms!`, which opens the
+window with `n-multi-open!` and closes it with `n-multi-close!`; `n-in`/`n-out` are bounds-checked so
+an out-of-range read cannot look plausible again.
+
+**Region and Phi arity are ONE invariant.** Dropping a region path drops the matching value from
+every phi on that region, in the same operation. Diverging for even one peephole gives a phi reading
+the wrong arm, which is a miscompile that typechecks cleanly.
+
+**Still open, and it will bite while wiring memory edges.** A dead node can be wired as an input and
+nothing says so at the wiring site. See the note in [ROADMAP.md](ROADMAP.md#the-next-concrete-piece-of-work).
+
+---
+
+## D10. A shape allocates a field's alias at the edge that introduces it
+
+**Decision.** Shapes form a transition tree rooted at the field-less shape. `shape-transition` is
+memoised on `(shape, name)`, so the hidden-class tree a whole-program build produces is a function of
+the program and not of visit order. **The alias class and byte offset for a field are allocated at
+the transition that introduces that field, and inherited unchanged by every descendant.**
+
+**Why that one sentence is what makes memory SSA work.** A store through `{x}` and a load through
+`{x, y}` must name the same alias class and the same offset, because `{x, y}` was reached *from*
+`{x}` and a transition never moves an existing field. Allocate per-shape-per-field instead and those
+two touch different words, so load-after-store forwarding silently stops firing: no error, just
+worse code, which is the hardest kind of bug to notice.
+
+**Consequence, and it is the point rather than a wart.** `{x, y}` and `{y, x}` are genuinely
+different layouts, because the edge that introduced `x` differs. That is the entire content of
+"hidden class", and it is what `tests/shape-test.coil` uses as its witness.
+
+---
+
+## D11. A tool is only a tool if it can FAIL
+
+**Decision.** Every checker reports a **named code**, and every identity or coverage claim has a
+**counted floor** under it saying how much it actually compared.
+
+**Why.** "The verifier returned non-zero" is satisfied by a verifier that always fails. "Corrupting
+the phi/region lockstep reports `VERR-PHI-ARITY`" is a claim about a specific check noticing. The
+same applies to a round trip: `print` then `parse` is the identity would pass for a printer that
+emitted only op names, so the gate records how many node lines and characters it compared.
+
+**How claims get validated.** Revert the fix and confirm the gate goes red; where a guard cannot be
+made to fail, measure it instead. `ty-injective?` returning false is unreachable by construction, so
+what is recorded is that always-false takes 9 of 12 tests red while always-true keeps all 12 green.
+
+**Corollary, learned separately.** A fixture can be correct **by accident**, and its construction
+order is part of it. The flat `if (0)` passed while the same construct one level down miscompiled,
+and the first raw diamond reproduced nothing on 200 seeds until it was built the way the witness was
+built. So a gate states which shape and which order it needs.
+
+---
+
+## D12. The oracle has to RUN the program
+
+**Decision.** From M3 on, every optimisation is gated on the observable result being identical
+before and after the pass, over the whole corpus, with arguments bound to values **inside** their
+declared types.
+
+**Why.** Golden strings and `g-verify` both stayed green through a merge deleted from a diamond, a
+`Return` dropped from `Stop`, and a discharged type check. A graph missing an arm is still a
+structurally valid graph. Only running it noticed.
+
+**Why inside the declared types.** Feeding an argument something its declaration forbids does not
+test the optimisation, it tests what happens when you lie to the compiler. Bindings are keyed by
+type rather than node id, because optimisation deletes arguments and shifts every later id.
+
+**Corollary.** The interpreter refuses to guess. Integer overflow reports `EV-OVERFLOW` rather than
+wrapping, because JavaScript promotes to a double and doing that properly needs M5's value domain; a
+wrapped answer would make the oracle quietly disagree with the language it exists to define. A
+failing `Cast` is a **compiler** bug and has its own status.
