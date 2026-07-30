@@ -141,6 +141,11 @@ the corpus and *red* on a set of deliberately corrupted graphs (a verifier that 
 not a verifier); the interpreter agrees with expected results on the corpus, before and after
 `Opto`.
 
+**Status: slices 1, 2 and 3a DONE, slice 3b outstanding.** The whole gate is 114 tests green
+(`tools/gate.sh`). M3 itself stays open until the GRAPH round trip lands, because the milestone's
+gate says "`print` then `parse` is the identity on the whole corpus" and 3a proves that for types
+only. Nothing after M3 starts on the strength of the type format alone.
+
 **Slice 1, the verifier: DONE** (`src/verify.coil`, `src/corpus.coil`, 19 tests). One named code
 per check, which is what stops the corrupted-graph half from being vacuous: "verify returned
 non-zero" is satisfied by a verifier that always fails, whereas "corrupting the phi/region lockstep
@@ -172,7 +177,8 @@ it has a real exit test now and counts to 5. And the interpreter's truthiness is
 against `ty-can-be-truthy?`, because an interpreter that takes a different branch than the compiler
 predicted is worse than no oracle at all.
 
-**Slice 3a, the exact textual TYPE form: DONE** (`src/text.coil`). Printer and parser live in one
+**Slice 3a, the exact textual TYPE form: DONE** (`src/text.coil`, gated by
+`tests/text-test.coil`: 12 tests; the whole gate is 114). Printer and parser live in one
 file because they are one format. `ty-print-exact` decides every axis BY FIELD VALUE, `ty-parse`
 rebuilds through `val-make`/`ty-intern` so no second canonicalisation exists, `ty-render` writes to
 a caller buffer, and `ty-injective?` answers "does this type's text decode back to it" — which
@@ -214,7 +220,51 @@ dual, and pins the count at 221184 with `XPROD-FLOOR`. It runs in 1.4s. It fails
 being printed, because that axis's two settings then collide on one string and `ty-injective?`
 rejects both; verified by disabling the widening-counter print, which takes it and five other
 tests red. This entry previously CLAIMED that cross-product as existing coverage when the largest
-injectivity gate actually running was the 120-type sweep over the interning table.
+injectivity gate actually running was the sweep over the interning table (131 types, and that
+sweep is still the one that proves the format works on the types the project actually builds).
+
+**What the gate deliberately does NOT assert.** Four clauses of the slice's brief are not provable
+as written, and recording that is cheaper than a test that pretends otherwise:
+
+- **`ty-injective?` returning FALSE is unreachable, so `ty-print-exact`'s hard-error branch is
+  gated in one direction only.** That is the property being gated rather than a hole in the tests:
+  no type whose exact form is ambiguous exists, and after the review moved the depth bound into
+  `ty-tuple-close` no type the format cannot represent can be MINTED either, so the last remaining
+  handle on the false branch closed. Liveness is therefore measured the only way it can be: forcing
+  the predicate always-false takes 9 of the 12 tests red, forcing it always-true keeps all 12 green.
+  Instead the guard is asserted TRUE over every interned id and every adversarial fixture. Making
+  the ambiguity branch reachable would need an injection point that nothing else in the design wants.
+- **TERR-TUPLE-COUNT is not provoked, and the code says why.** It is an assertion between two
+  implementations of "how many members are here" (the comma scan and the member loop), not a report
+  about input, and every early stop in the member loop sets a different code first. If some input
+  ever does reach it, that is a real find about the grammar, not a badly written test.
+- **`ty-print` and `ty-print-exact` do NOT agree on `~dyn`, on `[ctrl int]`, or on a float
+  constant**, and cannot: VK-NONE makes the debug printer return before any refinement, members must
+  take a comma to stay injective, and a float has to print its bit pattern. All three are pinned as
+  required DIFFERENCES with both spellings written out. The intent behind the clause, that no golden
+  string and no gallery label moved, is gated instead by 19 named forms pinned in both printers and
+  by 74 labelled types across all 15 gallery fixtures with 0 disagreements.
+- **The debug printer's collisions are asserted by TYPE, not by id.** Hardcoding an id would make
+  the test break on any change to interning order, which would teach nothing. So the colliding pairs
+  are built constructively (one debug string, two exact ones, printed), and the scale is measured
+  globally: the debug form fails to decode back for 85 of 131 interned ids, and 41 of those decode
+  to the WRONG type rather than failing.
+
+**Open, a wart in the format rather than a bug in either half of it.** The parser defaults the
+widening counter off whether the INT axis was WRITTEN; the printer decides by whether the INTERVAL
+is full. They agree everywhere except on an explicitly written full interval, so `int=[min..max]`
+and `int w0` are two texts for one type, which is exactly what the format refuses for kind sets
+(`num|int` is TERR-DUP-KIND). Nothing is red, because print-then-parse is still the identity: the
+printer only ever emits the second. Closing it is a decision and not a fix, either reject an
+explicit full interval or derive the default from the interval on both sides, which is why it is
+recorded here instead of asserted either way.
+
+**Two bounds, both reporting by name rather than truncating.** Tuple NESTING at
+`TY-MAX-TUPLE-DEPTH` (256, because the parser recurses on the C stack and a type nested that deep
+is a fuzzer artefact, not IR), and the injectivity scratch buffer at 64 KiB, whose overflow is its
+own named panic and deliberately NOT "not injective", because those are two different bugs in two
+different files. Tuple ARITY has no bound at all: a printer that refuses to print a legally
+constructed type is worse than no printer, and M6's `Start` gets one output per parameter.
 
 **The M3 adversarial review: eight findings, all fixed.** Worth keeping, because six of the eight
 were invisible to a green gate and three were live miscompiles:
