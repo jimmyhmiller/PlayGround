@@ -55,21 +55,26 @@
 ; ---------------------------------------------------------------------------
 ; Nodes
 ; ---------------------------------------------------------------------------
-;; A constant's label is just its value: `Const` above `int=3` is pure noise, and constants
-;; are the most numerous nodes in any real graph.
+;; A constant's label is just its value: `Const` above `int=3` is pure noise, and constants are
+;; the most numerous nodes in any real graph. A projection is labelled by WHICH slot it takes,
+;; because "the true arm" and "the false arm" are the entire content of a branch diagram and two
+;; identical boxes marked `CProj` say nothing at all.
 (defn dot-node-label [(w (ptr Writer)) (n i64)] (-> i64)
   (ps w "label=\"")
   (if (= (n-op n) OP-CONST) (ty-print w (n-ty n))
-    (do (ps w (op-name (n-op n)))
-        (if (op-shows-type? (n-op n)) (do (ps w "\\n") (ty-print w (n-ty n)) 0) 0)
-        0))
+    (if (= (n-op n) OP-CPROJ) (ps w (cproj-label n))
+      (if (= (n-op n) OP-PROJ) (do (fmt w "Proj.{d}" (n-aux n)) 0)
+        (if (= (n-op n) OP-CAST)
+            (do (ps w "Cast to ") (ty-print w (n-aux n)) 0)
+          (do (ps w (op-name (n-op n)))
+              (if (op-shows-type? (n-op n)) (do (ps w "\\n") (ty-print w (n-ty n)) 0) 0)
+              0)))))
   (ps w "\" ")
   0)
 
-;; Control and the tuple-typed nodes do not get a type line: `ctrl` under every box, and a
-;; Return's `[ctrl int]`, are things you can already see from the shape and the edges.
-(defn op-shows-type? [(op i64)] (-> bool)
-  (not (or (op-control? op) (= op OP-RETURN))))
+;; Control nodes carry no type line: `ctrl` under every box is noise, and the shape and the red
+;; edges already say it.
+(defn op-shows-type? [(op i64)] (-> bool) (not (op-control? op)))
 
 (defn dot-nodes [(w (ptr Writer))] (-> i64)
   (let [n (n-count) (mut i) 0]

@@ -99,6 +99,94 @@
         e7 (mk-bin OP-ADD e5 e6)]
     (mk-ret (mk-un OP-MINUS (mk-un OP-MINUS e7)))) 0)
 
+;; ---------------------------------------------------------------------------
+;; Control flow: the fixtures the diagrams actually exist for
+;; ---------------------------------------------------------------------------
+(defn mk-if [(ctrl i64) (pred i64)] (-> i64) (n-peephole (n-new2 OP-IF 0 ctrl pred)))
+(defn mk-cproj [(iff i64) (idx i64)] (-> i64) (n-peephole (n-new1 OP-CPROJ idx iff)))
+(defn mk-cast [(ctrl i64) (t i64) (v i64)] (-> i64) (n-peephole (n-new2 OP-CAST t ctrl v)))
+(defn new-region2 [(a i64) (b i64)] (-> i64)
+  (let [r (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r a) (n-add-def! r b) r))
+(defn new-phi2 [(r i64) (declared i64) (a i64) (b i64)] (-> i64)
+  (let [p (n-new OP-PHI declared)]
+    (n-add-def! p r) (n-add-def! p a) (n-add-def! p b) p))
+(defn ret-to [(ctrl i64) (v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 ctrl v))]
+    (n-add-def! (g-stop) r) (n-peephole (g-stop)) r))
+
+;; `if (arg) return 1; else return 2;` with an unknown predicate: both arms survive.
+(defn fx-branch [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-dyn)))]
+    (ret-to (mk-cproj iff 0) (mk-int 1))
+    (ret-to (mk-cproj iff 1) (mk-int 2)))
+  (iterate!) 0)
+
+;; The same shape with a predicate that cannot be truthy. Built raw so the before picture shows
+;; what the analysis concluded without any rewriting having happened yet.
+(defn fx-branch-dead-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (n-new2 OP-IF 0 (g-start) (n-new1 OP-CONST (t-int-con 0) (g-start)))
+        t   (n-new1 OP-CPROJ 0 iff)
+        f   (n-new1 OP-CPROJ 1 iff)]
+    (let [r1 (n-new2 OP-RETURN 0 t (n-new1 OP-CONST (t-int-con 1) (g-start)))
+          r2 (n-new2 OP-RETURN 0 f (n-new1 OP-CONST (t-int-con 2) (g-start)))]
+      (n-add-def! (g-stop) r1)
+      (n-add-def! (g-stop) r2)))
+  (g-analyze!) 0)
+(defn fx-branch-dead [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-int 0))]
+    (ret-to (mk-cproj iff 0) (mk-int 1))
+    (ret-to (mk-cproj iff 1) (mk-int 2)))
+  (iterate!) 0)
+
+;; A diamond that merges a value: this is what a Phi is for.
+(defn fx-diamond [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-dyn)))
+        t   (mk-cproj iff 0)
+        f   (mk-cproj iff 1)
+        r   (new-region2 t f)
+        ph  (new-phi2 r (t-dyn) (mk-int 1) (mk-bin OP-ADD (mk-arg (t-int-range 0 9)) (mk-int 2)))]
+    (ret-to r ph)
+    (wl-push! r) (wl-push! ph))
+  (iterate!) 0)
+
+;; `i = 0; while (true) i = i + 1;`  The dashed edge is the back edge. The phi's type is the
+;; whole termination story: widening is what stops the range climbing for ever.
+(defn fx-loop [] (-> i64)
+  (graph-reset! 1)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE) (n-add-def! lp (g-start)) (n-add-def! lp NO-NODE)
+    (n-peephole lp)
+    (let [ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph lp) (n-add-def! ph (mk-int 0)) (n-add-def! ph NO-NODE)
+      (n-peephole ph)
+      (let [nx (mk-bin OP-ADD ph (mk-int 1))]
+        (n-set-def! ph 2 nx)
+        (n-set-def! lp 2 lp)
+        (ret-to lp ph)
+        (wl-push! lp) (wl-push! ph) (wl-push! nx))))
+  (iterate!) 0)
+
+;; A guard, in the shape DECISIONS.md D4 describes: test the value, and on the taken edge a Cast
+;; carries the narrowed type into the fast path. The generic value still reaches the merge.
+(defn fx-guard [] (-> i64)
+  (graph-reset! 1)
+  (let [x   (mk-arg (t-dyn))
+        iff (mk-if (g-start) (mk-bin OP-LT x (mk-int 100)))
+        t   (mk-cproj iff 0)
+        f   (mk-cproj iff 1)
+        fast (mk-bin OP-ADD (mk-cast t (t-int) x) (mk-int 1))
+        slow (mk-bin OP-ADD x (mk-int 1))
+        r    (new-region2 t f)
+        ph   (new-phi2 r (t-dyn) fast slow)]
+    (ret-to r ph)
+    (wl-push! r) (wl-push! ph))
+  (iterate!) 0)
+
 (defn emit [(w (ptr Writer)) (name (slice u8))] (-> i64)
   (ps w "=== FIXTURE ") (ps w name) (ps w "\n")
   ; counts come from the compiler, not from counting lines in the output afterwards
@@ -116,5 +204,11 @@
     (fx-gvn)       (emit w "04-gvn-after")
     (fx-big-raw)   (emit w "05-big-before")
     (fx-big)       (emit w "06-big-after")
-    (fx-ranges)    (emit w "07-ranges"))
+    (fx-ranges)          (emit w "07-ranges")
+    (fx-branch)          (emit w "08-branch")
+    (fx-branch-dead-raw) (emit w "09-dead-branch-before")
+    (fx-branch-dead)     (emit w "10-dead-branch-after")
+    (fx-diamond)         (emit w "11-diamond")
+    (fx-loop)            (emit w "12-loop")
+    (fx-guard)           (emit w "13-guard"))
   0)

@@ -80,11 +80,45 @@ Four real bugs this gate caught, none of which a smaller test would have:
 
 ## M2. Control flow
 
-`If`, `Region`, `Phi`, `Proj`, `CProj`, `Loop`, `Cast`, `XCtrl`, `Never`. Lazy phi creation.
-Dead control flow elimination. Loop tree construction.
+`If`, `Region`, `Phi`, `Proj`, `CProj`, `Loop`, `Cast`, `XCtrl`. Dead control flow
+elimination. JavaScript truthiness deciding reachability.
 
-**Gate.** Golden tests covering Simple chapters 5 through 8 translated to `dyn`; unreachable
-code provably removed; a `Phi` never survives with a dead input.
+**Gate.** Golden tests covering Simple chapters 5 through 8 translated to hand-built graphs;
+unreachable code provably removed; a `Phi` never survives with a dead input; a loop phi reaches
+a fixpoint, identically under every worklist seed.
+
+**Status: DONE.** `tests/control-test.coil`, 17 tests. Reachability is not a separate pass: an
+`If`'s type is a tuple of its two control outputs, so an untaken branch is `~ctrl` in one slot
+and dead-code elimination falls out of type propagation. `Cast` is in, which is the mechanism
+[D4](DECISIONS.md#d4-guards-are-control-flow-not-a-node-kind) rests on, and a guard with an
+unboxed fast path plus a generic fallback is now a fixture in the diagram gallery.
+
+**The rule this milestone produced**, which was wrong in three separate places: **an analysis
+may act on a provisional type; a transformation may not.** `compute` skips any path whose
+control is high, including `ANY`, because an optimistic answer gets revisited. Every
+*irreversible* rewrite must instead require `~ctrl`, which is proven. The three sites were
+`phi-single-input`, `cproj-idealize` and `stop-idealize`. A fourth, constant folding, needed a
+different guard: it now refuses to fold while any input is still unanalysed.
+
+**The in-progress contract**, now documented in `src/node.coil` and partly checked. A loop body
+must be built *and peepholed* while the merge is still open, and the phis closed before control.
+Get it wrong and the phi momentarily reads `int=0`, `i + 1` folds to the literal `1`, and the
+entire loop is deleted with no error reported. `n-set-def!` hard-errors on the one part of this
+that is cheap to detect (closing control while a phi is still open); the general defence is M7's
+phase structure, which analyses to a fixpoint before transforming anything.
+
+**Deferred out of M2, deliberately:**
+
+- **Lazy phi creation** is a front-end concern, not an IR one. It is the trick where a parser
+  creates a phi only when a variable is actually assigned in a branch. With no parser yet there
+  is nothing to be lazy about, so it moves to the `dyn` front end.
+- **`Never` and never-exit loop breaking.** `Never` exists solely to serve the rewrite that
+  gives an infinite loop an exit edge, and that rewrite exists solely so global code motion can
+  assume every block reaches `Stop`. Adding the op now, with nothing implementing its purpose,
+  would be worse than not having it. It lands with GCM in M10.
+- **The loop tree** (`idom`, `idepth`, nesting depth). Its consumers are all later: GCM's block
+  placement, loop optimisation, and the never-exit rewrite. It lands next, before M3, since it
+  is small and the visualizer can use the nesting depth immediately.
 
 ## M3. Tooling: textual IR, verifier, evaluator
 

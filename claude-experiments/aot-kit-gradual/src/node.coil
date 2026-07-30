@@ -37,55 +37,68 @@
 (const OP-START  i64 0)    ; the root of control
 (const OP-STOP   i64 1)    ; collects every Return
 (const OP-RETURN i64 2)    ; (ctrl, value)
-(const OP-CONST  i64 3)    ; aux = the constant's TyId
-(const OP-ARG    i64 4)    ; an opaque value of a declared type; aux = that TyId
-(const OP-ADD    i64 5)
-(const OP-SUB    i64 6)
-(const OP-MUL    i64 7)
-(const OP-DIV    i64 8)
-(const OP-MINUS  i64 9)    ; unary negate
-(const OP-NOT    i64 10)   ; logical not, over JS truthiness
-(const OP-EQ     i64 11)
-(const OP-LT     i64 12)
-(const OP-LE     i64 13)
-(const OP-COUNT  i64 14)
+(const OP-IF     i64 3)    ; (ctrl, predicate) -> a tuple of two controls
+(const OP-REGION i64 4)    ; (_, ctrl...) a control merge; input 0 is unused
+(const OP-LOOP   i64 5)    ; a Region whose input 1 is the entry and input 2 the back edge
+(const OP-CPROJ  i64 6)    ; (multi) control projection; aux = which slot
+(const OP-XCTRL  i64 7)    ; the unreachable-control constant
+(const OP-CTRL-END i64 7)  ; ops <= this produce control
 
+(const OP-CONST  i64 8)    ; aux = the constant's TyId
+(const OP-ARG    i64 9)    ; an opaque value of a declared type; aux = that TyId
+(const OP-PROJ   i64 10)   ; (multi) data projection; aux = which slot
+(const OP-PHI    i64 11)   ; (region, value...) one value per region path
+(const OP-CAST   i64 12)   ; (ctrl, value) upcast to aux, on a control path
+(const OP-ADD    i64 13)
+(const OP-SUB    i64 14)
+(const OP-MUL    i64 15)
+(const OP-DIV    i64 16)
+(const OP-MINUS  i64 17)   ; unary negate
+(const OP-NOT    i64 18)   ; logical not, over JS truthiness
+(const OP-EQ     i64 19)
+(const OP-LT     i64 20)
+(const OP-LE     i64 21)
+(const OP-COUNT  i64 22)
+
+;; Case keys are the NAMED constants throughout, never the numbers. Literal keys are how a
+;; renumbering silently rewires every dispatch table in the file at once.
 (defn op-name [(op i64)] (-> (slice u8))
   (case op
-    0 "Start" 1 "Stop" 2 "Return" 3 "Const" 4 "Arg"
-    5 "Add" 6 "Sub" 7 "Mul" 8 "Div" 9 "Minus"
-    10 "Not" 11 "Eq" 12 "Lt" 13 "Le"
+    OP-START "Start" OP-STOP "Stop" OP-RETURN "Return" OP-IF "If"
+    OP-REGION "Region" OP-LOOP "Loop" OP-CPROJ "CProj" OP-XCTRL "XCtrl"
+    OP-CONST "Const" OP-ARG "Arg" OP-PROJ "Proj" OP-PHI "Phi" OP-CAST "Cast"
+    OP-ADD "Add" OP-SUB "Sub" OP-MUL "Mul" OP-DIV "Div" OP-MINUS "Minus"
+    OP-NOT "Not" OP-EQ "Eq" OP-LT "Lt" OP-LE "Le"
     "?"))
 
-;; Pure ops participate in value numbering. Control and the opaque `Arg` are
-;; identity-bearing: two `Arg`s are different arguments even with the same type, and
-;; collapsing two `Return`s would lose a control edge.
-;;
-;; `Const` is pure and MUST be here: deduplicating constants is most of what value numbering
-;; buys, and it is what lets `(arg+2)` and `(2+arg)` become the same node. It is separately
-;; excluded from constant *folding*, since folding a constant to a constant is a loop.
-(defn op-pure? [(op i64)] (-> bool) (or (= op OP-CONST) (>= op OP-ADD)))
-
 ;; ---------------------------------------------------------------------------
-;; Op classification, used by the optimiser and by the visualizer.
+;; Op classification. The numbering above exists so these are range tests: control ops come
+;; first, then value ops, and within the value ops the ones that may fold to a constant come
+;; after the two that already are their own value.
 ;; ---------------------------------------------------------------------------
-;; Control ops produce control rather than a value: they are the CFG spine inside the graph.
-;; M2 adds If, Region, Loop and CProj here.
-(defn op-control? [(op i64)] (-> bool)
-  (or (= op OP-START) (or (= op OP-STOP) (= op OP-RETURN))))
+(defn op-control? [(op i64)] (-> bool) (<= op OP-CTRL-END))
+(defn op-value?   [(op i64)] (-> bool) (>= op OP-CONST))
+(defn op-phi?     [(op i64)] (-> bool) (= op OP-PHI))
+(defn op-merge?   [(op i64)] (-> bool) (or (= op OP-REGION) (= op OP-LOOP)))
+(defn op-multi?   [(op i64)] (-> bool) (or (= op OP-IF) (= op OP-RETURN)))
 
-;; No Phi op exists until M2, so this is false for every op there is. It is a classification,
-;; not a placeholder: when Phi lands, it goes here.
-(defn op-phi? [(op i64)] (-> bool) false)
-
-;; Likewise memory-producing ops arrive with memory SSA in M4.
+;; Memory-producing ops arrive with memory SSA in M4.
 (defn op-memory? [(op i64)] (-> bool) false)
 
-;; With no loops there are no back edges. M2's Loop marks input 2 as its back edge.
-(defn n-back-edge? [(n i64) (i i64)] (-> bool) false)
+;; Value numbering covers everything except the three identity-bearing nodes. Start and Stop
+;; are singletons; two `Arg`s are different arguments even with identical types, so merging
+;; them would merge two parameters.
+(defn op-gvn? [(op i64)] (-> bool)
+  (and (> op OP-STOP) (!= op OP-ARG)))
 
-;; Ops whose operands may be swapped, which is what lets value numbering see `a+b` and `b+a`
-;; as one node once the inputs are ordered canonically.
+;; May be replaced by a constant when its type says the value is known. Control cannot (a
+;; control edge is not a value), `Const` already is one, and `Arg` is opaque by construction.
+(defn op-foldable? [(op i64)] (-> bool) (>= op OP-PROJ))
+
+;; A loop's input 2 is its back edge. Everything else flows forwards.
+(defn n-back-edge? [(n i64) (i i64)] (-> bool)
+  (and (= (n-op n) OP-LOOP) (= i 2)))
+
 (defn op-commutes? [(op i64)] (-> bool)
   (or (= op OP-ADD) (or (= op OP-MUL) (= op OP-EQ))))
 
@@ -228,7 +241,24 @@
 
 ;; The normal way to change an edge. Keeps def-use in step, kills a def that just lost its
 ;; last use, and re-queues anything whose analysis depended on this node.
+;; Closing a Loop's control back edge while a Phi on it still has an unset input is an ordering
+;; error: after this the region is no longer in progress, so that Phi starts meeting a path
+;; whose value does not exist yet. Caught here rather than left to surface as a deleted loop.
+(defn n-check-loop-close [(n i64) (i i64) (d i64)] (-> i64)
+  (if (not (and (and (= (n-op n) OP-LOOP) (= i 2)) (= (n-in n i) NO-NODE))) 0
+    (let [len (n-nouts n) (mut k) 0]
+      (loop
+        (if (>= (load k) len) (break)
+          (do (let [u (n-out n (load k))]
+                (if (and (op-phi? (n-op u)) (n-in-progress? u))
+                    (do (panic-corrupt "closing a loop's back edge while a phi on it is still open: close the phis first") 0)
+                  0))
+              (store! k (+ (load k) 1))
+              0)))
+      0)))
+
 (defn n-set-def! [(n i64) (i i64) (d i64)] (-> i64)
+  (n-check-loop-close n i d)
   (let [old (n-in n i)]
     (if (= old d) 0
       (do
@@ -397,12 +427,12 @@
     o))
 
 (defn gvn-remove! [(n i64)] (-> i64)
-  (if (op-pure? (n-op n)) (do (hm-remove! [i64 i64] (field (graph) gvn) n) 0) 0))
+  (if (op-gvn? (n-op n)) (do (hm-remove! [i64 i64] (field (graph) gvn) n) 0) 0))
 
 ;; Look up a structurally identical node, or install this one. Returns the node that should
 ;; be used from here on.
 (defn gvn! [(n i64)] (-> i64)
-  (if (not (op-pure? (n-op n))) n
+  (if (not (op-gvn? (n-op n))) n
     (match (hm-get (load (field (graph) gvn)) n)
       (Some [e] (if (or (= e n) (n-dead? e)) n e))
       (None [] (do (hm-put! [i64 i64] (field (graph) gvn) n n) n)))))
@@ -411,23 +441,30 @@
 ; compute: the type of a node from its inputs
 ; ============================================================================
 (defn n-compute [(n i64)] (-> i64)
-  (let [op (n-op n)]
-    (case op
-      0  (t-ctrl)                          ; Start
-      1  (t-bot)                           ; Stop
-      2  (t-tuple2 (n-in-ty n 0) (n-in-ty n 1))   ; Return (ctrl, value)
-      3  (n-aux n)                         ; Const: its type IS the constant
-      4  (n-aux n)                         ; Arg: an opaque value of its declared type
-      5  (arith-compute OP-ADD   (n-in-ty n 1) (n-in-ty n 2))
-      6  (arith-compute OP-SUB   (n-in-ty n 1) (n-in-ty n 2))
-      7  (arith-compute OP-MUL   (n-in-ty n 1) (n-in-ty n 2))
-      8  (arith-compute OP-DIV   (n-in-ty n 1) (n-in-ty n 2))
-      9  (minus-compute (n-in-ty n 1))
-      10 (not-compute   (n-in-ty n 1))
-      11 (cmp-compute OP-EQ (n-in-ty n 1) (n-in-ty n 2))
-      12 (cmp-compute OP-LT (n-in-ty n 1) (n-in-ty n 2))
-      13 (cmp-compute OP-LE (n-in-ty n 1) (n-in-ty n 2))
-      (t-bot))))
+  (case (n-op n)
+    OP-START  (t-ctrl)
+    OP-STOP   (t-bot)
+    OP-XCTRL  (t-xctrl)
+    OP-RETURN (t-tuple2 (n-in-ty n 0) (n-in-ty n 1))
+    OP-IF     (if-compute n)
+    OP-REGION (region-compute n)
+    OP-LOOP   (loop-compute n)
+    OP-CPROJ  (proj-compute n)
+    OP-PROJ   (proj-compute n)
+    OP-CONST  (n-aux n)                    ; a Const's type IS the constant
+    OP-ARG    (n-aux n)                    ; an opaque value of its declared type
+    OP-PHI    (phi-compute n)
+    OP-CAST   (cast-compute n)
+    OP-ADD    (arith-compute OP-ADD (n-in-ty n 1) (n-in-ty n 2))
+    OP-SUB    (arith-compute OP-SUB (n-in-ty n 1) (n-in-ty n 2))
+    OP-MUL    (arith-compute OP-MUL (n-in-ty n 1) (n-in-ty n 2))
+    OP-DIV    (arith-compute OP-DIV (n-in-ty n 1) (n-in-ty n 2))
+    OP-MINUS  (minus-compute (n-in-ty n 1))
+    OP-NOT    (not-compute   (n-in-ty n 1))
+    OP-EQ     (cmp-compute OP-EQ (n-in-ty n 1) (n-in-ty n 2))
+    OP-LT     (cmp-compute OP-LT (n-in-ty n 1) (n-in-ty n 2))
+    OP-LE     (cmp-compute OP-LE (n-in-ty n 1) (n-in-ty n 2))
+    (t-bot)))
 
 ;; An absent input contributes ANY (nothing known yet), which keeps compute monotone while a
 ;; graph is still being wired up.
@@ -530,14 +567,13 @@
           (if (or (> lo hi) (= lo TY-IMIN)) (t-int)
             (t-int-range (- 0 hi) (- 0 lo))))))))
 
-;; JavaScript truthiness. `undefined` and `null` are always falsey; an integer is falsey only
-;; at 0. Anything wider than that is just `bool`.
+;; `!x` is the truthiness question with the answer inverted, so it asks the same predicates
+;; the If does rather than carrying a second, smaller copy of the rules.
 (defn not-compute [(a i64)] (-> i64)
   (if (ty-high? a) (t-top)
-    (let [k (ty-kinds-of a)]
-      (if (or (= k VK-UNDEF) (= k VK-NULL)) (t-bool-con true)
-        (if (and (or (= k VK-INT) (= k VK-BOOL)) (ty-const? a))
-            (t-bool-con (= (ty-int-lo a) 0))
+    (let [f (ty-can-be-falsey? a) tr (ty-can-be-truthy? a)]
+      (if (and f (not tr)) (t-bool-con true)
+        (if (and tr (not f)) (t-bool-con false)
           (t-bool))))))
 
 (defn cmp-compute [(op i64) (a i64) (b i64)] (-> i64)
@@ -547,18 +583,347 @@
       (let [x (ty-int-lo a) y (ty-int-lo b)]
         (t-bool-con (if (= op OP-EQ) (= x y) (if (= op OP-LT) (< x y) (<= x y))))))))
 
+;; ---------------------------------------------------------------------------
+;; Removing a positional input
+;; ---------------------------------------------------------------------------
+;; Only valid for nodes whose inputs are a positional LIST (a Region's paths, a Phi's values,
+;; Stop's returns) rather than fixed slots. Compressing an Add's operands would be nonsense.
+(defn n-del-def! [(n i64) (i i64)] (-> i64)
+  (let [old (n-in n i) len (n-nins n) ins (field (nd n) ins) (mut k) i]
+    (loop
+      (if (>= (+ (load k) 1) len) (break)
+        (do (al-set! [i64] ins (load k) (al-get (load ins) (+ (load k) 1)))
+            (store! k (+ (load k) 1))
+            0)))
+    (al-pop! [i64] ins)
+    (store! (field (nd n) hash) 0)
+    (if (!= old NO-NODE)
+        (if (n-del-use! old n) (n-kill! old) (wl-push! old))
+      0)
+    (n-move-deps! n)
+    (wl-push! n)
+    0))
+
+;; ---------------------------------------------------------------------------
+;; THE IN-PROGRESS CONTRACT, which a front end must honour
+;; ---------------------------------------------------------------------------
+;; A merge still being built has a null final input. Two rules follow, and together they are a
+;; contract on whoever builds the graph:
+;;
+;;   1. An in-progress merge reports CONTROL, and a Phi on one reports its DECLARED type.
+;;      Otherwise the not-yet-attached path makes the region look dead and the optimiser
+;;      deletes a loop body that was about to be filled in.
+;;   2. A loop body must be built AND PEEPHOLED inside that window, and the Phis closed before
+;;      the control back edge.
+;;
+;; Rule 2 is the one that bites. Build `i = 0; while(true) i = i + 1;` by closing the loop
+;; first and only then peepholing the body, and here is what happens: with the region no longer
+;; in progress and the back-edge value still unanalysed, the phi meets only the entry and
+;; reports `int=0`. That is a perfectly good OPTIMISTIC answer and it will fall. But `i + 1`
+;; then computes `int=1`, which is a constant, and folding is irreversible: the increment
+;; becomes the literal 1, the phi loses its only other user, and the entire loop is deleted.
+;; Nothing reports an error, because every individual step was locally justified.
+;;
+;; Build it in the right order and the phi reports `int` throughout, `i + 1` is `int`, and after
+;; closing the loop everything is already at its fixpoint.
+;;
+;; The general defence is M7's phase structure, which analyses to a fixpoint before it
+;; transforms anything. Until then, the contract is on the builder, and `n-set-def!` checks the
+;; one part of it that is cheap to check.
+(defn n-in-progress? [(n i64)] (-> bool)
+  (and (> (n-nins n) 1) (= (n-in n (- (n-nins n) 1)) NO-NODE)))
+
+(defn n-xctrl [] (-> i64) (n-peephole (n-new OP-XCTRL 0)))
+
+; ============================================================================
+; JavaScript truthiness
+; ============================================================================
+;; `if` and `!` both need to know whether a value can be falsey, truthy, or either. This is
+;; not "nonzero": false, 0, -0, NaN, "", null and undefined are all falsey, and every object,
+;; function and symbol is truthy. Defining it in one place is the difference between two ops
+;; agreeing and two ops quietly drifting apart.
+;;
+;; `str` and `bigint` appear in BOTH answers, because "" and 0n are falsey while "x" and 1n are
+;; truthy and the lattice carries no refinement yet to tell them apart. That is imprecision,
+;; not unsoundness: it costs a branch, never a wrong answer.
+(defn f64-nan-bits? [(b i64)] (-> bool)
+  (and (= (& b 9218868437227405312) 9218868437227405312)   ; exponent all ones
+       (!= (& b 4503599627370495) 0)))                      ; and a non-zero mantissa
+
+(defn fbits-falsey? [(b i64)] (-> bool)
+  (or (= (& b TY-IMAX) 0)          ; +0.0 or -0.0: the sign bit does not matter
+      (f64-nan-bits? b)))
+
+(defn range-has? [(lo i64) (hi i64) (v i64)] (-> bool)
+  (and (<= lo hi) (and (<= lo v) (<= v hi))))
+(defn range-has-other-than? [(lo i64) (hi i64) (v i64)] (-> bool)
+  (and (<= lo hi) (or (< lo v) (> hi v))))
+
+(const VK-ALWAYS-FALSEY i64 3)      ; undefined | null
+(const VK-ALWAYS-TRUTHY i64 832)    ; sym | obj | fun
+(const VK-EITHER-WAY    i64 160)    ; str | bigint: "" and 0n are falsey, others are not
+
+(defn ty-can-be-falsey? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TVal [v]
+      (let [k (val-kinds v)]
+        (or (!= (& k (| VK-ALWAYS-FALSEY VK-EITHER-WAY)) 0)
+         (or (and (!= (& k (| VK-INT VK-BOOL)) 0) (range-has? (val-ilo v) (val-ihi v) 0))
+             (and (!= (& k VK-FLT) 0)
+                  (or (!= (val-fsz v) FSZ-CON) (fbits-falsey? (val-fbits v))))))))
+    (TBot   [] true)                ; ALL includes every falsey value
+    (TTop   [] false) (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false)))
+
+(defn ty-can-be-truthy? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TVal [v]
+      (let [k (val-kinds v)]
+        (or (!= (& k (| VK-ALWAYS-TRUTHY VK-EITHER-WAY)) 0)
+         (or (and (!= (& k (| VK-INT VK-BOOL)) 0)
+                  (range-has-other-than? (val-ilo v) (val-ihi v) 0))
+             (and (!= (& k VK-FLT) 0)
+                  (or (!= (val-fsz v) FSZ-CON) (not (fbits-falsey? (val-fbits v)))))))))
+    (TBot   [] true)
+    (TTop   [] false) (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false)))
+
+; ============================================================================
+; Control-flow compute
+; ============================================================================
+;; An If's type is a TUPLE of its two control outputs, slot 0 true and slot 1 false. That is
+;; the whole trick behind dead-code elimination here: a branch that provably is not taken shows
+;; up as XCtrl in one slot, and everything downstream follows from ordinary type propagation
+;; rather than from a separate reachability pass.
+(defn t-if-both    [] (-> i64) (t-tuple2 (t-ctrl)  (t-ctrl)))
+(defn t-if-true    [] (-> i64) (t-tuple2 (t-ctrl)  (t-xctrl)))
+(defn t-if-false   [] (-> i64) (t-tuple2 (t-xctrl) (t-ctrl)))
+(defn t-if-neither [] (-> i64) (t-tuple2 (t-xctrl) (t-xctrl)))
+
+(defn if-compute [(n i64)] (-> i64)
+  (let [c (n-in-ty n 0) p (n-in-ty n 1)]
+    ; an If in unreachable code takes neither branch
+    (if (and (!= c (t-ctrl)) (!= c (t-bot))) (t-if-neither)
+      (if (ty-high? p) (t-if-neither)
+        (let [f (ty-can-be-falsey? p) tr (ty-can-be-truthy? p)]
+          (if (and tr (not f)) (t-if-true)
+            (if (and f (not tr)) (t-if-false)
+              (t-if-both))))))))
+
+;; A merge is reachable when ANY path into it is. Input 0 is unused and skipped.
+(defn region-compute [(n i64)] (-> i64)
+  (if (n-in-progress? n) (t-ctrl)
+    (let [len (n-nins n) (mut t) (t-xctrl) (mut i) 1]
+      (loop
+        (if (>= (load i) len) (break)
+          (do (store! t (ty-meet (load t) (n-in-ty n (load i))))
+              (store! i (+ (load i) 1))
+              0)))
+      (load t))))
+
+;; A loop is reachable exactly when its ENTRY is. Meeting the back edge in would make the
+;; loop's liveness depend on its own body, which is circular and never settles.
+(defn loop-compute [(n i64)] (-> i64)
+  (if (n-in-progress? n) (t-ctrl) (n-in-ty n 1)))
+
+(defn proj-compute [(n i64)] (-> i64)
+  (let [t (n-in-ty n 0) idx (n-aux n)]
+    (match (ty-get t)
+      (TTuple [off len] (if (< idx len) (ty-kid off idx) (t-bot)))
+      (TTop   [] (t-top))
+      (TXCtrl [] (t-top))
+      (TBot   [] (t-bot))
+      (TCtrl  [] (t-bot))
+      (TVal [v] (if (val-high? v) (t-top) (t-bot))))))
+
+;; A Phi's type is the meet over the paths that are actually LIVE, joined with its declared
+;; type (aux). Reading a dead path's value would poison the result with a value that cannot
+;; arrive, so the phi records a dependency on the region's control inputs: when a path dies,
+;; the phi has to be revisited.
+(defn phi-compute [(n i64)] (-> i64)
+  (let [r (n-in n 0)]
+    (if (or (= r NO-NODE) (not (op-merge? (n-op r))))
+        ; the region collapsed under us; hold the current answer unless control is gone
+        (if (= r NO-NODE) (t-top) (if (ty-high? (n-ty r)) (t-top) (n-ty n)))
+      (if (n-in-progress? r) (n-aux n)
+        (let [len (n-nins n) (mut t) (t-top) (mut i) 1]
+          (loop
+            (if (>= (load i) len) (break)
+              (do (n-add-dep! r n)
+                  (if (ty-high? (n-in-ty r (load i))) 0
+                    (store! t (ty-meet (load t) (n-in-ty n (load i)))))
+                  (store! i (+ (load i) 1))
+                  0)))
+          (let [joined (ty-join (load t) (n-aux n))]
+            ; Around a loop, an induction variable's range would creep upward on every trip and
+            ; the analysis would never settle. Widening is what bounds it. This widens on any
+            ; change to a non-constant, which is blunter than it needs to be and loses some
+            ; loop ranges Simple keeps; termination is the property that matters here, and
+            ; sharpening it belongs with loop optimisation.
+            (if (and (and (= (n-op r) OP-LOOP) (!= joined (n-ty n))) (not (ty-const? joined)))
+                (ty-widen joined)
+              joined)))))))
+
+;; Cast is the mechanism the entire guard design rests on: after a type test, the value on the
+;; taken edge is known to be narrower, and a Cast is how that knowledge enters the graph.
+(defn cast-compute [(n i64)] (-> i64)
+  (let [t (n-in-ty n 1) target (n-aux n) j (ty-join t target)]
+    ; A high join from a low input means the two disagree and no value satisfies the cast.
+    ; Reporting that would read as dead code and delete a live branch, so hold the prior
+    ; answer instead. This is Simple's "freeze" rule.
+    (if (and (ty-high? j) (not (ty-high? t)))
+        (if (= (n-ty n) (t-top)) target (n-ty n))
+      j)))
+
+; ============================================================================
+; Control-flow idealize
+; ============================================================================
+(defn region-has-phi? [(n i64)] (-> bool)
+  (let [len (n-nouts n) (mut i) 0 (mut found) false]
+    (loop
+      (if (or (>= (load i) len) (load found)) (break)
+        (do (if (op-phi? (n-op (n-out n (load i)))) (store! found true) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+;; The index of a path that cannot be reached, or 0 for none. A Loop never gives up its entry:
+;; a loop whose entry died is handled by the loop dying, not by rewriting it into a region.
+(defn region-dead-path [(n i64)] (-> i64)
+  (let [len (n-nins n) (mut i) 1 (mut found) 0]
+    (loop
+      (if (or (>= (load i) len) (!= (load found) 0)) (break)
+        (do (if (and (= (n-in-ty n (load i)) (t-xctrl))
+                     (not (and (= (n-op n) OP-LOOP) (= (load i) 1))))
+                (store! found (load i))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+;; Region and Phi arity is ONE invariant, not two. Dropping a region path without dropping the
+;; matching value from every Phi on that region leaves each Phi reading the wrong path, which
+;; is a miscompile that typechecks. They are removed together, here, or not at all.
+(defn region-remove-path! [(n i64) (path i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (n-nouts n)) (break)
+        (do (let [u (n-out n (load i))]
+              (if (and (op-phi? (n-op u)) (= (n-nins u) (n-nins n)))
+                  (do (n-del-def! u path) 0)
+                0))
+            (store! i (+ (load i) 1))
+            0))))
+  (n-del-def! n path)
+  n)
+
+;; `if(p) {} else {}` with nothing merged is not a branch at all: both paths come straight off
+;; the same If, so the merge is just that If's own control input.
+(defn region-collapse-diamond [(n i64)] (-> i64)
+  ; a Loop's two inputs are entry and back edge, never two arms of one branch
+  (if (or (= (n-op n) OP-LOOP) (or (!= (n-nins n) 3) (region-has-phi? n))) NO-NODE
+    (let [a (n-in n 1) b (n-in n 2)]
+      (if (or (= a NO-NODE) (= b NO-NODE)) NO-NODE
+        (if (and (and (= (n-op a) OP-CPROJ) (= (n-op b) OP-CPROJ))
+                 (and (= (n-in a 0) (n-in b 0)) (= (n-op (n-in a 0)) OP-IF)))
+            (n-in (n-in a 0) 0)
+          NO-NODE)))))
+
+(defn region-idealize [(n i64)] (-> i64)
+  (if (n-in-progress? n) NO-NODE
+    (if (<= (n-nins n) 1) (n-xctrl)                    ; no paths left: unreachable
+      (let [dead (region-dead-path n)]
+        (if (!= dead 0) (region-remove-path! n dead)
+          ; a single-path merge with nothing merged is not a merge; a Loop keeps its identity
+          (if (and (and (= (n-nins n) 2) (not (region-has-phi? n))) (!= (n-op n) OP-LOOP))
+              (n-in n 1)
+            (region-collapse-diamond n)))))))
+
+(defn cproj-idealize [(n i64)] (-> i64)
+  (let [m (n-in n 0) idx (n-aux n)]
+    (if (= m NO-NODE) NO-NODE
+      (match (ty-get (n-ty m))
+        (TTuple [off len]
+          ; XCtrl, not merely high: see the note on phi-single-input
+          (if (and (< idx len) (= (ty-kid off idx) (t-xctrl))) (n-xctrl)
+            ; the sibling is dead, so the If does not branch: this projection IS its control
+            (if (and (and (= (n-op m) OP-IF) (= len 2))
+                     (= (ty-kid off (- 1 idx)) (t-xctrl)))
+                (n-in m 0)
+              NO-NODE)))
+        (TBot [] NO-NODE) (TTop [] NO-NODE) (TCtrl [] NO-NODE) (TXCtrl [] NO-NODE)
+        (TVal [v] NO-NODE)))))
+
+;; The one value every live path contributes, ignoring self-references (a loop phi fed by its
+;; own back edge), or NO-NODE when the paths disagree.
+;; ANALYSIS versus TRANSFORMATION, and it matters here more than anywhere else in the file.
+;; `phi-compute` skips any path whose control is HIGH, which includes ANY, because an
+;; optimistic answer gets revisited when the control type falls. This function feeds an
+;; irreversible rewrite, so it may only skip a path that is provably unreachable: XCtrl. Using
+;; `ty-high?` here instead makes the result depend on worklist order, and a loop phi visited
+;; before its Loop's control was computed collapses to its entry value, turning the induction
+;; variable into a constant.
+(defn phi-single-input [(n i64) (r i64)] (-> i64)
+  (let [len (n-nins n) (mut live) NO-NODE (mut ok) true (mut i) 1]
+    (loop
+      (if (or (>= (load i) len) (not (load ok))) (break)
+        (do (let [v (n-in n (load i))]
+              (if (or (= (n-in-ty r (load i)) (t-xctrl)) (= v n)) 0
+                (if (= (load live) NO-NODE) (store! live v)
+                  (if (!= (load live) v) (store! ok false) 0))))
+            (store! i (+ (load i) 1))
+            0)))
+    (if (load ok) (load live) NO-NODE)))
+
+(defn phi-idealize [(n i64)] (-> i64)
+  (let [r (n-in n 0)]
+    (if (or (= r NO-NODE) (not (op-merge? (n-op r)))) (n-in n 1)
+      (if (or (n-in-progress? r) (<= (n-nins r) 1)) NO-NODE
+        (let [u (phi-single-input n r)]
+          ; Only collapse when the survivor is at least as specific as the phi. Otherwise the
+          ; replacement would WIDEN the type at every use, losing what the join with the
+          ; declared type had established.
+          (if (and (!= u NO-NODE) (ty-isa (n-ty u) (n-ty n))) u NO-NODE))))))
+
+;; Stop drops a Return that cannot be reached. Without this, unreachable code is merely TYPED
+;; as unreachable and still prints, so "the dead branch is gone" would be a claim about the
+;; types rather than something visible in the program.
+(defn stop-idealize [(n i64)] (-> i64)
+  (let [len (n-nins n) (mut i) 0 (mut found) NO-NODE]
+    (loop
+      (if (or (>= (load i) len) (!= (load found) NO-NODE)) (break)
+        (do (let [r (n-in n (load i))]
+              ; XCtrl, not merely high: a Return whose control is still ANY has not been
+              ; shown unreachable, and dropping it would be premature
+              (if (and (!= r NO-NODE) (= (n-in-ty r 0) (t-xctrl)))
+                  (store! found (load i))
+                0))
+            (store! i (+ (load i) 1))
+            0)))
+    (if (= (load found) NO-NODE) NO-NODE
+      (do (n-del-def! n (load found)) n))))
+
+(defn cast-idealize [(n i64)] (-> i64)
+  ; The cast is discharged: the input already satisfies it, so the check costs nothing. This is
+  ; how a proven type annotation disappears from the graph entirely.
+  (if (ty-isa (n-in-ty n 1) (n-aux n)) (n-in n 1) NO-NODE))
+
 ; ============================================================================
 ; idealize: local rewrites
 ; ============================================================================
 (defn n-idealize [(n i64)] (-> i64)
   (case (n-op n)
-    5  (add-idealize n)
-    6  (sub-idealize n)
-    7  (mul-idealize n)
-    9  (minus-idealize n)
-    11 (cmp-idealize n)
-    12 (cmp-idealize n)
-    13 (cmp-idealize n)
+    OP-STOP   (stop-idealize n)
+    OP-REGION (region-idealize n)
+    OP-LOOP   (region-idealize n)
+    OP-CPROJ  (cproj-idealize n)
+    OP-PHI    (phi-idealize n)
+    OP-CAST   (cast-idealize n)
+    OP-ADD    (add-idealize n)
+    OP-SUB    (sub-idealize n)
+    OP-MUL    (mul-idealize n)
+    OP-MINUS  (minus-idealize n)
+    OP-EQ     (cmp-idealize n)
+    OP-LT     (cmp-idealize n)
+    OP-LE     (cmp-idealize n)
     NO-NODE))
 
 (defn n-int-con? [(n i64) (v i64)] (-> bool)
@@ -616,6 +981,18 @@
 ; ============================================================================
 ; peephole
 ; ============================================================================
+;; Has every input this node reads actually been analysed? A NO-NODE input contributes nothing
+;; and is skipped; a real input still sitting at ANY means its type is not known yet.
+(defn n-inputs-analysed? [(n i64)] (-> bool)
+  (let [len (n-nins n) (mut i) 0 (mut ok) true]
+    (loop
+      (if (or (>= (load i) len) (not (load ok))) (break)
+        (do (let [d (n-in n (load i))]
+              (if (and (!= d NO-NODE) (= (n-ty d) (t-top))) (store! ok false) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load ok)))
+
 (defn n-const [(t i64)] (-> i64)
   (n-peephole (n-new1 OP-CONST t (g-start))))
 
@@ -632,8 +1009,12 @@
         (if (!= t (n-ty n))
             (do (n-set-ty! n t) (wl-push-outs! n) (n-move-deps! n) 0)
           0)
-        ; a pure node whose type is a single value IS that value
-        (if (and (and (op-pure? (n-op n)) (ty-const? t)) (!= (n-op n) OP-CONST))
+;; ANALYSIS versus TRANSFORMATION again, and this was the third place it bit. Replacing a
+        ;; node by a constant is irreversible, so the constant answer has to be final, not
+        ;; provisional. An input still at ANY has not been analysed yet: around a loop, the phi
+        ;; is momentarily `int=0` because its back-edge value has no type yet, and folding there
+        ;; turns the induction variable into its initial value and deletes the loop.
+        (if (and (and (op-foldable? (n-op n)) (ty-const? t)) (n-inputs-analysed? n))
             (let [c (n-new1 OP-CONST t (g-start))]
               (n-set-ty! c t)
               (let [c2 (gvn! c)]
@@ -740,26 +1121,43 @@
 ; ============================================================================
 ; Printing
 ; ============================================================================
-;; Expression form, the shape Simple's tests assert on: `return ((arg+2)*3);`. Compact enough
-;; to read in a diff and structural enough that a wrong rewrite changes it.
+;; Expression form recurses through DATA only. Control nodes and Phis print as a reference
+;; (`Region7`, `phi9`), because a loop phi can reach itself through its own back edge and an
+;; expression printer that followed that would not terminate. Once a program has control flow,
+;; the flat form below is the readable one and the Graphviz dump is better still.
+(defn cproj-label [(n i64)] (-> (slice u8))
+  (let [m (n-in n 0)]
+    (if (and (!= m NO-NODE) (= (n-op m) OP-IF))
+        (if (= (n-aux n) 0) "True" "False")
+      "CProj")))
+
 (defn n-print [(w (ptr Writer)) (n i64)] (-> i64)
   (if (= n NO-NODE) (ps w "_")
-    (if (n-dead? n) (do (ps w "DEAD") 0)
+    (if (n-dead? n) (ps w "DEAD")
       (case (n-op n)
-        0 (ps w "Start")
-        1 (stop-print w n)
-        2 (do (ps w "return ") (n-print w (n-in n 1)) (ps w ";") 0)
-        3 (ty-print w (n-ty n))
-        4 (ps w "arg")
-        5 (binop-print w n "+")
-        6 (binop-print w n "-")
-        7 (binop-print w n "*")
-        8 (binop-print w n "/")
-        9 (do (ps w "(-") (n-print w (n-in n 1)) (ps w ")") 0)
-        10 (do (ps w "(!") (n-print w (n-in n 1)) (ps w ")") 0)
-        11 (binop-print w n "==")
-        12 (binop-print w n "<")
-        13 (binop-print w n "<=")
+        OP-START  (ps w "Start")
+        OP-STOP   (stop-print w n)
+        OP-RETURN (do (ps w "return ") (n-print w (n-in n 1)) (ps w ";") 0)
+        OP-XCTRL  (ps w "#dead")
+        OP-IF     (do (ps w "if(") (n-print w (n-in n 1)) (ps w ")") 0)
+        OP-CPROJ  (do (ps w (cproj-label n)) (fmt w "{d}" n) 0)
+        OP-REGION (do (ps w "Region") (fmt w "{d}" n) 0)
+        OP-LOOP   (do (ps w "Loop") (fmt w "{d}" n) 0)
+        OP-PHI    (do (ps w "phi") (fmt w "{d}" n) 0)
+        OP-PROJ   (do (fmt w "n{d}.{d}" (n-in n 0) (n-aux n)) 0)
+        OP-CAST   (do (ps w "(") (ty-print w (n-aux n)) (ps w ")")
+                      (n-print w (n-in n 1)) 0)
+        OP-CONST  (ty-print w (n-ty n))
+        OP-ARG    (ps w "arg")
+        OP-ADD    (binop-print w n "+")
+        OP-SUB    (binop-print w n "-")
+        OP-MUL    (binop-print w n "*")
+        OP-DIV    (binop-print w n "/")
+        OP-MINUS  (do (ps w "(-") (n-print w (n-in n 1)) (ps w ")") 0)
+        OP-NOT    (do (ps w "(!") (n-print w (n-in n 1)) (ps w ")") 0)
+        OP-EQ     (binop-print w n "==")
+        OP-LT     (binop-print w n "<")
+        OP-LE     (binop-print w n "<=")
         (do (ps w (op-name (n-op n))) 0)))))
 
 (defn binop-print [(w (ptr Writer)) (n i64) (sym (slice u8))] (-> i64)
@@ -788,6 +1186,13 @@
         (do (if (n-dead? (load i)) 0
               (do (fmt w "n{d}: " (load i))
                   (ps w (op-name (n-op (load i))))
+                  ; aux is the slot index for projections and the target type for a cast; both
+                  ; change what the node MEANS, so a flat dump that hides them is misleading
+                  (if (or (= (n-op (load i)) OP-CPROJ) (= (n-op (load i)) OP-PROJ))
+                      (do (fmt w ".{d}" (n-aux (load i))) 0)
+                    (if (= (n-op (load i)) OP-CAST)
+                        (do (ps w " to ") (ty-print w (n-aux (load i))) 0)
+                      0))
                   (ps w " : ")
                   (ty-print w (n-ty (load i)))
                   (ps w "  <-")

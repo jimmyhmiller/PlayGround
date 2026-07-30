@@ -194,12 +194,14 @@ BODY = f"""
 <div class="page">
 
 <header class="masthead">
-  <span class="eyebrow">aot-kit-gradual &middot; milestone M1 &middot; node engine</span>
+  <span class="eyebrow">aot-kit-gradual &middot; milestones M1&ndash;M2 &middot; node engine and control flow</span>
   <h1>Reading the graph</h1>
   <p class="standfirst">The IR is a sea of nodes, so there is no line-by-line listing to read.
   These are the compiler's own Graphviz dumps, before and after peepholes, from
   <code>src/dot.coil</code>. Every node is labelled with <strong>what the lattice concluded
-  about it</strong>, because that is the question this compiler is mostly about.</p>
+  about it</strong>, because that is the question this compiler is mostly about. The last
+  specimen is the one the whole design is aimed at: a guard, with an unboxed fast path and a
+  generic fallback, both real code in the same binary.</p>
 </header>
 
 <div class="panel legend">
@@ -219,6 +221,8 @@ BODY = f"""
   <dl>
     <div><dt>direction</dt><dd>edges run use &rarr; def, so <b>definitions sit above their
       uses</b>. Read a graph from the bottom.</dd></div>
+    <div><dt>dashed red</dt><dd>a loop <b>back edge</b>, drawn without a ranking constraint so
+      it does not turn the layout inside out.</dd></div>
     <div><dt>live / created</dt><dd>nodes surviving, and nodes ever allocated. The gap is what
       the optimiser threw away.</dd></div>
   </dl>
@@ -262,6 +266,52 @@ BODY = f"""
         "<code>num</code> too. Had that been <code>dyn + 1</code> it would be <code>dyn</code>, "
         "since <code>+</code> can concatenate strings.")}
 
+{pair("09-dead-branch-before", "10-dead-branch-after",
+      "A branch that is not a branch", "if (0) return 1; else return 2;",
+      "Reachability is not a separate pass here. An <code>If</code>'s type is a tuple of its two "
+      "control outputs, so an untaken branch is simply <code>~ctrl</code> in one slot and "
+      "everything downstream follows from ordinary type propagation.",
+      "In the before graph the <code>If</code> is already typed <code>[~ctrl ctrl]</code> and the "
+      "true arm is <code>~ctrl</code>: the analysis has decided, but nothing has been rewritten. "
+      "After, the <code>If</code>, both projections and the unreachable <code>Return</code> are "
+      "all gone, and <code>Stop</code> has one input instead of two. Note that JavaScript "
+      "truthiness is doing the deciding, not \"is it a non-zero integer\": "
+      "<code>undefined</code>, <code>NaN</code> and <code>-0.0</code> all take the false arm, and "
+      "every object takes the true one.")}
+
+{single("11-diamond",
+        "Merging with a phi", "if (arg) x = 1; else x = a + 2; return x;",
+        "When a branch does produce a value, the merge needs a <code>Phi</code>: one input per "
+        "path, positionally matched to the <code>Region</code>'s control inputs.",
+        "The phi's type is the meet over the live arms, so it is narrower than the declared "
+        "<code>dyn</code> it was built with. That positional match between region paths and phi "
+        "inputs is a single invariant rather than two, which is why removing a dead path removes "
+        "the matching phi input in the same operation. Letting those diverge for even one "
+        "peephole gives a phi that reads the wrong arm, which is a miscompile that typechecks.")}
+
+{single("12-loop",
+        "A loop, and why it terminates", "i = 0; while (true) i = i + 1;",
+        "The dashed edge is the back edge. The interesting thing is not the shape but the "
+        "<code>Phi</code>'s type, because that is where the analysis could fail to terminate.",
+        "The phi settles at <code>int</code>. It passes through <code>int=0</code>, then "
+        "<code>int=[0..1]</code>, then wider ranges, and a widening counter in the type forces it "
+        "to the axis bottom after a few steps instead of letting it climb for ever. Without that "
+        "counter this graph does not converge at all. The type is checked to be identical under "
+        "twelve worklist seeds, because inferred types that depend on visit order are a latent "
+        "miscompile.")}
+
+{single("13-guard",
+        "A guard, in full", "if (x < 100) { fast: (int)x + 1 } else { slow: x + 1 }",
+        "This is the shape DECISIONS.md D4 describes and the reason for the whole design. There "
+        "is no deoptimisation machinery anywhere in it: a guard is an ordinary branch, and the "
+        "fallback is ordinary code compiled into the same binary.",
+        "Follow the two arms. On the true arm a <code>Cast to int</code> carries the narrowed "
+        "type in, and the add above it is <code>Add int</code>: an unboxed integer add. On the "
+        "false arm the same source expression is <code>Add dyn</code>, the fully generic path. "
+        "Both are real, both are reachable, and the <code>Phi</code> merges them. Every "
+        "mechanism in that picture already existed for other reasons, which is exactly why "
+        "guards are not a node kind.")}
+
 <div class="panel finding">
   <h2>What the pictures showed that the tests did not</h2>
   <p>In <em>Nine expressions</em>, look at the before graph: the <code>Sub</code> of two
@@ -275,6 +325,14 @@ BODY = f"""
   <code>NaN</code>. Same for <code>x == x</code> and <code>x * 0</code>. There is a test
   asserting all three stay withheld, and the graphs are how you check the test is testing what
   you think.</p>
+  <p>The loop specimen exposed something sharper. Building it in the wrong order, closing the
+  loop before peepholing its body, deletes the entire loop and reports no error. The phi
+  momentarily reads <code>int=0</code> because its back-edge value has no type yet; that is a
+  fine <em>optimistic</em> answer and it would fall. But <code>i + 1</code> then computes
+  <code>int=1</code>, which is a constant, and folding is irreversible. Every individual step is
+  locally justified and the result is a deleted loop. The rule that falls out of it is worth
+  stating plainly: <strong>an analysis may act on a provisional type, a transformation may
+  not.</strong> That single mistake was sitting in three separate places.</p>
 </div>
 
 <footer>
