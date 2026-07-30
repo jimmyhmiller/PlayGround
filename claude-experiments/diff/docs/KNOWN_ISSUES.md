@@ -93,7 +93,25 @@ Measured, cold cache, gzip on both sides, after the split:
 | `/pro/30min` | **1.15 MB / 2.15 MB / 34** | 2.75 MB / 15.84 MB / 62 |
 | `/apps` | 4.09 MB / 10.51 MB / 251 | 3.04 MB / 15.06 MB / 136 |
 
-### 8. Two dev responses still go out uncompressed
+### 8. Production has the same monolith: `client.js` is 8.1 MB on cal.com
+
+The per-island split is DEV-ONLY, and the production bundle has the identical shape for
+the identical reason — `island_pins` still records static `require` edges there, so every
+island is in the one chunk. Measured on cal.com production: `client.js` **8,116 KB**, all
+client JS 8,870 KB across 86 files. Minification and DCE are the only difference from the
+17.8 MB dev number.
+
+It is gated rather than fixed because the browser has to be told which chunks a route
+needs before it hydrates, and production serves a STREAMING document. The react-server
+render discovers client references as it serializes, so the complete list only exists once
+the flight does — which the buffered dev document has (it drains the flight before
+rendering) and a streaming one does not. The reference solves this by emitting a `<script>`
+per route chunk into the document as the render discovers them; that is the shape to copy.
+
+Do NOT read the 554 KB in `project_diffpack_bundle_size` as a cal.com number — that is
+`integration/tanstack-start-reference`, where all client JS totals 545 KB across 29 files.
+
+### 9. Two dev responses still go out uncompressed
 
 Assets are compressed now (see the Resolved table), but two are not. The Node-forwarded
 HTML document is proxied as a raw response buffer rather than re-framed, so it ships

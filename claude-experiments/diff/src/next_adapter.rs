@@ -2872,10 +2872,16 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             &hooks_context_canon,
             // DEV splits the islands into per-island chunks so a page downloads the
             // islands it renders instead of every island in the app: cal.com's dev
-            // `client.js` is 17.8 MB of which /auth/login needs a fraction. Production
-            // keeps the static requires, where whole-graph DCE already shrinks the one
-            // chunk (554 KB on cal.com) and the streaming document has no place to put
-            // a chunk list yet.
+            // `client.js` is 17.8 MB of which /auth/login needs a fraction.
+            //
+            // Production still pins statically, and NOT because it does not need this —
+            // cal.com's production `client.js` is 8.1 MB for exactly the same reason, and
+            // minification plus DCE is all that separates it from the dev number. It is
+            // gated because the browser has to be told which chunks a route needs before
+            // it hydrates, and production serves a STREAMING document, which has no place
+            // to put that list yet (the react-server render discovers the references as it
+            // serializes, so the list is only complete once the flight is). The buffered
+            // dev document drains the flight first, so it has the list in time.
             if dev { PinKind::DynamicChunk } else { PinKind::StaticRequire },
         ),
     )?;
