@@ -12620,8 +12620,9 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
             "the stream end reports whether the control flow was LATE: {source}",
         );
         assert!(
-            source.contains("lateControl, tags:"),
-            "lateControl travels on the stream-end message: {source}",
+            source.contains("metaSent, lateControl, chunks: [...usedChunks], tags:"),
+            "lateControl and the route's client-reference chunk list both travel on the \
+             stream-end message: {source}",
         );
         assert!(
             NEXT_SERVER_MJS.contains("if (m && m.metaSent && m.lateControl && (m.redirect || m.notFound)) {"),

@@ -66,54 +66,40 @@ visit (what `next dev` does), which is an architecture project, deliberately def
 The persistent warm-start cache prototype (1.66s restarts) was removed by request —
 no caching approaches for now.
 
-### 7. The dev browser bundle is one 17.8 MB file: islands are pinned with static `require`
+### 7. Dev ships one chunk per island now, which is too many chunks
 
-Every page in dev downloads every `"use client"` island in the app. On cal.com's
-`/auth/login` that is the app store, the booker, all of settings and every payment
-component — 17.8 MB of JS for a login form.
+FIXED: the dev browser bundle is no longer one 17.8 MB file (see the Resolved table).
+What remains is the granularity. Per-island chunks mean `/auth/login` fetches 112 JS
+files and `/apps` 165, against Turbopack's 36 and 49, and the dev server answers each
+with `Connection: close` — so every chunk costs a fresh TCP connection, six at a time.
 
-The cause is one line. `island_pins` (`src/next_adapter.rs`) records each island's
-reachability edge as `() => require(path)` inside a never-called closure. `require` is a
-STATIC edge, and `Bundler::chunk_plan` splits only on dynamic-import roots, so all 229
-lazy islands and their transitive dependencies land in the main chunk. Nothing else is
-missing: `client_references_manifest` already fills each entry's `chunks` from the same
-chunk plan, the browser seam already installs a real `__webpack_chunk_load__`, and split
-chunks already self-register into the runtime. The pins simply never ask for a split.
+That shows up in two places. On the wire, gzip does worse on many small files than on a
+few big ones (`/auth/login`: 2.60 MB across 118 requests vs Turbopack's 1.69 MB across
+40, even though we send LESS decoded code — 8.09 MB vs 9.20 MB). And the load event
+lands later (669 ms vs 226 ms) despite the smaller payload.
 
-Measured, with the pins flipped to `import()` (`PinKind::DynamicChunk`, cal.com,
-`/auth/login`, cold cache, gzip on both sides):
+Two fixes, both independent of the split itself:
 
-| | static pins (today) | per-island chunks | Turbopack |
-|---|---:|---:|---:|
-| main chunk | 17.8 MB | **1.2 MB** | n/a |
-| on the wire | 5.16 MB | **1.55 MB** | 1.69 MB |
-| decoded | 18.35 MB | **3.75 MB** | 9.20 MB |
-| manifest entries carrying chunks | 2 of 469 | 468 of 469 | n/a |
+- Coalesce chunks below a minimum size, which is what webpack and Turbopack do. The
+  planner already groups by reachability label; a post-pass merging small groups into
+  their common parent would cut request count by roughly an order of magnitude.
+- HTTP keep-alive in the dev server. Every response currently ends the connection.
 
-So the split is byte-for-byte better than Turbopack on the same page. It is NOT enabled
-because hydration then breaks: the browser leaves each client reference's module chunk
-BLOCKED and the render reads it as an element type, dying with "Element type is invalid.
-Received a promise that resolves to: undefined. Lazy element type must resolve to a class
-or function." Only 3 of the route's references (the error boundaries) ever reach
-`requireModule`; chunk loads all succeed (4 issued, 0 failed) and a manual
-`__webpack_chunk_load__(chunk)` then `__webpack_require__(id)` in the page resolves the
-island correctly — so the seam works and the sequencing does not.
+Measured, cold cache, gzip on both sides, after the split:
 
-- `await`ing the flight decode before `hydrateRoot` does NOT fix it (tried, reverted).
-- The reference does not rely on sequencing at all: `next dev` emits a `<script>` tag per
-  route chunk in the document, so every reference is registered before hydration starts.
-  The likely fix is the same shape — have the render inject the route's chunk list and
-  load it before `hydrateRoot`, rather than depending on React's blocked-chunk path.
-- Bisected: with `PinKind::StaticRequire` both `/auth/login` and `/pro/30min` hydrate and
-  are interactive; with `DynamicChunk` neither is. Evidence in this session's transcript.
+| route | diffpack wire / decoded / requests | Turbopack wire / decoded / requests |
+|---|---|---|
+| `/auth/login` | 2.60 MB / 8.09 MB / 118 | 1.69 MB / 9.20 MB / 40 |
+| `/pro/30min` | **1.15 MB / 2.15 MB / 34** | 2.75 MB / 15.84 MB / 62 |
+| `/apps` | 4.09 MB / 10.51 MB / 251 | 3.04 MB / 15.06 MB / 136 |
 
-### 8. Dev responses were uncompressed (fixed for assets, open for the document)
+### 8. Two dev responses still go out uncompressed
 
-Assets now carry gzip and a validator, which took `/auth/login` from 18.86 MB to 5.16 MB
-on the wire. Two leaks remain: the Node-forwarded HTML document is still sent
-uncompressed (487 KB, against Turbopack's 97 KB gzipped) because it is proxied as a raw
-response buffer rather than re-framed, and `write_js` (the Fast Refresh runtime, 21 KB)
-has no compression either.
+Assets are compressed now (see the Resolved table), but two are not. The Node-forwarded
+HTML document is proxied as a raw response buffer rather than re-framed, so it ships
+uncompressed — 487 KB against Turbopack's 97 KB gzipped, which makes it the single
+biggest item on the wire for a page whose chunks are all small. And `write_js` (the Fast
+Refresh runtime, 21 KB) has no compression path at all.
 
 ## Reference-side failures (NOT diffpack bugs — do not spend time here)
 
@@ -130,6 +116,8 @@ has no compression either.
 
 | Commit | Issue |
 |---|---|
+| this commit | Dev: the browser bundle was ONE 17.8 MB `client.js`, so every page downloaded every `"use client"` island in the app (cal.com's login form pulled the app store, the booker, all of settings and every payment component) and re-parsed all of it on each full navigation: 693 ms of V8 compile against Turbopack's 33 ms, and no code cache at that size. `island_pins` recorded each island's edge as `() => require(path)` — a STATIC edge, and `chunk_plan` splits only on dynamic-import roots. Dev now pins with `import()` (`PinKind::DynamicChunk`; production keeps the static requires, where whole-graph DCE already shrinks the one chunk). Two real bugs had to be fixed for the split to work at all: the RSC seam's chunk-id -> URL table was built from `chunk_names` (root -> chunk) and so omitted every rootless shared chunk, and a module reached by BOTH a static named import and a dynamic `import()` never became a chunk root and therefore kept only the static importer's names — which shook `default` off the RSC control boundary and killed hydration on every page with "Element type is invalid. Received a promise that resolves to: undefined". Measured: `client.js` 17.8 MB -> 1.2 MB; `/auth/login` 18.86 MB -> 2.60 MB on the wire and 18.35 MB -> 8.09 MB decoded (Turbopack: 1.69 MB / 9.20 MB); `/pro/30min` 1.15 MB / 2.15 MB against Turbopack's 2.75 MB / 15.84 MB. Hydration is fiber-for-fiber with the reference on `/auth/login`, `/pro/30min` and `/apps` (858/859, 891/911, 3283/3284). |
+| this commit | Dev served every asset uncompressed and with no validator: `/auth/login` put 18.86 MB on the wire against Turbopack's 2.75 MB, 0 of 8 responses compressed against 50 of 62. Assets now carry gzip (level 1, memoised per file size+mtime) and a weak ETag, so an unchanged chunk revalidates into a 304. |
 | `b0df5053f` | Dev: hot pushes queued behind the deferred full re-emit (~1s edit-to-DOM at 1Hz cadence; FULLY resolved in `08f72d3c8` by in-place chunk patching: each edit's micro-chunk is spliced into the on-disk host chunks in ~140ms, the full re-emit became 10s-idle compaction, and edit-to-DOM measures 48-53ms flat at every cadence including the old resonance points — no residual) |
 | `b0df5053f` | Dev: global CSS edits rebuilt but never reached open browsers in the Next topology (fingerprinted at settle and delivered via the HMR client's in-place link swap) |
 | this commit | Dev: a CSS edit inherited the DEFERRED pass's schedule, because the sheet was only ever written by the full re-emit — when compaction moved to a 10s idle (`08f72d3c8`) a css edit went with it and measured **11.49s** edit-to-applied against Turbopack's 7.56s, the one axis where diffpack lost. Now: the sheet is compiled on the edit itself off a chunk-free stylesheet emit (`Bundler::emit_stylesheet_only`), compiled sheets are cached on (entry text, candidates, theme) so compaction no longer repeats the edit's own node compile, and the candidate scan is kept per file so an edit re-tokenizes one file instead of re-reading ~4,000. Measured: **546ms vs Turbopack's 7.35s (13.5x)**, and a Tailwind class added to a *component* reaches the served sheet ~234ms after the short css idle (was ~906ms). |

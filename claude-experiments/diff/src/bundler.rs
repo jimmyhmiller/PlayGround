@@ -1186,6 +1186,16 @@ struct EmitPlan {
     /// dense id -> `"./chunk.js"` for each dynamic-import root, which is how a
     /// render rewrites `import()` targets.
     chunk_names: HashMap<DenseModuleId, String>,
+    /// EVERY split chunk's file name, in plan order.
+    ///
+    /// `chunk_names` only covers chunks that own a dynamic-import root, so it misses a
+    /// shared chunk extracted out of several roots' closures. The RSC seam's chunk-id ->
+    /// URL table has to cover those too: the client-references manifest names whichever
+    /// chunk carries a client module's factory, shared or not, and the browser then calls
+    /// `__webpack_chunk_load__` with that id. Building the table from `chunk_names` left
+    /// every shared chunk out of it, and a client reference living in one died with
+    /// "__webpack_chunk_load__: unknown chunk id client.shared-16.js".
+    chunk_files: Vec<String>,
 }
 
 pub struct Bundler {
@@ -1964,6 +1974,10 @@ impl Bundler {
             Arc::new(self.build_emit_plan(reachable_dense.clone(), allowed.clone(), &plans)),
         )?;
         let chunk_names = Self::chunk_names(&plans);
+        // Every chunk's file name, which is also its chunk id: the RSC seam's id -> URL
+        // table must cover shared chunks too, and `chunk_names` only knows the ones that
+        // own a dynamic-import root (see `EmitPlan::chunk_files`).
+        let chunk_files: Vec<String> = plans.iter().map(|plan| plan.file_name.clone()).collect();
         // The scope-hoisted flat render concatenates a chunk's modules into one
         // scope, which is only sound when the chunk carries every module its
         // members statically reference. Splitting shared code out breaks that for
@@ -2173,6 +2187,7 @@ impl Bundler {
                                 &plan.members,
                                 &plan.roots,
                                 &chunk_names,
+                                &chunk_files,
                                 &runtime_ids,
                                 &global_demands,
                                 &prerequisites,
@@ -2217,6 +2232,7 @@ impl Bundler {
                     &main_modules,
                     &[self.entry],
                     &chunk_names,
+                    &chunk_files,
                     &runtime_ids,
                     &global_demands,
                     &[],
@@ -2443,6 +2459,7 @@ impl Bundler {
         modules: &[DenseModuleId],
         roots: &[DenseModuleId],
         chunk_names: &HashMap<DenseModuleId, String>,
+        chunk_files: &[String],
         runtime_ids: &[Option<usize>],
         global_demands: &[ExportDemand],
         prerequisites: &[String],
@@ -2481,6 +2498,7 @@ impl Bundler {
             modules,
             roots,
             chunk_names,
+            chunk_files,
             runtime_ids,
             global_demands,
             prerequisites,
@@ -3046,6 +3064,7 @@ impl Bundler {
         }
         EmitPlan {
             chunk_names: Self::chunk_names(plans),
+            chunk_files: plans.iter().map(|plan| plan.file_name.clone()).collect(),
             reachable_dense,
             allowed,
             runtime_ids,
@@ -3193,6 +3212,7 @@ impl Bundler {
             &changed_dense,
             &[], // no roots -> the tail is `return __runtime;` (register-only)
             &plan.chunk_names,
+            &plan.chunk_files,
             runtime_ids,
             &global_demands,
             &[],   // no prerequisite chunk loads
@@ -4215,6 +4235,7 @@ impl Bundler {
         reachable: &[DenseModuleId],
         roots: &[DenseModuleId],
         chunk_names: &HashMap<DenseModuleId, String>,
+        chunk_files: &[String],
         runtime_ids: &[Option<usize>],
         global_demands: &[ExportDemand],
         prerequisites: &[String],
@@ -4244,6 +4265,7 @@ impl Bundler {
             reachable,
             roots,
             chunk_names,
+            chunk_files,
             runtime_ids,
             global_demands,
             prerequisites,
@@ -4576,7 +4598,7 @@ impl Bundler {
     fn rsc_webpack_seam(
         &self,
         reachable: &[DenseModuleId],
-        chunk_names: &HashMap<DenseModuleId, String>,
+        chunk_files: &[String],
     ) -> Option<String> {
         let has_client_boundary = reachable.iter().any(|&dense| {
             self.modules[dense].as_ref().is_some_and(|module| {
@@ -4593,7 +4615,7 @@ impl Bundler {
         // id `client_references_manifest` records), and the URL is `base + file`.
         let base = self.config.base.trim_end_matches('/');
         let mut chunk_filenames: BTreeMap<String, String> = BTreeMap::new();
-        for name in chunk_names.values() {
+        for name in chunk_files {
             let file = name.trim_start_matches("./");
             chunk_filenames
                 .entry(file.to_string())
@@ -4625,6 +4647,7 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         reachable: &[DenseModuleId],
         roots: &[DenseModuleId],
         chunk_names: &HashMap<DenseModuleId, String>,
+        chunk_files: &[String],
         runtime_ids: &[Option<usize>],
         global_demands: &[ExportDemand],
         prerequisites: &[String],
@@ -4871,7 +4894,7 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         // non-RSC browser bundle stays byte-identical. Appended to (not replacing)
         // the prelude so the process shim still runs first.
         if is_main && format == ModuleFormat::BrowserEsm
-            && let Some(seam) = self.rsc_webpack_seam(reachable, chunk_names) {
+            && let Some(seam) = self.rsc_webpack_seam(reachable, chunk_files) {
                 prelude.push_str(&seam);
             }
         // Lines the chunk emits before `const __newModules={`: the format's
@@ -6112,7 +6135,18 @@ const __newChunks={{{chunks}}};
             };
             for (_, target, demand) in &module.dependencies {
                 demands[*target].merge(ExportDemand {
-                    all: demand.all,
+                    // A dynamic `import()` hands its consumer the WHOLE namespace, and
+                    // diffpack does not analyse what the consumer then reads off it — so
+                    // the target keeps every export. `render_runtime` already does exactly
+                    // this for a chunk root; a target that is ALSO statically imported
+                    // never becomes one, and used to keep only the static importer's
+                    // names. That is how the RSC control boundary lost its `default`
+                    // export: the browser entry imports `{ isControlFlowError }` from it
+                    // statically and `import()`s it as an island pin, so `default` was
+                    // shaken away and the flight's client reference for it resolved to
+                    // undefined ("Element type is invalid. Received a promise that
+                    // resolves to: undefined").
+                    all: demand.all || demand.dynamic,
                     names: demand.names.iter().cloned().collect(),
                 });
             }
@@ -17266,6 +17300,128 @@ mod tests {
             }),
             ..BuildConfig::default()
         }
+    }
+
+    /// A module reached BOTH by a static named import AND by a dynamic `import()` must
+    /// have its WHOLE namespace demanded: `import()` hands its consumer the entire
+    /// namespace and nothing here analyses what the consumer then reads off it.
+    ///
+    /// Such a module never becomes a chunk root (it is already in the entry's static
+    /// closure), so it never receives the `all = true` that `render_runtime` gives a root,
+    /// and it used to keep only the static importer's names. That is how the RSC control
+    /// boundary lost its `default` export in a dev build — the generated browser entry
+    /// imports `{ isControlFlowError }` from it statically and `import()`s it in a
+    /// never-called island-pin thunk — after which the flight's client reference for it
+    /// resolved to `undefined` and hydration died with "Element type is invalid. Received
+    /// a promise that resolves to: undefined".
+    ///
+    /// This asserts the DEMAND RULE directly. The end-to-end symptom needs the RSC seam
+    /// resolving a client reference by runtime id, which only the cal.com dev corpus
+    /// exercises; a two-module fixture emits both exports for unrelated reasons and would
+    /// pass either way.
+    #[test]
+    fn a_dynamic_import_demands_its_targets_whole_namespace() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(
+            root.join("boundary.js"),
+            "export function named(){return 1;}\nexport default function Boundary(){return 2;}\n",
+        )
+        .unwrap();
+        // The shape of the generated browser entry: one named import, plus a never-called
+        // thunk holding the dynamic import that pins the module into the graph.
+        std::fs::write(
+            root.join("entry.js"),
+            "import { named } from \"./boundary.js\";\n\
+             const pins = [() => import(\"./boundary.js\")];\n\
+             globalThis.pins = pins;\n\
+             globalThis.named = named;\n",
+        )
+        .unwrap();
+        let (bundler, update) = Bundler::discover_direct(&root.join("entry.js")).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let dense: Vec<DenseModuleId> = reachable
+            .iter()
+            .map(|id| bundler.indices[id.as_str()])
+            .collect();
+        let demands = bundler.export_demands(&dense);
+        let boundary = dense
+            .iter()
+            .copied()
+            .find(|&d| bundler.ids[d].ends_with("boundary.js"))
+            .expect("the boundary module is reachable");
+        assert!(
+            demands[boundary].all,
+            "the dynamic import must demand the whole namespace, not just the static \
+             importer's names (it kept {:?})",
+            demands[boundary].names,
+        );
+    }
+
+    /// The chunk-id -> URL table the RSC seam installs is built from EVERY split chunk,
+    /// not just the ones that own a dynamic-import root.
+    ///
+    /// It used to be built from `chunk_names` (root -> chunk), which by construction skips
+    /// a shared chunk extracted out of several roots' closures. The client-references
+    /// manifest, meanwhile, names whichever chunk carries a client module's factory —
+    /// shared or not — and the browser calls `__webpack_chunk_load__` with that id. So a
+    /// client reference living in a shared chunk died with "__webpack_chunk_load__: unknown
+    /// chunk id client.shared-16.js", and on cal.com that meant NO page hydrated once
+    /// islands were split per chunk.
+    #[test]
+    fn the_emit_plan_records_every_chunk_file_including_shared_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        // `shared.js` is reachable from BOTH dynamic roots, so the planner extracts it into
+        // a chunk that owns no root — the shape `chunk_names` cannot describe.
+        std::fs::write(root.join("shared.js"), "export const shared = 1;\n").unwrap();
+        for name in ["a.js", "b.js"] {
+            std::fs::write(
+                root.join(name),
+                "import { shared } from \"./shared.js\";\nexport default () => shared;\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("entry.js"),
+            "globalThis.load = [() => import(\"./a.js\"), () => import(\"./b.js\")];\n",
+        )
+        .unwrap();
+        let (bundler, update) = Bundler::discover_direct(&root.join("entry.js")).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let reachable_dense: Vec<DenseModuleId> = reachable
+            .iter()
+            .map(|id| bundler.indices[id.as_str()])
+            .collect();
+        let allowed: HashSet<DenseModuleId> = reachable_dense.iter().copied().collect();
+        let plans = bundler.chunk_plan(&allowed, "client.js").unwrap();
+        let shared_count = plans
+            .iter()
+            .filter(|plan| plan.file_name.contains(".shared-"))
+            .count();
+        assert!(shared_count > 0, "the fixture must produce a shared chunk: {plans:?}");
+
+        let plan = bundler.build_emit_plan(reachable_dense, allowed, &plans);
+        assert_eq!(
+            plan.chunk_files.len(),
+            plans.len(),
+            "every chunk's file name is recorded, shared ones included",
+        );
+        // The old source of the table, for contrast: it cannot see a rootless chunk.
+        let root_named = Bundler::chunk_names(&plans);
+        assert!(
+            plan.chunk_files
+                .iter()
+                .filter(|file| file.contains(".shared-"))
+                .count()
+                >= root_named
+                    .values()
+                    .filter(|file| file.contains(".shared-"))
+                    .count(),
+            "the recorded set must cover at least what root -> chunk covers",
+        );
     }
 
     fn emitted_chunk_names(dist: &Path) -> Vec<String> {
