@@ -2882,12 +2882,19 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             // to put that list yet (the react-server render discovers the references as it
             // serializes, so the list is only complete once the flight is). The buffered
             // dev document drains the flight first, so it has the list in time.
-            // Per-island chunks in BOTH modes: a page downloads the islands it renders
-            // instead of every island in the app. Static pins put all 229 of cal.com's in
-            // one chunk — 17.8 MB in dev, 8.1 MB minified in production — and every route
-            // paid for all of it. Nothing extra is needed to make this work: React's flight
-            // client preloads a reference's chunk (`__webpack_chunk_load__`) before it
-            // requires the module, in both the buffered and the streaming document.
+            // Per-island chunks: a page downloads the islands it renders instead of every
+            // island in the app. Static pins put all 229 of cal.com's into one chunk —
+            // 17.8 MB in dev, 8.1 MB minified in production, and every route paid for all
+            // of it.
+            //
+            // Both modes. What makes this safe is that the document DECLARES the chunks
+            // a route's client references live in and the browser entry loads them before
+            // hydrating (`recordReferenceChunks` in the SSR entry, `loadDeclaredChunks` in
+            // the browser entry) — the same property `next build` gets by emitting a
+            // `<script>` per route chunk. Without it the split hydrates markup whose
+            // islands have no handlers yet, which cal.com's own suite catches: a theme
+            // option clicked before its island arrives leaves the form clean and its submit
+            // button disabled forever.
             PinKind::DynamicChunk,
         ),
     )?;
@@ -5435,6 +5442,8 @@ fn ssr_entry_module(
 ) -> String {
     let pins = island_pins(adapter_dir, islands, eager_islands, PinKind::StaticRequire);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
+    // The base the browser fetches chunks from — the same one `client.js` is served under.
+    let asset_base_json = js_str(asset_base);
     let hooks_import = js_str(&hooks_context.to_string_lossy());
     // The browser fetches the client bootstrap under the app's basePath/assetPrefix (the
     // orchestrator strips that prefix back off before the publicDir lookup).
@@ -5518,12 +5527,67 @@ function installSeam() {{
   g.__next_require__ = g.__webpack_require__;
 }}
 
+// A chunk id's public URL. diffpack's chunk id IS its file name, and the browser serves it
+// from the app's asset base — the same base `bootstrapModules` points at for `client.js`.
+function chunkUrl(chunk) {{
+  const base = {asset_base_json};
+  return (base ? base.replace(/\/$/, "") : "") + "/" + String(chunk).replace(/^\.?\//, "");
+}}
+
+// RECORD WHICH CLIENT REFERENCES A RENDER RESOLVED, as the chunks the browser has to
+// load for them.
+//
+// React resolves every client reference through `moduleMap[clientId]`
+// (`resolveClientReference`), so a proxy over that object is an exact record of what this
+// route rendered — no flight-wire parsing and no static over-approximation. The document
+// then declares the list, and the browser entry loads it BEFORE hydrating.
+//
+// That ordering is the correctness requirement, not an optimisation: the RSC seam's
+// `__webpack_require__` is synchronous, so an island whose chunk has not arrived yet is an
+// island the user can see and click but that has no event handlers attached. cal.com's own
+// suite catches exactly that — a theme option clicked before its island hydrates leaves the
+// form clean and its submit button disabled forever. The reference has the same property by
+// a different route: `next build` emits a `<script>` per route chunk into the document.
+//
+// `onChunks(fresh)` fires once per newly seen chunk id so a STREAMING document can declare
+// them as the shell renders, instead of waiting for the whole flight.
+function recordReferenceChunks(serverConsumerManifest, clientChunksById, onChunks) {{
+  const byId = clientChunksById || {{}};
+  const seen = new Set();
+  const moduleMap = new Proxy(serverConsumerManifest.moduleMap, {{
+    get(target, key) {{
+      if (typeof key === "string") {{
+        const fresh = [];
+        // The manifest's flat `[chunkId, chunkFile, ...]`; the loader takes the id, and
+        // diffpack's chunk id IS its file name, so the odd entries add nothing here.
+        for (let i = 0; i < (byId[key] || []).length; i += 2) {{
+          const chunk = byId[key][i];
+          if (!seen.has(chunk)) {{
+            seen.add(chunk);
+            fresh.push(chunk);
+          }}
+        }}
+        if (fresh.length > 0 && onChunks) onChunks(fresh);
+      }}
+      return target[key];
+    }},
+  }});
+  return {{
+    manifest: {{ ...serverConsumerManifest, moduleMap }},
+    chunks: () => [...seen],
+  }};
+}}
+
 // Reconstruct the flight and render the whole document to an HTML string. The
 // client bootstrap module (`/client.js`) and the inlined flight are injected via
 // react-dom's bootstrap options, so the served DOM (scripts included) is exactly
 // what hydration on the browser expects — no mismatch.
-export async function renderFlightToDocument(flightBytes, serverConsumerManifest, flightBase64, params, url, nonce) {{
+export async function renderFlightToDocument(flightBytes, serverConsumerManifest, flightBase64, params, url, nonce, clientChunksById) {{
   installSeam();
+  // Everything is rendered before a byte is sent on this path, so the recorded set is
+  // complete and goes into the document as one list.
+  const recorder = recordReferenceChunks(serverConsumerManifest, clientChunksById, null);
+  serverConsumerManifest = recorder.manifest;
   const bytes = new Uint8Array(flightBytes);
   const stream = new ReadableStream({{
     start(controller) {{
@@ -5569,6 +5633,19 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
     }});
     sink.on("finish", () => {{
       let html = Buffer.concat(parts).toString("utf8");
+      // This route's client-reference chunks, as real module scripts AFTER the entry (which
+      // creates the runtime they register into), then the boot call. Module scripts run in
+      // document order and all before DOMContentLoaded, so hydration lands before DCL —
+      // which is what an entry awaiting its own fetches could not give us.
+      const nonceAttr = nonce ? " nonce=" + JSON.stringify(String(nonce)) : "";
+      const moduleTag = (src) =>
+        "<script type=\"module\"" + nonceAttr + " src=" + JSON.stringify(src) + "></script>";
+      const tags =
+        moduleTag({client_js}) +
+        recorder.chunks().map((chunk) => moduleTag(chunkUrl(chunk))).join("") +
+        "<script type=\"module\"" + nonceAttr + ">globalThis.__diffpackBoot()</script>";
+      const bodyEnd = html.lastIndexOf("</body>");
+      html = bodyEnd === -1 ? html + tags : html.slice(0, bodyEnd) + tags + html.slice(bodyEnd);
       if (inserted.length) {{
         const extra = inserted.map((cb) => renderToStaticMarkup(cb())).join("");
         inserted.length = 0;
@@ -5583,9 +5660,14 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
       // script react-dom emits (the bootstrap module + the inline bootstrap content)
       // carries it. Without it a strict-CSP app blocks its own hydration.
       nonce: nonce || undefined,
-      bootstrapModules: [{client_js}],
+      // NO `bootstrapModules`. react-dom emits that tag with `async`, and an async module
+      // script is unordered against the chunk scripts below it — so a chunk could execute
+      // before the entry that creates the runtime it registers into, and throw. The entry is
+      // emitted with the chunks instead, all plain (deferred, ORDERED) module scripts.
       bootstrapScriptContent:
         "window.__DIFFPACK_FLIGHT__ = " + JSON.stringify(flightBase64) + ";" +
+        // Hydration is started by the document, after the chunk scripts below it.
+        "window.__DIFFPACK_DEFER_BOOT__ = 1;" +
         "window.__DIFFPACK_PARAMS__ = " + JSON.stringify(params || {{}}) + ";" +
         "window.__DIFFPACK_URL__ = " + JSON.stringify({{ pathname: pathname, search: search }}) + ";",
       onAllReady() {{
@@ -5621,7 +5703,7 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
 // forwards React's chunks untouched and injects the queued flight scripts ONLY at a
 // react-dom flush-cycle boundary — react-dom's own `write()` boundaries fall every 2048
 // bytes and routinely land inside an HTML token (see flight_sink.js).
-export async function renderFlightToStream(flightChunks, serverConsumerManifest, params, url, res, headers, status, nonce) {{
+export async function renderFlightToStream(flightChunks, serverConsumerManifest, params, url, res, headers, status, nonce, clientChunksById) {{
   installSeam();
   const pathname = (url && url.pathname) || "/";
   const search = (url && url.search) || "";
@@ -5639,6 +5721,20 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
   // Assigned once the destination exists; the pump nudges it so chunks that arrive while
   // React has nothing to flush still reach the client at the next macrotask boundary.
   let sink = null;
+  // The chunks each resolved client reference lives in, declared into the SAME ordered
+  // destination as the flight so they reach the browser as the shell renders rather than
+  // after the whole stream. `client.js` is a module script, so it runs after the document
+  // is parsed and therefore after every one of these — the list it reads is complete.
+  const moduleTag = (src) =>
+    "<script type=\"module\"" + nonceAttr + " src=" + JSON.stringify(src) + "></script>";
+  // The entry first: every chunk registers into the runtime it creates. Queued before the
+  // flight is decoded, which is when the first client reference can be discovered.
+  scriptQueue.push(moduleTag({client_js}));
+  const recorder = recordReferenceChunks(serverConsumerManifest, clientChunksById, (fresh) => {{
+    for (const chunk of fresh) scriptQueue.push(moduleTag(chunkUrl(chunk)));
+    if (sink) sink.scheduleDrain();
+  }});
+  serverConsumerManifest = recorder.manifest;
   const pump = (async () => {{
     for await (const b64 of flightChunks) {{
       const binary = Buffer.from(b64, "base64");
@@ -5650,6 +5746,7 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
     }}
     byteController.close();
     scriptQueue.push("<script" + nonceAttr + ">(self.__DF_FLIGHT=self.__DF_FLIGHT||[]).push([0])</script>");
+    scriptQueue.push("<script type=\"module\"" + nonceAttr + ">globalThis.__diffpackBoot()</script>");
     if (sink) sink.scheduleDrain();
     pumpDone = true;
   }})();
@@ -5703,11 +5800,14 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
     sink.on("error", reject);
     const {{ pipe }} = renderToPipeableStream(root, {{
       nonce: nonce || undefined,
-      bootstrapModules: [{client_js}],
+      // See the buffered path: react-dom would emit this `async`, which is unordered against
+      // the chunk scripts. It is queued into the ordered destination instead, ahead of them.
       // No inlined full flight here — it streams as __DF_FLIGHT scripts. Seed the array
       // (so it exists before client.js runs) + the hooks-context globals.
       bootstrapScriptContent:
         "self.__DF_FLIGHT=self.__DF_FLIGHT||[];" +
+        // Hydration is started by the document, after this route's chunk scripts.
+        "window.__DIFFPACK_DEFER_BOOT__ = 1;" +
         "window.__DIFFPACK_PARAMS__ = " + JSON.stringify(params || {{}}) + ";" +
         "window.__DIFFPACK_URL__ = " + JSON.stringify({{ pathname: pathname, search: search }}) + ";",
       onShellReady() {{
@@ -6071,7 +6171,40 @@ function flightStreamFromDF() {{
   }});
 }}
 
-function boot() {{
+// Every chunk the document declared for this route, loaded BEFORE anything renders.
+//
+// The RSC seam's `__webpack_require__` is synchronous, so a client reference whose chunk
+// has not arrived cannot be rendered — and worse than failing, it hydrates as markup with
+// no handlers attached, which looks alive and is not. The document lists them (see
+// `recordReferenceChunks` in the SSR entry); this is one parallel wave of fetches, not a
+// per-reference waterfall.
+//
+// A chunk that fails to load is a HARD error naming it: hydration would otherwise die
+// further in, on a reference whose module never registered, with nothing left to point at.
+// A LATE arrival (a Suspense boundary that resolved after the document was parsed) is
+// loaded as it is announced and covered by React's own blocked-chunk path either way.
+async function loadDeclaredChunks() {{
+  const declared = window.__DIFFPACK_ROUTE_CHUNKS__;
+  if (!Array.isArray(declared) || declared.length === 0) return;
+  const load = globalThis.__webpack_chunk_load__;
+  if (typeof load !== "function") {{
+    throw new Error(
+      "diffpack next client: the document declared route chunks but the RSC seam installed no __webpack_chunk_load__",
+    );
+  }}
+  // Anything the document already loaded through its own `<script>` tags is registered
+  // and resolves instantly here; this only has work to do for a chunk announced late.
+  const pending = declared.map((chunk) => load(chunk));
+  const push = declared.push.bind(declared);
+  declared.push = (...chunks) => {{
+    for (const chunk of chunks) Promise.resolve(load(chunk)).catch(() => {{}});
+    return push(...chunks);
+  }};
+  await Promise.all(pending);
+}}
+
+async function boot() {{
+  await loadDeclaredChunks();
   // Streaming render inlines the flight incrementally as __DF_FLIGHT; the buffered
   // render (notFound / error docs) inlines the whole flight as __DIFFPACK_FLIGHT__.
   let stream;
@@ -6117,7 +6250,24 @@ function boot() {{
   }});
 }}
 
-boot();
+// WHO STARTS HYDRATION, AND WHEN.
+//
+// The document declares this route's chunks as real `<script type="module">` tags placed
+// AFTER this entry, then calls `__diffpackBoot()` in one more module script. Module scripts
+// execute in document order and all of them run before `DOMContentLoaded`, so hydration
+// lands before DCL exactly as it did when everything was in one chunk — which cal.com's own
+// suite depends on: its theme test reads `<html class>` right after DCL, and a page that
+// hydrates later still says `light`.
+//
+// The chunks cannot simply precede this entry: each one registers into the runtime THIS
+// module creates and throws if it is missing. So the order is entry, chunks, boot — which is
+// also why the entry cannot just await them itself, since a fetch started here always
+// resolves after DCL.
+//
+// A document that does not defer (no client references, or a build with no split chunks)
+// gets the historical behaviour: boot immediately.
+(globalThis).__diffpackBoot = boot;
+if (!window.__DIFFPACK_DEFER_BOOT__) boot();
 "##,
     )
 }

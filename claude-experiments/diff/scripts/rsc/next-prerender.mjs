@@ -47,7 +47,7 @@ if (!existsSync(planPath)) {
 }
 const plan = JSON.parse(readFileSync(planPath, "utf8"));
 
-const { serverConsumerManifest, clientManifestPath } = loadManifests(outputDir);
+const { serverConsumerManifest, clientManifestPath, clientChunksById } = loadManifests(outputDir);
 const render = getRenderFlightToDocument(join(outputDir, "server", "server.mjs"), { dev: false });
 const rscRenderEntry = join(outputDir, "rsc-render", "server.mjs");
 const runReactServer = makeRunReactServer(rscRenderEntry);
@@ -158,6 +158,8 @@ async function writeRoute(urlPath, fileStem, workerCall, forceStatic) {
       flightBuf.toString("base64"),
       params,
       { pathname: urlPath, search: "" },
+      undefined,
+      clientChunksById,
     );
   } catch (error) {
     die(`SSR-of-flight for ${urlPath} failed:\n${String(error && error.stack ? error.stack : error)}`);

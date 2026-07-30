@@ -126,6 +126,20 @@ export function buildSsrModuleMap({ clientRefs, flightRefs, ssrRefs }) {
   return moduleMap;
 }
 
+/// `clientId -> the CLIENT graph's flat [chunkId, chunkFile, ...]` for that module.
+///
+/// This is what the BROWSER needs: the flight carries client ids, and the chunks a
+/// reference's module lives in belong to the browser graph, not the SSR one. Keyed by the
+/// same id `moduleMap` is keyed by, so a render that resolves a reference can name the
+/// chunks the browser must load for it.
+export function buildClientChunksById(clientRefs) {
+  const byId = {};
+  for (const entry of Object.values(clientRefs)) {
+    byId[String(entry.id)] = Array.isArray(entry.chunks) ? entry.chunks : [];
+  }
+  return byId;
+}
+
 /// `readReferenceManifests` + `buildSsrModuleMap`, wrapped in the full
 /// `serverConsumerManifest` shape `createFromReadableStream` takes. `moduleLoading` is
 /// REQUIRED — the consumer reads `.prefix` off it unconditionally.
@@ -135,6 +149,7 @@ export function loadServerConsumerManifest(outputDir) {
   return {
     ...manifests,
     moduleMap,
+    clientChunksById: buildClientChunksById(manifests.clientRefs),
     serverConsumerManifest: {
       moduleMap,
       serverModuleMap: null,

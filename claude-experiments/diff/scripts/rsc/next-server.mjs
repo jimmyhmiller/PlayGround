@@ -178,8 +178,13 @@ for (const [label, p] of [
 // that decides which client references are resolvable (see its header).
 let clientManifestPath;
 let serverConsumerManifest;
+// clientId -> the CLIENT graph's chunks for that module. A render records which
+// references the route resolved; the document declares their chunks so the browser has
+// them registered before it hydrates (`recordReferenceChunks` in the SSR entry).
+let clientChunksById;
 try {
-  ({ clientManifestPath, serverConsumerManifest } = loadServerConsumerManifest(outputDir));
+({ clientManifestPath, serverConsumerManifest, clientChunksById } =
+  loadServerConsumerManifest(outputDir));
 } catch (error) {
   fail(error.message);
 }
@@ -1201,6 +1206,8 @@ function triggerRevalidate(entry) {
         flightBuf.toString("base64"),
         r.params || {},
         { pathname: entry.path, search: "" },
+        undefined,
+        clientChunksById,
       );
       // Write via a temp file + rename so a concurrent reader never sees a half-written
       // page (rename is atomic on the same filesystem).
@@ -1998,6 +2005,7 @@ const server = createServer(async (req, res) => {
           {},
           { pathname: url.pathname, search: url.search },
           scriptNonce,
+          clientChunksById,
         );
         const nfHeaders = { "content-type": "text/html; charset=utf-8" };
         for (const [k, v] of configHeaders) nfHeaders[k] = v;
@@ -2051,8 +2059,7 @@ const server = createServer(async (req, res) => {
           meta.params || {},
           { pathname: url.pathname, search: url.search },
           scriptNonce,
-          // Drained above, so the END meta has landed: every split chunk this route's
-          // client references live in, for the browser entry to load before it hydrates.
+          clientChunksById,
         );
         res.writeHead(meta.status || 200, docHeaders);
         res.end(html);
@@ -2067,6 +2074,7 @@ const server = createServer(async (req, res) => {
         docHeaders,
         meta.status,
         scriptNonce,
+        clientChunksById,
       );
       return;
     }
