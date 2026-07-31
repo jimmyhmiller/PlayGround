@@ -14,7 +14,9 @@
 
 use std::path::{Path, PathBuf};
 
-use memscope_symbols::inspect::{inspect_binary, Allocator, BinaryFacts, DebugInfo, Injection};
+use memscope_symbols::inspect::{
+    inspect_binary, Allocator, BinaryFacts, BinaryKind, DebugInfo, Injection,
+};
 
 // --- assessment --------------------------------------------------------------
 
@@ -25,6 +27,12 @@ struct SourceFacts {
     release_debug: bool,
     /// Cargo.toml already mentions a memscope dependency.
     memscope_dep: bool,
+    /// Cargo.toml builds a `cdylib` — a host-loaded module, not a program.
+    cdylib: bool,
+    /// A `memscope::init()` call is already in the source.
+    init_called: bool,
+    /// The file most likely to hold the module's init hook (`lib.rs`).
+    lib_rs: Option<PathBuf>,
 }
 
 struct Assessment {
@@ -62,10 +70,18 @@ fn assess(target: &str) -> Result<Assessment, String> {
     let manifest_text = std::fs::read_to_string(&manifest).map_err(|e| e.to_string())?;
 
     let mut global_allocators = Vec::new();
+    let mut init_called = false;
+    let mut lib_rs = None;
     scan_rs_files(path, &mut |file, text| {
+        if file.file_name().is_some_and(|n| n == "lib.rs") && lib_rs.is_none() {
+            lib_rs = Some(file.to_path_buf());
+        }
         let lines: Vec<&str> = text.lines().collect();
         for (i, line) in lines.iter().enumerate() {
-            if line.contains("#[global_allocator]") && !line.trim_start().starts_with("//") {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains("#[global_allocator]") {
                 let decl = lines[i + 1..]
                     .iter()
                     .take(5)
@@ -74,16 +90,48 @@ fn assess(target: &str) -> Result<Assessment, String> {
                     .unwrap_or_default();
                 global_allocators.push((file.to_path_buf(), i + 1, decl));
             }
+            if line.contains("memscope::init(") {
+                init_called = true;
+            }
         }
     });
 
+    let pkg = package_name(&manifest_text);
     let source = SourceFacts {
         global_allocators,
-        release_debug: profile_has_debug(&manifest_text, "release"),
+        // A workspace member usually has no `[profile.*]` of its own — cargo
+        // takes the profile from the workspace root, so that's where to look
+        // when the member says nothing.
+        release_debug: profile_has_debug(&manifest_text, "release")
+            || workspace_manifest(path)
+                .is_some_and(|text| profile_has_debug(&text, "release")),
         memscope_dep: manifest_text.contains("memscope"),
+        // Textual, deliberately: a cdylib is declared as `crate-type = [...]`
+        // (or `crate_type`), and that word appearing at all is enough to tell us
+        // "this project ships a module a host loads" — which is the only thing
+        // the plan branches on. Cheaper and more robust than a TOML parse over
+        // the many ways cargo lets you spell it.
+        cdylib: manifest_text.contains("cdylib"),
+        init_called,
+        lib_rs,
     };
 
-    let (bin, bin_profile, facts) = match newest_binary(path) {
+    // A cdylib project's artifact isn't in the exe search path: look for the
+    // module (including a `.node` copy, which is where napi-rs leaves it).
+    if source.cdylib {
+        if let Some((m, profile)) = newest_module(path, pkg.as_deref()) {
+            let facts = inspect_binary(&m, true).map_err(|e| e.to_string())?;
+            return Ok(Assessment {
+                dir: Some(path.to_path_buf()),
+                source: Some(source),
+                bin: Some(m),
+                bin_profile: profile,
+                facts: Some(facts),
+            });
+        }
+    }
+
+    let (bin, bin_profile, facts) = match newest_binary(path, &bin_names(path, &manifest_text)) {
         Some((b, profile)) => {
             let f = inspect_binary(&b, true).map_err(|e| e.to_string())?;
             (Some(b), Some(profile), Some(f))
@@ -94,6 +142,20 @@ fn assess(target: &str) -> Result<Assessment, String> {
 }
 
 impl Assessment {
+    /// Is the target a module a host process loads (Node `.node` addon, Python
+    /// extension) rather than a program? Injection doesn't apply to these, and
+    /// the setup lands in an init hook instead of `fn main()`.
+    fn is_module(&self) -> bool {
+        self.facts.as_ref().map(|f| f.kind == BinaryKind::DynamicModule).unwrap_or(false)
+            || self.source.as_ref().map(|s| s.cdylib).unwrap_or(false)
+    }
+
+    /// The module's init hook is where `memscope::init()` goes; report whether
+    /// it's already there (source-visible only, hence `Option`).
+    fn init_installed(&self) -> Option<bool> {
+        self.source.as_ref().map(|s| s.init_called)
+    }
+
     fn memscope_installed(&self) -> bool {
         self.facts.as_ref().map(|f| f.memscope_linked).unwrap_or(false)
             || self
@@ -142,6 +204,12 @@ fn plan(a: &Assessment, live: bool) -> Vec<Step> {
     let setup_cmd = if live { "memscope setup --live" } else { "memscope setup" };
     let installed = a.memscope_installed();
     let custom = a.custom_allocator();
+    // A module has no `main` to inject into and no `fn main()` to edit: the
+    // in-process path is the ONLY path, so integration is never optional.
+    let module = a.is_module();
+    // napi-rs projects rebuild through npm, which also re-copies the `.node`;
+    // mention it as a note rather than in the command line we tell them to run.
+    let napi_note = "   (napi-rs: `npm run build` — it rebuilds and re-copies the .node)";
 
     let debug_missing = match (&a.facts, &a.source) {
         // Trust the binary when we have one: it either has DWARF or it doesn't.
@@ -151,8 +219,9 @@ fn plan(a: &Assessment, live: bool) -> Vec<Step> {
     };
 
     // Integration (the only code-change step). Needed when a custom allocator
-    // blinds injection, or when the user asked for the live agent.
-    if !installed && (custom.is_some() || live) {
+    // blinds injection, when the user asked for the live agent, or always for a
+    // module (there is no injection path for it).
+    if !installed && (custom.is_some() || live || module) {
         let (_, wrap) = custom
             .clone()
             .unwrap_or(("".into(), "".into()));
@@ -168,19 +237,52 @@ fn plan(a: &Assessment, live: bool) -> Vec<Step> {
         if debug_missing {
             lines.push("   …and in the same file:      [profile.release] debug = true".to_string());
         }
+        let where_static = if module {
+            let lib = a
+                .source
+                .as_ref()
+                .and_then(|s| s.lib_rs.as_ref())
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "your lib.rs".to_string());
+            format!("In {lib}:")
+        } else {
+            "In your binary's main.rs:".to_string()
+        };
         if wrap.is_empty() {
-            item(&mut lines, "In your binary's main.rs:".to_string());
+            item(&mut lines, where_static);
             lines.push("     #[global_allocator]".to_string());
             lines.push("     static GLOBAL: memscope::MemScope = memscope::MemScope::system();".to_string());
         } else {
             item(&mut lines, "Replace your #[global_allocator] static with the wrapped one:".to_string());
             lines.push(format!("     static GLOBAL: memscope::MemScope<{wrap}> = memscope::MemScope::new({wrap});"));
         }
-        item(&mut lines, "First lines of fn main():".to_string());
-        lines.push("     memscope::set_mode(memscope::Mode::Full);".to_string());
-        lines.push("     memscope::start_agent().unwrap();".to_string());
+        if module {
+            item(&mut lines, "In the same file, in your module's init hook:".to_string());
+            lines.extend(init_hook_lines());
+        } else {
+            item(&mut lines, "First lines of fn main():".to_string());
+            lines.push("     memscope::set_mode(memscope::Mode::Full);".to_string());
+            lines.push("     memscope::start_agent().unwrap();".to_string());
+        }
+        if module {
+            lines.push(napi_note.to_string());
+        }
         steps.push(Step {
             title: "install the tracking allocator",
+            lines,
+            then: format!("cargo build --release && {setup_cmd}"),
+            code_change: true,
+        });
+    } else if module && a.init_installed() == Some(false) {
+        // Allocator in place but nothing turns tracking on: for a program that's
+        // `fn main()`'s job, for a module it's the init hook — and we can see
+        // from the source that it's missing.
+        let mut lines = vec!["In your module's init hook:".to_string()];
+        lines.extend(init_hook_lines());
+        lines.push("   (env-driven: no MEMSCOPE_* vars set = no tracking, no cost)".to_string());
+        lines.push(napi_note.to_string());
+        steps.push(Step {
+            title: "call memscope::init() from the module's init hook",
             lines,
             then: format!("cargo build --release && {setup_cmd}"),
             code_change: true,
@@ -201,15 +303,20 @@ fn plan(a: &Assessment, live: bool) -> Vec<Step> {
 
     if a.dir.is_some() && a.bin.is_none() && steps.is_empty() {
         steps.push(Step {
-            title: "build the binary",
-            lines: vec!["cargo build --release".to_string()],
+            title: if module { "build the module" } else { "build the binary" },
+            lines: if module {
+                vec!["cargo build --release".to_string(), napi_note.to_string()]
+            } else {
+                vec!["cargo build --release".to_string()]
+            },
             then: setup_cmd.to_string(),
             code_change: false,
         });
     }
 
-    // Signing only matters on the injection path (no in-process agent).
-    if !installed && !live && custom.is_none() {
+    // Signing only matters on the injection path (no in-process agent), which a
+    // module never takes.
+    if !installed && !live && !module && custom.is_none() {
         if let Some(BinaryFacts { injection: Injection::Blocked { reason, fix }, .. }) = &a.facts {
             steps.push(Step {
                 title: "unblock injection (signature)",
@@ -221,6 +328,84 @@ fn plan(a: &Assessment, live: bool) -> Vec<Step> {
     }
 
     steps
+}
+
+/// The `memscope::init()` call, shown with the init hooks of the three ways
+/// people build Rust modules for Node. One of these is always the right line;
+/// which one depends on the binding crate, which we don't try to guess.
+fn init_hook_lines() -> Vec<String> {
+    vec![
+        "     #[napi::module_init]".to_string(),
+        "     fn memscope_init() { memscope::init(); }".to_string(),
+        "   (neon: call memscope::init() first in your #[neon::main] fn;".to_string(),
+        "    raw N-API: first line of napi_register_module_v1)".to_string(),
+    ]
+}
+
+/// Newest module artifact for a cdylib project: a `.node` at the project root
+/// (where napi-rs leaves its copy, and what node actually loads) or the cdylib
+/// under `target/`. Returns the profile only when the artifact came from
+/// `target/<profile>/` — a root `.node` doesn't say which profile built it.
+///
+/// `pkg` filters the `target/` search to *this* package's cdylib: a workspace
+/// target dir is full of other members' `.dylib`s (memscope's own preload shim,
+/// for one), and "newest" alone would pick the wrong one.
+fn newest_module(dir: &Path, pkg: Option<&str>) -> Option<(PathBuf, Option<&'static str>)> {
+    let mut best: Option<(PathBuf, Option<&'static str>, std::time::SystemTime)> = None;
+    let mut consider = |path: PathBuf, profile: Option<&'static str>| {
+        let Ok(meta) = std::fs::metadata(&path) else { return };
+        if !meta.is_file() {
+            return;
+        }
+        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if best.as_ref().map(|(_, _, t)| mtime > *t).unwrap_or(true) {
+            best = Some((path, profile, mtime));
+        }
+    };
+
+    // Root-level `.node` first (it's what the host loads, so it's what must be
+    // checked — its dSYM has to sit next to *it*, not next to the cdylib). Any
+    // name goes here: the project root is unambiguously this package's.
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "node") {
+                consider(path, None);
+            }
+        }
+    }
+    // cargo names a cdylib `lib<crate>.dylib`/`.so` (crate name = package name
+    // with `-` → `_`); a hand-copied `.node` sits next to it.
+    let stems: Vec<String> = pkg
+        .map(|p| {
+            let c = p.replace('-', "_");
+            vec![c.clone(), format!("lib{c}")]
+        })
+        .unwrap_or_default();
+    for target in target_dirs(dir) {
+        for profile in ["release", "debug"] {
+            let d = target.join(profile);
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let is_module = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .is_some_and(|e| matches!(&*e, "node" | "dylib" | "so"));
+                if !is_module {
+                    continue;
+                }
+                if !stems.is_empty() {
+                    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                    if !stem.is_some_and(|s| stems.contains(&s)) {
+                        continue;
+                    }
+                }
+                consider(path, Some(profile));
+            }
+        }
+    }
+    best.map(|(p, profile, _)| (p, profile))
 }
 
 /// Path to the memscope crate for a `{ path = … }` dependency. The CLI is built
@@ -236,6 +421,12 @@ fn ready_line(a: &Assessment) -> String {
         .as_ref()
         .map(|b| b.display().to_string())
         .unwrap_or_else(|| "<your binary>".to_string());
+    if a.is_module() {
+        // The host is what you launch; the module records itself.
+        return "run your host with the module loaded:  MEMSCOPE_RECORD=rec.mscope node your-app.js\n\
+                then:  memscope analyze rec.mscope   (live view: MEMSCOPE_LIVE=1 + memscope monitor)"
+            .to_string();
+    }
     if a.memscope_installed() {
         "run your program, then:  memscope monitor   (or record: MEMSCOPE_RECORD=rec.mscope, then memscope analyze)".to_string()
     } else {
@@ -255,7 +446,14 @@ pub fn cmd_check(args: &[String]) -> Result<(), String> {
 
     let shown = a.bin.as_ref().or(a.dir.as_ref()).unwrap();
     println!("== memscope check: {} ==", shown.display());
-    if let (Some(_), Some(profile)) = (&a.dir, a.bin_profile) {
+    if a.is_module() {
+        println!(
+            "  kind          dynamic module (a host process loads it) — in-process capture, not injection"
+        );
+        if let (Some(_), Some(profile)) = (&a.dir, a.bin_profile) {
+            println!("  module        newest {profile} build in target/");
+        }
+    } else if let (Some(_), Some(profile)) = (&a.dir, a.bin_profile) {
         println!("  binary        newest {profile} build in target/");
     }
     if let Some(f) = &a.facts {
@@ -274,9 +472,22 @@ pub fn cmd_check(args: &[String]) -> Result<(), String> {
             DebugInfo::Absent { .. } => println!("  debug info    none  ✗ dumps would be untyped"),
             DebugInfo::Unknown { detail } => println!("  debug info    ? {detail}"),
         }
-        match &f.injection {
-            Injection::Ok { detail } => println!("  signing       {detail}  ✓ injectable"),
-            Injection::Blocked { reason, .. } => println!("  signing       ✗ {reason}"),
+        // Signing is only about DYLD_INSERT_LIBRARIES into an executable; it says
+        // nothing useful about a module, so don't print a line that invites the
+        // wrong conclusion.
+        if !a.is_module() {
+            match &f.injection {
+                Injection::Ok { detail } => println!("  signing       {detail}  ✓ injectable"),
+                Injection::Blocked { reason, .. } => println!("  signing       ✗ {reason}"),
+            }
+        }
+        if a.is_module() {
+            match a.init_installed() {
+                Some(true) => println!("  init hook     memscope::init() present  ✓"),
+                Some(false) => println!("  init hook     no memscope::init() call  ✗ nothing turns tracking on"),
+                // Binary-only target: the call can't be seen from symbols.
+                None => {}
+            }
         }
     } else if let Some(s) = &a.source {
         println!("  binary        none built yet");
@@ -404,15 +615,56 @@ pub enum RunMode {
 }
 
 pub fn preflight_run(bin: &Path, force: bool, wait: bool) -> Result<RunMode, String> {
-    // Target may be resolved via PATH (`memscope run -- ls`); only inspect
-    // real paths, and never fail the run because inspection itself failed.
-    if !bin.is_file() {
-        return Ok(RunMode::Inject);
-    }
+    // `memscope run -- node app.js` hands us a bare command name, so resolve it
+    // through PATH exactly as the spawn will. Skipping that meant every check
+    // below was silently bypassed for anything not typed as a path. A name we
+    // can't resolve is left alone: let the exec report "not found".
+    let resolved = match resolve_target(bin) {
+        Some(p) => p,
+        None => return Ok(RunMode::Inject),
+    };
+    let bin = resolved.as_path();
+    // Never fail the run because inspection itself failed.
     let facts = match inspect_binary(bin, false) {
         Ok(f) => f,
         Err(_) => return Ok(RunMode::Inject),
     };
+
+    // A module is not a program. You launch the *host* and let the module record
+    // itself in-process; there is nothing here to exec.
+    if facts.kind == BinaryKind::DynamicModule {
+        return Err(format!(
+            "{} is a dynamic module (a host process loads it), not a program to run.\n\
+             Capture it in-process instead — 2 lines in the module, then run your host:\n  \
+             memscope setup {}",
+            bin.display(),
+            bin.display()
+        ));
+    }
+
+    // A non-Rust host that loads native modules: injecting it is the trap that
+    // looks like it worked. The preload records against the *host* binary, so
+    // the addon's frames symbolicate against a binary that has no Rust DWARF and
+    // every one of them comes back `[unknown]` — plus you trace the host's own
+    // allocator churn (all of V8) instead of the code you care about.
+    if !facts.is_rust {
+        if let Some(host) = module_host_name(bin) {
+            let msg = format!(
+                "{} is {host}, not a Rust program. If the Rust code you want is a module it loads\n\
+                 (a .node addon, a native extension), injection records against {host}'s own binary —\n\
+                 which has no Rust DWARF — so every module frame would come back [unknown].\n\
+                 Instrument the module instead (it then records itself, whoever launches it):\n  \
+                 memscope check path/to/your-module.node\n\
+                 (--force injects anyway.)",
+                bin.display()
+            );
+            if force {
+                eprintln!("[memscope] WARNING (--force): {msg}");
+            } else {
+                return Err(msg);
+            }
+        }
+    }
 
     if facts.memscope_linked {
         eprintln!(
@@ -468,6 +720,37 @@ pub fn preflight_run(bin: &Path, force: bool, wait: bool) -> Result<RunMode, Str
         eprintln!("[memscope] warning: no debug info — the dump will be untyped (memscope setup to fix).");
     }
     Ok(RunMode::Inject)
+}
+
+/// The file `memscope run -- <target>` will actually execute: the path itself if
+/// it names one, otherwise the first executable of that name on `PATH`.
+fn resolve_target(bin: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    // Anything with a separator is a path, not a name to look up.
+    if bin.components().count() > 1 {
+        return bin.is_file().then(|| bin.to_path_buf());
+    }
+    if bin.is_file() {
+        return Some(bin.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(bin)).find(|c| {
+        std::fs::metadata(c)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
+}
+
+/// Runtimes whose whole point is loading native modules. Only used to tell a
+/// user "the Rust you want is probably in an addon, not in this binary" — a
+/// non-Rust binary that *isn't* one of these (say a C program) is still a
+/// perfectly good `run` target, just an untyped one.
+fn module_host_name(bin: &Path) -> Option<&'static str> {
+    let name = bin.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let stem = name.trim_end_matches(".exe");
+    // python3.12, node, electron helper names, …
+    const HOSTS: &[&str] = &["node", "deno", "bun", "electron", "python", "ruby", "php", "java"];
+    HOSTS.iter().find(|h| stem == **h || stem.starts_with(*h)).copied()
 }
 
 /// Block until the binary passes preflight, then run it. Re-inspects every 2s
@@ -576,6 +859,108 @@ fn scan_rs_files(dir: &Path, cb: &mut dyn FnMut(&Path, &str)) {
     }
 }
 
+/// Where cargo may have put this project's artifacts, nearest first.
+///
+/// A workspace **member** has no `target/` of its own — everything lands in the
+/// workspace root's. Without walking up, `check crates/my-addon` reports "none
+/// built yet" for a module that's sitting right there, built.
+fn target_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(explicit) = std::env::var_os("CARGO_TARGET_DIR") {
+        let p = PathBuf::from(explicit);
+        if p.is_dir() {
+            dirs.push(p);
+        }
+    }
+    let mut at = Some(dir);
+    // Bounded walk: deep enough for `workspace/crates/member`, shallow enough
+    // that we never wander into an unrelated project above the one asked about.
+    for _ in 0..6 {
+        let Some(d) = at else { break };
+        let t = d.join("target");
+        if t.is_dir() && !dirs.contains(&t) {
+            dirs.push(t);
+        }
+        at = d.parent();
+    }
+    dirs
+}
+
+/// The enclosing workspace root's `Cargo.toml` text, if `dir` is a member.
+/// Found by walking up to the nearest manifest that declares `[workspace]`.
+fn workspace_manifest(dir: &Path) -> Option<String> {
+    let mut at = dir.parent();
+    for _ in 0..6 {
+        let d = at?;
+        if let Ok(text) = std::fs::read_to_string(d.join("Cargo.toml")) {
+            if text.lines().any(|l| l.trim() == "[workspace]") {
+                return Some(text);
+            }
+        }
+        at = d.parent();
+    }
+    None
+}
+
+/// The `name = "…"` of the `[package]` section.
+fn package_name(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_package = t == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(rest) = t.strip_prefix("name") {
+                let v = rest.trim_start().strip_prefix('=')?.trim();
+                return Some(v.trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Executable names this package can produce: `[[bin]] name = …`, every
+/// `src/bin/*.rs`, and the package name itself when there's a `src/main.rs`.
+///
+/// Needed because a workspace target dir holds *every* member's output; without
+/// filtering, `check` on one member would happily inspect another's binary.
+fn bin_names(dir: &Path, manifest: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_bin = false;
+    for line in manifest.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_bin = t == "[[bin]]";
+            continue;
+        }
+        if in_bin {
+            if let Some(rest) = t.strip_prefix("name") {
+                if let Some(v) = rest.trim_start().strip_prefix('=') {
+                    names.push(v.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    if let Ok(rd) = std::fs::read_dir(dir.join("src").join("bin")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "rs") {
+                if let Some(stem) = p.file_stem() {
+                    names.push(stem.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    if dir.join("src").join("main.rs").is_file() {
+        if let Some(pkg) = package_name(manifest) {
+            names.push(pkg);
+        }
+    }
+    names
+}
+
 /// Does `[profile.<name>]` set debug info on? Naive TOML scan — good enough
 /// for a diagnostic; anything ambiguous reads as "not set".
 fn profile_has_debug(manifest: &str, profile: &str) -> bool {
@@ -595,31 +980,95 @@ fn profile_has_debug(manifest: &str, profile: &str) -> bool {
     false
 }
 
-/// Newest executable in `target/{release,debug}` (top level only — that's
-/// where cargo puts bin artifacts; `deps/` holds hashed intermediates).
-fn newest_binary(dir: &Path) -> Option<(PathBuf, &'static str)> {
+/// Newest executable this package built, in any of its `target/{release,debug}`
+/// dirs (top level only — `deps/` holds hashed intermediates).
+///
+/// `names` (from [`bin_names`]) keeps a workspace member from picking up a
+/// sibling's binary out of the shared target dir. An empty `names` means "we
+/// couldn't tell" and falls back to any executable, which is the old behavior.
+fn newest_binary(dir: &Path, names: &[String]) -> Option<(PathBuf, &'static str)> {
     use std::os::unix::fs::PermissionsExt;
     let mut best: Option<(PathBuf, &'static str, std::time::SystemTime)> = None;
-    for profile in ["release", "debug"] {
-        let d = dir.join("target").join(profile);
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for entry in rd.flatten() {
-            let path = entry.path();
-            let Ok(meta) = entry.metadata() else { continue };
-            if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
-                continue;
-            }
-            if let Some(ext) = path.extension() {
-                let ext = ext.to_string_lossy();
-                if matches!(&*ext, "d" | "dylib" | "so" | "rlib" | "dSYM") {
+    for target in target_dirs(dir) {
+        for profile in ["release", "debug"] {
+            let d = target.join(profile);
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
                     continue;
                 }
+                if let Some(ext) = path.extension() {
+                    let ext = ext.to_string_lossy();
+                    if matches!(&*ext, "d" | "dylib" | "so" | "rlib" | "dSYM") {
+                        continue;
+                    }
+                }
+                if !names.is_empty() {
+                    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                    let ours = stem.is_some_and(|s| {
+                        names.iter().any(|n| n == &s || n.replace('-', "_") == s)
+                    });
+                    if !ours {
+                        continue;
+                    }
+                }
+                let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                if best.as_ref().map(|(_, _, t)| mtime > *t).unwrap_or(true) {
+                    best = Some((path, profile, mtime));
+                }
             }
-            let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            if best.as_ref().map(|(_, _, t)| mtime > *t).unwrap_or(true) {
-                best = Some((path, profile, mtime));
-            }
+        }
+        // Nearest target dir that has one of our binaries wins; don't let a
+        // stale copy further up shadow it.
+        if best.is_some() {
+            break;
         }
     }
     best.map(|(p, profile, _)| (p, profile))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_and_bin_names_come_off_the_manifest() {
+        let manifest = "\
+[package]\n\
+name = \"my-addon\"\n\
+version = \"0.1.0\"\n\
+\n\
+[lib]\n\
+crate-type = [\"cdylib\"]\n\
+\n\
+[[bin]]\n\
+name = \"helper\"\n\
+path = \"src/helper.rs\"\n";
+        assert_eq!(package_name(manifest).as_deref(), Some("my-addon"));
+        assert_eq!(bin_names(Path::new("/nonexistent"), manifest), vec!["helper".to_string()]);
+        // `name` under [[bin]] must not be mistaken for the package name.
+        assert!(!bin_names(Path::new("/nonexistent"), manifest).contains(&"my-addon".to_string()));
+    }
+
+    #[test]
+    fn profile_debug_scan() {
+        assert!(profile_has_debug("[profile.release]\ndebug = true\n", "release"));
+        assert!(profile_has_debug("[profile.release]\ndebug = 2\n", "release"));
+        assert!(!profile_has_debug("[profile.release]\ndebug = false\n", "release"));
+        // A setting in a *different* profile doesn't count.
+        assert!(!profile_has_debug("[profile.dev]\ndebug = true\n", "release"));
+        assert!(!profile_has_debug("[package]\nname = \"x\"\n", "release"));
+    }
+
+    #[test]
+    fn module_hosts_are_recognized_by_name() {
+        assert_eq!(module_host_name(Path::new("/opt/homebrew/bin/node")), Some("node"));
+        assert_eq!(module_host_name(Path::new("/usr/bin/python3.12")), Some("python"));
+        assert_eq!(module_host_name(Path::new("/usr/local/bin/bun")), Some("bun"));
+        // A non-Rust binary that isn't a module host stays a valid `run` target.
+        assert_eq!(module_host_name(Path::new("/bin/ls")), None);
+        assert_eq!(module_host_name(Path::new("./my-c-program")), None);
+    }
 }

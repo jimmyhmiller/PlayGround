@@ -52,13 +52,20 @@ struct Particle { x: i64, y: i64, vx: i64, vy: i64 }
 letonce cv = open_canvas();
 letonce world = seed();
 
+// What one particle looks like. Every particle is a filled disc until an edit
+// says otherwise; `radius` and `tint` stay the knobs, so scrubbing them keeps
+// working no matter which shape a later version picks.
+fn draw(p: Particle) -> () {
+    circle(cv, p.x, p.y, radius(p), tint(p));
+}
+
 fn on_frame() -> () {
     clear(cv);
     let i = 0;
     while i < len(world) {
         let p = advance(world[i]);
         world[i] = p;
-        circle(cv, p.x, p.y, radius(p), tint(p));
+        draw(p);
         i = i + 1;
     }
 }

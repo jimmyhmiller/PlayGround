@@ -43,10 +43,41 @@ skip_step() {  # skip_step "name" "reason"
   fi
 }
 
+# One JSX rule, one definition. Which extensions may hold JSX is per-project (Next
+# compiles JSX in `.js`, Vite does not); a second `SourceType::from_path` is a second
+# copy of that rule, which is exactly how whole Next pages became syntax errors.
+# `grep -a`: src/next_adapter.rs has lines long enough that grep calls it binary.
+one_jsx_rule() {
+  local hits
+  hits="$(grep -arn 'SourceType::from_path' src/ --include='*.rs' \
+          | grep -v '^src/parser.rs:' || true)"
+  [ -z "$hits" ] && return 0
+  echo "SourceType::from_path outside src/parser.rs — use parser::source_type_for /"
+  echo "parser::scan_source_type so the project's JSX rule has ONE definition:"
+  echo "$hits"
+  return 1
+}
+
 # --- Tier 1: Rust (hard gate) -------------------------------------------------
 step "cargo build --release" cargo build --release || { echo "build failed — aborting"; exit 1; }
 step "cargo test --release --lib" cargo test --release --lib || true
 step "cargo clippy -D warnings" cargo clippy --release --all-targets -- -D warnings || true
+step "one JSX-extension rule" one_jsx_rule || true
+
+# The vendored upstream Tailwind data (theme + preflight) must still be the release
+# `tailwind::VERSION` names. T1 compares only checked-in files, so it ALWAYS gates; the
+# byte comparisons against the installed `tailwindcss` need the reference fixture's
+# node_modules, and DIFFPACK_REQUIRE_UPSTREAM=1 turns their absence into a failure
+# instead of a quiet green.
+if [ -d integration/tanstack-start-reference/node_modules ]; then
+  step "Tailwind upstream drift (vendored theme/preflight vs installed tailwindcss)" \
+    env DIFFPACK_REQUIRE_UPSTREAM=1 cargo test --release --test tailwind_upstream_drift || true
+else
+  step "Tailwind upstream drift (vendored pin only)" \
+    cargo test --release --test tailwind_upstream_drift || true
+  skip_step "Tailwind upstream drift (vs installed tailwindcss)" \
+    "integration/tanstack-start-reference/node_modules missing (npm ci there)"
+fi
 
 if [ "$FAST" = "1" ]; then
   echo; echo "=== gate summary (fast): $pass passed, $fail failed ==="
@@ -64,6 +95,54 @@ done
 have_chrome=0; [ -n "$CHROME" ] && have_chrome=1
 
 deps_ready() { [ -d "$1/node_modules" ]; }
+
+# --- Tier 2a: the test tooling's OWN tests -----------------------------------
+# A differential suite that reports false differences is worse than no suite, and
+# a gate that prints FAIL on a passing run trains people to ignore it. Both the
+# e2e harness and the shell-gate prelude have regression tests; they were not
+# gated on, so nothing would have noticed them rotting. All node/bash only — no
+# browser, no fixture node_modules, no corpus.
+if [ "$have_node" = "1" ]; then
+  step "e2e harness self-tests (hydration probe + basePath static server + finding scoring + corpus shape)" \
+    node --test "integration/e2e/lib/*.test.mjs" || true
+else
+  skip_step "e2e harness self-tests" "node not found"
+fi
+step "gate prelude self-test (no gate abort can be silent, none is spurious)" \
+  bash scripts/rsc/tests/gate-prelude-selftest.sh || true
+# react-dom's ready callbacks are not fire-once, and the SSR entries pipe from them.
+# Needs the fixture's vendored react-dom (the copy the entries actually bind to); it
+# skips itself without one. No browser, no build.
+if [ "$have_node" = "1" ]; then
+  step "SSR pipes once (react-dom calls onAllReady twice; the entry's guard absorbs it)" \
+    node --test scripts/rsc/tests/ssr-pipe-once.test.mjs || true
+else
+  skip_step "SSR pipes once" "node not found"
+fi
+step "gate lint (every scripts/rsc gate sources the ERR net)" \
+  bash scripts/rsc/lint-gates.sh || true
+
+# The cal.com head-to-head demo publishes comparisons, so the rules that make those
+# comparisons fair are gated like anything else: navigation never edits source, one
+# scenario press writes once, a reload is labelled as a reload, a non-zero exit is
+# FAILED rather than a timeout, and build memory is the process tree rather than
+# ru_maxrss. Both suites are node-only and touch no dev server; the dashboard one needs
+# jsdom, which it resolves from the cal.com checkout, so it skips without one.
+CALCOM_APP="${DIFFPACK_CALCOM:-/tmp/dpe2e/calcom}"
+if [ "$have_node" = "1" ]; then
+  step "build-memory sampler (a process tree's peak is not ru_maxrss)" \
+    node scripts/tree-rss.test.mjs || true
+  step "spawn order alternates (a fixed order is a standing head start)" \
+    node demo/racing-order.test.mjs || true
+  if node -e "require('node:module').createRequire('$CALCOM_APP/package.json').resolve('jsdom')" >/dev/null 2>&1; then
+    step "demo dashboard rules (navigation/edit separation, hot vs reload, FAILED is not a timeout)" \
+      node demo/dashboard.test.mjs --app "$CALCOM_APP" || true
+  else
+    skip_step "demo dashboard fairness rules" "jsdom not resolvable from $CALCOM_APP (set DIFFPACK_CALCOM)"
+  fi
+else
+  skip_step "demo fairness self-tests" "node not found"
+fi
 
 # --- Tier 2: dev / HMR browser gates -----------------------------------------
 dev_gate() {  # dev_gate "name" <dir> <node-script>
@@ -97,9 +176,37 @@ rsc_gate "RSC flight render + SSR" scripts/rsc/flight-check.sh integration/rsc-r
 rsc_gate "RSC minimal app (SSR + hydrate + action)" scripts/rsc/rsc-check.sh integration/rsc-reference
 rsc_gate "Next app-router (real create-next-app, RSC end-to-end)" scripts/rsc/next-check.sh integration/next-app-router
 rsc_gate "Next dev server (Fast Refresh island + server-component reload)" scripts/rsc/next-dev-check.sh integration/next-app-router
+# No browser needed (curl-level): asserts an edit reaches the SERVER-RENDERED HTML,
+# which the browser-side HMR gates above structurally cannot see.
+if [ "$have_node" = "0" ]; then
+  skip_step "Next dev freshness (an edit must reach a freshly fetched document)" "node not found"
+elif ! deps_ready integration/next-app-router; then
+  skip_step "Next dev freshness (an edit must reach a freshly fetched document)" "integration/next-app-router/node_modules missing (npm install there)"
+else
+  step "Next dev freshness (an edit must reach a freshly fetched document)" bash scripts/rsc/next-dev-fresh-check.sh
+fi
+# Also curl-level: sweeps every route under `diffpack dev` and reads the server log for
+# react-dom API misuse. The dev orchestrator renders through the BUFFERED path, which is
+# a different react-dom callback than production's streaming one, so next-check.sh's
+# identical assertion does not cover it.
+if [ "$have_node" = "0" ]; then
+  skip_step "Next dev SSR API (no react-dom misuse while rendering every route)" "node not found"
+elif ! deps_ready integration/next-app-router; then
+  skip_step "Next dev SSR API (no react-dom misuse while rendering every route)" "integration/next-app-router/node_modules missing (npm install there)"
+else
+  step "Next dev SSR API (no react-dom misuse while rendering every route)" bash scripts/rsc/next-dev-ssr-api-check.sh
+fi
 rsc_gate "Next UNMODIFIED create-next-app default (build + render + hydrate)" scripts/rsc/next-authentic-check.sh integration/next-app-router
 rsc_gate "Next SSG (prerender + dumb static serve + hydrate + soft-nav)" scripts/rsc/next-ssg-check.sh integration/next-app-router
 rsc_gate "Next corpus (multi-app SSR + classification smoke)" scripts/rsc/next-corpus-check.sh integration/next-corpus
+# No browser needed: this one asserts the build FAILS, so there is nothing to serve.
+if [ "$have_node" = "0" ]; then
+  skip_step "Next missing dependency (unresolved import is fatal)" "node not found"
+elif ! deps_ready integration/next-app-router; then
+  skip_step "Next missing dependency (unresolved import is fatal)" "integration/next-app-router/node_modules missing (npm install there)"
+else
+  step "Next missing dependency (unresolved import is fatal)" bash scripts/rsc/next-missing-dep-check.sh
+fi
 rsc_gate "Next real OSS apps (vercel examples: build + serve + smoke)" scripts/rsc/next-real-check.sh integration/next-real
 rsc_gate "Dev HMR bench (diffpack dev vs next --turbopack, liveness/non-regression)" scripts/rsc/next-dev-hmr-check.sh integration/next-app-router
 
@@ -118,6 +225,15 @@ if [ "$FULL" = "1" ]; then
         || skip_step "SPA build acceptance + browser" "deps missing"
     else
       skip_step "five-app behavioral parity" "Chrome not found"
+    fi
+    # Real third-party applications (vercel/next.js, TanStack, create-vite),
+    # built by their own toolchain AND by diffpack, compared in a real browser.
+    # Materialize the corpus first with `node integration/e2e/fetch.mjs`.
+    if [ "$have_ab" = "1" ] && [ -d integration/e2e/apps ]; then
+      step "real-application e2e (build both, drive both, compare)" \
+        node integration/e2e/run.mjs
+    else
+      skip_step "real-application e2e" "agent-browser or integration/e2e/apps missing (node integration/e2e/fetch.mjs)"
     fi
   else
     skip_step "broader wall (--full)" "node not found"

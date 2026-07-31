@@ -79,6 +79,93 @@ pub fn start_agent_at(path: &str) -> std::io::Result<()> {
     memscope_agent::start_at(path)
 }
 
+/// Bring memscope up from the environment — the entry point for code with no
+/// `fn main()` to edit: a **Node `.node` addon**, a Python extension, any Rust
+/// cdylib a host process loads.
+///
+/// Call it once from your module's init hook (napi-rs: `#[napi::module_init]`;
+/// neon: the `#[neon::main]` fn; raw N-API: `napi_register_module_v1`). Nothing
+/// else is needed — everything is driven by env vars, so the module can ship
+/// with this call permanently in place and cost nothing when they're unset:
+///
+/// * `MEMSCOPE_MODE=full|sampled[:rate]|off` — tracking mode (default `full`
+///   when any other memscope env var is set, otherwise `off`).
+/// * `MEMSCOPE_RECORD=<path.mscope>` — record the whole allocation stream
+///   (`{pid}` expands, which matters when the host spawns worker processes).
+/// * `MEMSCOPE_LIVE=1` — also start the agent, for `memscope monitor`/`graph`.
+/// * `MEMSCOPE_HPROF_ON_EXIT` / `_AT_BYTES` / `_OUT` and `SIGUSR1` — heap-dump
+///   triggers, identical to the ones `memscope run` drives.
+///
+/// ```ignore
+/// #[global_allocator]
+/// static GLOBAL: memscope::MemScope = memscope::MemScope::system();
+///
+/// #[napi::module_init]
+/// fn init() {
+///     memscope::init();
+/// }
+/// ```
+///
+/// Then: `MEMSCOPE_RECORD=/tmp/addon.mscope node app.js && memscope analyze /tmp/addon.mscope`.
+///
+/// Recordings and dumps from a module symbolicate against **the module's own
+/// DWARF** (found via `dladdr`), not the host executable's — `node` has none.
+pub fn init() {
+    // Off unless asked: a module linking memscope must be able to ship as-is.
+    let mode = std::env::var("MEMSCOPE_MODE").unwrap_or_default();
+    let anything_asked = mode_is_on(&mode)
+        || ["MEMSCOPE_RECORD", "MEMSCOPE_LIVE", "MEMSCOPE_SOCK", "MEMSCOPE_HPROF_ON_EXIT",
+            "MEMSCOPE_HPROF_AT_BYTES", "MEMSCOPE_HPROF_OUT"]
+            .iter()
+            .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    if !anything_asked {
+        return;
+    }
+    match parse_mode(&mode) {
+        Some((m, rate)) => {
+            if let Some(r) = rate {
+                set_sample_rate(r);
+            }
+            set_mode(m);
+        }
+        // Any of the capture env vars, but no explicit mode: they asked for data.
+        None => set_mode(Mode::Full),
+    }
+
+    maybe_record_from_env();
+    memscope_agent::install_env_triggers();
+    memscope_agent::spawn_trigger_thread();
+
+    if std::env::var_os("MEMSCOPE_LIVE").is_some_and(|v| v == "1" || v == "true")
+        || std::env::var_os("MEMSCOPE_SOCK").is_some()
+    {
+        // `start` announces the socket path itself; only its failure is news.
+        if let Err(e) = memscope_agent::start() {
+            eprintln!("[memscope] could not start the agent: {e}");
+        }
+    }
+}
+
+/// `full` | `sampled` | `sampled:200` | `off` → (mode, sample rate).
+fn parse_mode(s: &str) -> Option<(Mode, Option<u32>)> {
+    let s = s.trim();
+    let (name, rate) = match s.split_once(':') {
+        Some((n, r)) => (n, r.parse::<u32>().ok()),
+        None => (s, None),
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "full" => Some((Mode::Full, None)),
+        "sampled" | "sample" => Some((Mode::Sampled, rate)),
+        "off" | "none" => Some((Mode::Off, None)),
+        _ => None,
+    }
+}
+
+/// Does `MEMSCOPE_MODE` name a tracking mode (i.e. not unset, not `off`)?
+fn mode_is_on(s: &str) -> bool {
+    matches!(parse_mode(s), Some((Mode::Full | Mode::Sampled, _)))
+}
+
 fn maybe_record_from_env() {
     let Ok(path) = std::env::var("MEMSCOPE_RECORD") else { return };
     if path.is_empty() {
@@ -107,3 +194,29 @@ pub use memscope_agent::record_to_file;
 /// *safely* (via Mach `mach_vm_read_overwrite`), so a since-freed address can't
 /// crash the dump. Requires `[profile.*] debug = true` for type recovery.
 pub use memscope_agent::{heap_dump, HprofStats};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_env_parses() {
+        assert!(matches!(parse_mode("full"), Some((Mode::Full, None))));
+        assert!(matches!(parse_mode("FULL"), Some((Mode::Full, None))));
+        assert!(matches!(parse_mode(" sampled "), Some((Mode::Sampled, None))));
+        assert!(matches!(parse_mode("sampled:200"), Some((Mode::Sampled, Some(200)))));
+        assert!(matches!(parse_mode("off"), Some((Mode::Off, None))));
+        // Unset / nonsense must not silently mean "off": init() decides that
+        // from whether anything was asked for at all.
+        assert!(parse_mode("").is_none());
+        assert!(parse_mode("verbose").is_none());
+    }
+
+    #[test]
+    fn only_a_tracking_mode_counts_as_on() {
+        assert!(mode_is_on("full"));
+        assert!(mode_is_on("sampled:50"));
+        assert!(!mode_is_on("off"));
+        assert!(!mode_is_on(""));
+    }
+}

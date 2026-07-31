@@ -1,0 +1,18 @@
+---
+title: Frontmatter title
+description: Exposed to the page by remark-mdx-frontmatter
+---
+
+import Note from "../components/note";
+
+export const revision = "pages-5";
+
+# {frontmatter.title}
+
+{frontmatter.description}, at revision {revision}.
+
+<Note>a component imported into an MDX page</Note>
+
+## A heading the rehype plugins rewrite
+
+[Go to the about page](/about)

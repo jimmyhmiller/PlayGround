@@ -1,0 +1,862 @@
+;; The M1 gate: the node engine.
+;;
+;; Three things are being held up here:
+;;   1. peepholes fold and simplify, checked against printed IR (a golden diff you can read)
+;;   2. the SAME program reaches the SAME graph under every worklist seed, which is what
+;;      catches a peephole that forgot to record a dependency
+;;   3. nothing leaks: every node is either reachable or dead
+;;
+;;   coil test tests/node-test.coil
+(module nodetest)
+
+(import "../src/ty.coil"   :use *)
+(import "../src/node.coil" :use *)
+(import "assert.coil"      :use *)
+(import "control.coil"     :use *)
+(import "io.coil"          :use *)
+(import "fmt.coil"         :use *)
+(import "alloc.coil"       :use *)
+(import "str.coil"         :use *)
+(import "slice.coil"       :use *)
+
+; ---------------------------------------------------------------------------
+; Building programs
+; ---------------------------------------------------------------------------
+;; Binary and unary ops take (ctrl, args...), so the operand indices line up with what
+;; `n-compute` reads. Control is absent for pure arithmetic.
+(defn mk-arg [(t i64)] (-> i64) (n-peephole (n-new1 OP-ARG t (g-start))))
+(defn mk-con [(t i64)] (-> i64) (n-const t))
+(defn mk-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
+(defn mk-un  [(op i64) (a i64)] (-> i64) (n-peephole (n-new2 op 0 NO-NODE a)))
+(defn mk-int [(v i64)] (-> i64) (mk-con (t-int-con v)))
+
+;; Finish a program: return the value, hook it to Stop, then run peepholes to a fixpoint.
+(defn mk-ret [(v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 (g-start) v))]
+    (n-add-def! (g-stop) r)
+    (n-peephole (g-stop))
+    (iterate!)
+    r))
+
+; ---------------------------------------------------------------------------
+; Comparing printed IR
+; ---------------------------------------------------------------------------
+(defn render-stop [(buf (ptr i8))] (-> (slice u8)) (n-render (g-stop) buf 1024))
+
+(defn check-ir [(name (slice u8)) (expect (slice u8))] (-> i64)
+  (let [bufa (alloc-stack (array u8 1024))
+        got  (render-stop (cast (ptr i8) bufa))]
+    (if (str-eq got expect) 0
+      (do (let [w (stderr)]
+            (ps w "\nIR MISMATCH in ") (ps w name)
+            (ps w "\n  want: ") (ps w expect)
+            (ps w "\n  got:  ") (ps w got)
+            (ps w "\n  flat:\n")
+            (g-print-flat w))
+          (abort)
+          0))))
+
+;; Every completed program must also be leak-free: a live node that nothing can reach would
+;; grow the arena without bound over a real compile.
+(defn check-no-leaks [(name (slice u8))] (-> i64)
+  (let [n (g-leaked-count)]
+    (if (= n 0) 0
+      (do (let [w (stderr)]
+            (fmt w "\n{d} LEAKED NODES in " n) (ps w name) (ps w "\n")
+            (g-print-flat w))
+          (abort)
+          0))))
+
+(defn check-prog [(name (slice u8)) (expect (slice u8))] (-> i64)
+  (check-ir name expect)
+  (check-no-leaks name)
+  0)
+
+; ---------------------------------------------------------------------------
+; Constant folding
+; ---------------------------------------------------------------------------
+(deftest folds-literals
+  (graph-reset! 1)
+  (mk-ret (mk-int 1))
+  (check-prog "return 1" "return int=1;"))
+
+(deftest folds-arithmetic
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-ADD (mk-int 1) (mk-int 2)))
+  (check-prog "1+2" "return int=3;")
+
+  (graph-reset! 1)
+  ; 1 + 2*3, folded all the way down
+  (mk-ret (mk-bin OP-ADD (mk-int 1) (mk-bin OP-MUL (mk-int 2) (mk-int 3))))
+  (check-prog "1+2*3" "return int=7;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-SUB (mk-int 10) (mk-int 4)))
+  (check-prog "10-4" "return int=6;")
+
+  (graph-reset! 1)
+  ; exact division stays an integer
+  (mk-ret (mk-bin OP-DIV (mk-int 12) (mk-int 4)))
+  (check-prog "12/4" "return int=3;")
+
+  (graph-reset! 1)
+  ; inexact division leaves the integers, so it is `num` and cannot fold to a literal
+  (mk-ret (mk-bin OP-DIV (mk-int 1) (mk-int 2)))
+  (check-prog "1/2" "return (int=1/int=2);")
+
+  (graph-reset! 1)
+  ; division by zero is an infinity, which is a float, so again no integer to fold to
+  (mk-ret (mk-bin OP-DIV (mk-int 1) (mk-int 0)))
+  (check-prog "1/0" "return (int=1/int=0);"))
+
+(deftest folds-comparisons
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-LT (mk-int 1) (mk-int 2)))
+  (check-prog "1<2" "return bool=1;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-EQ (mk-int 1) (mk-int 2)))
+  (check-prog "1==2" "return bool=0;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-un OP-NOT (mk-int 0)))
+  (check-prog "!0" "return bool=1;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-un OP-NOT (mk-int 7)))
+  (check-prog "!7" "return bool=0;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-un OP-MINUS (mk-int 5)))
+  (check-prog "-5" "return int=-5;"))
+
+; ---------------------------------------------------------------------------
+; Algebraic identities, which need a non-constant operand to be visible
+; ---------------------------------------------------------------------------
+(deftest simplifies-with-an-opaque-operand
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-ADD (mk-arg (t-int)) (mk-int 0)))
+  (check-prog "arg+0" "return arg;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-MUL (mk-arg (t-int)) (mk-int 1)))
+  (check-prog "arg*1" "return arg;")
+
+  (graph-reset! 1)
+  ; x*0 is 0 for integers. It is NOT for floats, where x could be NaN or an infinity.
+  (mk-ret (mk-bin OP-MUL (mk-arg (t-int)) (mk-int 0)))
+  (check-prog "arg*0" "return int=0;")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-SUB a a)))
+  (check-prog "arg-arg" "return int=0;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-un OP-MINUS (mk-un OP-MINUS (mk-arg (t-int)))))
+  (check-prog "-(-arg)" "return arg;")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-EQ a a)))
+  (check-prog "arg==arg" "return bool=1;")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-LT a a)))
+  (check-prog "arg<arg" "return bool=0;"))
+
+;; Floats are excluded from the identities that integers get, and that exclusion is the point:
+;; NaN != NaN, so `x==x` is not true and `x-x` is not 0 for an arbitrary number.
+(deftest float-identities-are-not-taken
+  (graph-reset! 1)
+  (let [a (mk-arg (t-num))]
+    (mk-ret (mk-bin OP-EQ a a)))
+  (check-prog "num==num survives" "return (arg==arg);")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-num))]
+    (mk-ret (mk-bin OP-SUB a a)))
+  (check-prog "num-num survives" "return (arg-arg);")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-num))]
+    (mk-ret (mk-bin OP-MUL a (mk-int 0))))
+  (check-prog "num*0 survives" "return (arg*int=0);"))
+
+;; AN IDENTITY PEEPHOLE MUST NOT CHANGE THE TYPE OF THE VALUE IT REPLACES.
+;;
+;; `x+0`, `x-0`, `x*1` and `-(-x)` are identities over the NUMBERS and over nothing else. This is a
+;; dynamic language: `"3"+0` is `"30"`, and `-` `*` and unary `-` all coerce, so `"3"-0` is the
+;; number 3, not the string. `arith-compute` says exactly that (it reports `dyn` for a non-numeric
+;; `+` and `num` for the rest), so a peephole that hands back the operand replaces a node whose
+;; type the lattice already decided with a node of a DIFFERENT type, and the graph afterwards
+;; claims a value the language does not produce.
+;;
+;; So the property is mechanical and needs no golden: build the node raw, record what `n-compute`
+;; concluded, peephole it, and require the survivor's type to be the type that was computed. Four
+;; of the six identity rules failed this before the guard was added; the other two (`x*0` and
+;; `x==x`) already carried it.
+;;
+;; NON-VACUITY: the same table asserts the rules still FIRE on an integer operand, so a "fix" that
+;; just disabled the peepholes would fail here instead of passing.
+(defn identity-keeps-its-type [(label (slice u8)) (build i64)] (-> i64)
+  ; `build` is the raw, unpeepholed node; its computed type is the answer the lattice gave
+  (let [want (n-compute build)
+        got  (n-peephole build)]
+    (if (= (n-ty got) want) 0
+      (do (let [w (stderr)]
+            (ps w "\nIDENTITY PEEPHOLE CHANGED THE TYPE: ") (ps w label) (ps w "\n  computed: ")
+            (ty-print w want) (ps w "\n  after the peephole: ")
+            (ty-print w (n-ty got)) (ps w "\n")
+            (g-print-flat w))
+          (abort) 0))
+    0))
+
+(deftest identity-peepholes-do-not-change-a-non-numeric-type
+  ; a string is the clearest witness: every one of these identities is FALSE for it
+  (graph-reset! 1)
+  (let [a (mk-arg (t-str))]
+    (identity-keeps-its-type "str + 0" (n-new3 OP-ADD 0 NO-NODE a (mk-int 0)))
+    (identity-keeps-its-type "str - 0" (n-new3 OP-SUB 0 NO-NODE a (mk-int 0)))
+    (identity-keeps-its-type "str * 1" (n-new3 OP-MUL 0 NO-NODE a (mk-int 1)))
+    (identity-keeps-its-type "str * 0" (n-new3 OP-MUL 0 NO-NODE a (mk-int 0)))
+    (identity-keeps-its-type "-(-str)" (n-new2 OP-MINUS 0 NO-NODE (mk-un OP-MINUS a)))
+    (identity-keeps-its-type "str == str" (n-new3 OP-EQ 0 NO-NODE a a)))
+
+  ; a bool is non-numeric too, and unlike a string it exists in the interpreter's value domain,
+  ; which is what makes the differential half of this gate (eval-test) possible
+  (graph-reset! 1)
+  (let [b (mk-arg (t-bool))]
+    (identity-keeps-its-type "bool + 0" (n-new3 OP-ADD 0 NO-NODE b (mk-int 0)))
+    (identity-keeps-its-type "bool - 0" (n-new3 OP-SUB 0 NO-NODE b (mk-int 0)))
+    (identity-keeps-its-type "bool * 1" (n-new3 OP-MUL 0 NO-NODE b (mk-int 1)))
+    (identity-keeps-its-type "-(-bool)" (n-new2 OP-MINUS 0 NO-NODE (mk-un OP-MINUS b))))
+
+  ; AND THEY STILL FIRE where they are true. Without this half, deleting the four peepholes
+  ; outright would pass the test above.
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (assert (= (n-peephole (n-new3 OP-ADD 0 NO-NODE a (mk-int 0))) a))
+    (assert (= (n-peephole (n-new3 OP-SUB 0 NO-NODE a (mk-int 0))) a))
+    (assert (= (n-peephole (n-new3 OP-MUL 0 NO-NODE a (mk-int 1))) a))
+    (assert (= (n-peephole (n-new2 OP-MINUS 0 NO-NODE (mk-un OP-MINUS a))) a))
+    (assert (n-int-con? (n-peephole (n-new3 OP-MUL 0 NO-NODE a (mk-int 0))) 0))
+    (assert (= (n-ty (n-peephole (n-new3 OP-EQ 0 NO-NODE a a))) (t-bool-con true)))))
+
+; ---------------------------------------------------------------------------
+; Cast: the one rewrite that deletes a type check
+; ---------------------------------------------------------------------------
+;; DISCHARGING A CAST IS IRREVERSIBLE AND IT DELETES A GUARD, so it needs the PROVEN answer.
+;; `ty-isa` is `meet(a,b) == b` and `meet(ANY, t) == t`, so `ty-isa ANY t` is TRUE FOR EVERY t:
+;; an unanalysed input satisfies every conceivable cast. The whole HIGH half behaves that way, not
+;; just ANY, which is why the guard is `ty-high?` and not `!= t-top`.
+;;
+;; This is the ORDER-INDEPENDENCE half: build the program raw so nothing has a type yet, put every
+;; node on the worklist, and let `iterate!` decide the order. Unguarded, the Cast is discharged on
+;; roughly half the seeds and kept on the other half, which is exactly the promise `iterate!`
+;; documents (order comes from the seed, the result must not).
+(defn build-raw-cast [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [x (n-new1 OP-ARG (t-dyn) (g-start))
+        c (n-new2 OP-CAST (t-int) (g-start) x)
+        r (n-new2 OP-RETURN 0 (g-start) c)]
+    (n-add-def! (g-stop) r)
+    (wl-push! x) (wl-push! c) (wl-push! r) (wl-push! (g-stop)) (wl-push! (g-start))
+    (iterate!)
+    c))
+
+(defn count-live-op [(op i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) op))
+                (store! k (+ (load k) 1))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+(deftest a_cast_is_never_discharged_on_an_unanalysed_input
+  (let [(mut s) 0 (mut lost) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (do (build-raw-cast (+ 1 (load s)))
+            ; `dyn` is not `int`, so this Cast can never be discharged, whatever the order was
+            (if (= (count-live-op OP-CAST) 0) (store! lost (+ (load lost) 1)) 0)
+            (store! s (+ (load s) 1))
+            0)))
+    (if (= (load lost) 0) 0
+      (do (let [w (stderr)]
+            (fmt w "\nthe Cast was discharged on {d} of 200 worklist seeds\n" (load lost))
+            (g-print-flat w))
+          (abort) 0))
+    ; the fixture is not vacuous: the Cast really is in the graph to begin with
+    (build-raw-cast 1)
+    (assert (= (count-live-op OP-CAST) 1))))
+
+;; And the CONTRADICTION half, on the ordinary eager path. A phi whose declared type is `int` and
+;; whose every arm is `null` reports `~dyn`: high, but NOT `t-top`, so a guard written as
+;; `!= (t-top)` still discharges the Cast that nothing satisfies. `cast-compute` twelve lines away
+;; already refuses to narrow on a high input (Simple's freeze rule); this is the transformation
+;; half of the same rule.
+(deftest a_cast_survives_a_contradictory_phi
+  (graph-reset! 1)
+  (let [iff  (n-peephole (n-new2 OP-IF 0 (g-start) (mk-arg (t-dyn))))
+        arms (n-if-arms! iff)
+        r    (let [q (n-new OP-REGION 0)]
+               (n-add-def! q NO-NODE) (n-add-def! q (arms-t arms)) (n-add-def! q (arms-f arms)) q)
+        ph   (let [q (n-new OP-PHI (t-int))]
+               (n-add-def! q r) (n-add-def! q (mk-con (t-null))) (n-add-def! q (mk-con (t-null))) q)
+        c    (n-peephole (n-new2 OP-CAST (t-int) r ph))]
+    (let [ret (n-peephole (n-new2 OP-RETURN 0 r c))]
+      (n-add-def! (g-stop) ret) (n-peephole (g-stop)))
+    (wl-push! r) (wl-push! ph)
+    (iterate!)
+    ; the phi's type is high and contradicts `int`, so the check has NOT been discharged: the
+    ; compiler never proved anything and the Cast is the only record of that
+    (assert (ty-high? (n-ty ph)))
+    (assert (= (count-live-op OP-CAST) 1))))
+
+; ---------------------------------------------------------------------------
+; Commutativity and value numbering, together
+; ---------------------------------------------------------------------------
+(deftest gvn-sees-through-commutativity
+  (graph-reset! 1)
+  ; (arg+2) - (2+arg). Canonical operand order makes both Adds structurally identical, value
+  ; numbering collapses them to one node, and then x-x folds to 0. Any one of the three
+  ; missing and this stays an expression.
+  (let [a (mk-arg (t-int))
+        l (mk-bin OP-ADD a (mk-int 2))
+        r (mk-bin OP-ADD (mk-int 2) a)]
+    (mk-ret (mk-bin OP-SUB l r)))
+  (check-prog "(arg+2)-(2+arg)" "return int=0;"))
+
+(deftest gvn-dedups-identical-expressions
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        l (mk-bin OP-MUL a a)
+        r (mk-bin OP-MUL a a)]
+    ; both multiplies are the same node, so this is x-x
+    (assert (= l r))
+    (mk-ret (mk-bin OP-SUB l r)))
+  (check-prog "(arg*arg)-(arg*arg)" "return int=0;"))
+
+(deftest gvn-dedups-constants
+  (graph-reset! 1)
+  (assert (= (mk-int 5) (mk-int 5)))
+  (assert (!= (mk-int 5) (mk-int 6))))
+
+; ---------------------------------------------------------------------------
+; Types propagate, not just constants
+; ---------------------------------------------------------------------------
+(deftest ranges-propagate-through-arithmetic
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 0 10))
+        e (mk-bin OP-ADD a (mk-int 5))]
+    (assert (= (n-ty e) (t-int-range 5 15))))
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 2 3))
+        b (mk-arg (t-int-range 10 20))
+        e (mk-bin OP-MUL a b)]
+    (assert (= (n-ty e) (t-int-range 20 60))))
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 0 10))
+        b (mk-arg (t-int-range 1 2))
+        e (mk-bin OP-SUB a b)]
+    (assert (= (n-ty e) (t-int-range -2 9))))
+
+  (graph-reset! 1)
+  ; an unbounded range must not pretend to a bound after overflow
+  (let [a (mk-arg (t-int))
+        e (mk-bin OP-ADD a (mk-int 1))]
+    (assert (= (n-ty e) (t-int)))))
+
+(deftest dynamic-operands_stay_sound
+  (graph-reset! 1)
+  ; `+` on an unknown value can concatenate strings, so the result is dyn
+  (let [a (mk-arg (t-dyn))
+        e (mk-bin OP-ADD a (mk-int 1))]
+    (assert (= (n-ty e) (t-dyn))))
+
+  (graph-reset! 1)
+  ; `-` coerces to number, so it is num even on a dyn operand
+  (let [a (mk-arg (t-dyn))
+        e (mk-bin OP-SUB a (mk-int 1))]
+    (assert (= (n-ty e) (t-num))))
+
+  (graph-reset! 1)
+  ; a string operand cannot be an integer add
+  (let [a (mk-arg (t-str))
+        e (mk-bin OP-ADD a (mk-int 1))]
+    (assert (= (n-ty e) (t-dyn)))))
+
+; ---------------------------------------------------------------------------
+; The seed test: order must not matter
+; ---------------------------------------------------------------------------
+;; A peephole that inspects a node which is not one of its inputs, and does not record the
+;; dependency, produces a graph that is correct under some visit orders and stale under
+;; others. Running the same program under many seeds is how that shows up as a failure
+;; instead of as a mystery months later.
+(defn build-fixture [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [a  (mk-arg (t-int-range 0 100))
+        b  (mk-arg (t-int-range 1 4))
+        e1 (mk-bin OP-ADD a (mk-int 0))          ; folds to a
+        e2 (mk-bin OP-MUL e1 (mk-int 1))         ; folds to a
+        e3 (mk-bin OP-ADD (mk-int 3) e2)         ; canonicalises to a+3
+        e4 (mk-bin OP-ADD e2 (mk-int 3))         ; the same node as e3, after GVN
+        e5 (mk-bin OP-SUB e3 e4)                 ; therefore 0
+        e6 (mk-bin OP-MUL b (mk-int 2))
+        e7 (mk-bin OP-ADD e5 e6)                 ; 0 + b*2
+        e8 (mk-un OP-MINUS (mk-un OP-MINUS e7))] ; double negation
+    (mk-ret e8))
+  0)
+
+;; The eager fixture only leaves a handful of nodes on the worklist, so on its own the seed
+;; test explores few orders. This builds the SAME program with no peepholing at all, pushing
+;; every node onto the worklist and letting `iterate!` do the whole job. Two things fall out:
+;; the order space is much larger, and eager and deferred peepholing are shown to reach the
+;; same graph, which is what the optimistic pass in M7 will depend on.
+(defn raw-arg [(t i64)] (-> i64) (let [n (n-new1 OP-ARG t (g-start))] (wl-push! n) n))
+(defn raw-con [(t i64)] (-> i64) (let [n (n-new1 OP-CONST t (g-start))] (wl-push! n) n))
+(defn raw-int [(v i64)] (-> i64) (raw-con (t-int-con v)))
+(defn raw-bin [(op i64) (a i64) (b i64)] (-> i64)
+  (let [n (n-new3 op 0 NO-NODE a b)] (wl-push! n) n))
+(defn raw-un [(op i64) (a i64)] (-> i64)
+  (let [n (n-new2 op 0 NO-NODE a)] (wl-push! n) n))
+
+(defn build-fixture-raw [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [a  (raw-arg (t-int-range 0 100))
+        b  (raw-arg (t-int-range 1 4))
+        e1 (raw-bin OP-ADD a (raw-int 0))
+        e2 (raw-bin OP-MUL e1 (raw-int 1))
+        e3 (raw-bin OP-ADD (raw-int 3) e2)
+        e4 (raw-bin OP-ADD e2 (raw-int 3))
+        e5 (raw-bin OP-SUB e3 e4)
+        e6 (raw-bin OP-MUL b (raw-int 2))
+        e7 (raw-bin OP-ADD e5 e6)
+        e8 (raw-un OP-MINUS (raw-un OP-MINUS e7))
+        r  (n-new2 OP-RETURN 0 (g-start) e8)]
+    (wl-push! r)
+    (n-add-def! (g-stop) r)
+    (wl-push! (g-stop))
+    (iterate!))
+  0)
+
+(deftest deferred_peepholing_reaches_the_eager_result
+  (let [bufa (alloc-stack (array u8 1024))
+        bufb (alloc-stack (array u8 1024))]
+    (build-fixture 1)
+    (let [eager (render-stop (cast (ptr i8) bufa))]
+      (build-fixture-raw 1)
+      (let [deferred (render-stop (cast (ptr i8) bufb))]
+        (if (str-eq eager deferred) 0
+          (do (let [w (stderr)]
+                (ps w "\nEAGER AND DEFERRED PEEPHOLING DISAGREE\n  eager:    ") (ps w eager)
+                (ps w "\n  deferred: ") (ps w deferred) (ps w "\n")
+                (g-print-flat w))
+              (abort) 0))))
+    ; and the deferred build is order-independent too, over a much larger order space
+    (build-fixture-raw 1)
+    (let [ref (render-stop (cast (ptr i8) bufa))
+          (mut s) 0]
+      (loop
+        (if (>= (load s) 24) (break)
+          (let [seed (+ 3 (* (load s) 104729))]
+            (build-fixture-raw seed)
+            (let [got (render-stop (cast (ptr i8) bufb))]
+              (if (not (str-eq got ref))
+                  (do (let [w (stderr)]
+                        (fmt w "\nDEFERRED BUILD DIFFERS UNDER SEED {d}\n  seed 1: " seed)
+                        (ps w ref) (fmt w "\n  seed {d}: " seed) (ps w got) (ps w "\n")
+                        (g-print-flat w))
+                      (abort) 0)
+                0)
+              (check-no-leaks "deferred fixture")
+              (store! s (+ (load s) 1))
+              0))))
+      0)))
+
+(deftest same_graph_under_every_seed
+  (let [bufa (alloc-stack (array u8 1024))
+        bufb (alloc-stack (array u8 1024))
+        (mut live0) 0
+        (mut nodes0) 0]
+    (build-fixture 1)
+    (let [ref (render-stop (cast (ptr i8) bufa))]
+      (store! live0 (g-live-count))
+      (check-no-leaks "fixture seed 1")
+      ; 12 seeds, deliberately spread so the LCG takes different paths
+      (let [(mut s) 0]
+        (loop
+          (if (>= (load s) 12) (break)
+            (let [seed (+ 2 (* (load s) 7919))]
+              (build-fixture seed)
+              (let [got (render-stop (cast (ptr i8) bufb))]
+                (if (not (str-eq got ref))
+                    (do (let [w (stderr)]
+                          (fmt w "\nSEED {d} PRODUCED A DIFFERENT GRAPH\n" seed)
+                          (ps w "  seed 1: ") (ps w ref) (ps w "\n")
+                          (fmt w "  seed {d}: " seed) (ps w got) (ps w "\n")
+                          (g-print-flat w))
+                        (abort) 0)
+                  0)
+                (if (!= (g-live-count) (load live0))
+                    (do (let [w (stderr)]
+                          (fmt w "\nSEED {d}: {d} live nodes, seed 1 had {d}\n"
+                               seed (g-live-count) (load live0))
+                          (g-print-flat w))
+                        (abort) 0)
+                  0)
+                (check-no-leaks "fixture under seed")
+                (store! s (+ (load s) 1))
+                0))))))
+    ; and the fixture really does collapse to b*2 doubled-negated away
+    (build-fixture 1)
+    (check-prog "seed fixture" "return (arg*int=2);")))
+
+; ---------------------------------------------------------------------------
+; Edge bookkeeping
+; ---------------------------------------------------------------------------
+(deftest edges_stay_symmetric
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        b (mk-int 7)
+        e (mk-bin OP-ADD a b)]
+    ; the add is a use of both operands
+    (assert (= (n-in e 1) a))
+    (assert (= (n-in e 2) b))
+    (assert (= (n-nouts a) 1))
+    (assert (= (n-out a 0) e))
+    ; and dropping the edge kills the operand, since nothing else used it
+    (n-set-def! e 1 NO-NODE)
+    (assert (n-dead? a))
+    (assert (= (n-nins e) 3))
+    (assert (= (n-in e 1) NO-NODE))))
+
+(deftest killing_cascades
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        inner (mk-bin OP-MUL a a)
+        outer (mk-bin OP-ADD inner (mk-int 1))]
+    (assert (not (n-dead? inner)))
+    ; killing the only user of `inner` must take `inner` with it, and then `a`
+    (n-kill! outer)
+    (assert (n-dead? outer))
+    (assert (n-dead? inner))
+    (assert (n-dead? a))))
+
+(deftest dead_nodes_are_never_resurrected
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        e (mk-bin OP-ADD a (mk-int 0))]     ; folds to a, so the Add dies
+    (assert (= e a))
+    (mk-ret a)
+    (check-no-leaks "folded add")))
+
+; ---------------------------------------------------------------------------
+; The printer, eyeballed
+; ---------------------------------------------------------------------------
+(deftest print_the_fixture
+  (build-fixture 1)
+  (let [w (stdout)]
+    (ps w "\n--- fixture, expression form ---\n  ")
+    (n-print w (g-stop))
+    (ps w "\n--- fixture, flat form ---\n")
+    (g-print-flat w)
+    (fmt w "--- {d} nodes, {d} live, {d} leaked ---\n"
+         (n-count) (g-live-count) (g-leaked-count))
+    0))
+
+; ---------------------------------------------------------------------------
+; NO COMPUTE MAY RISE ON AN UNINHABITED INPUT
+; ---------------------------------------------------------------------------
+;; Monotonicity is a claim about a SEQUENCE of types, so no single graph can show it and the
+;; verifier can only ever say the types are at a fixpoint. Here it is checked directly: feed a
+;; compute a type no value inhabits, then feed it the type that input later falls to, and require
+;; the second answer to be at or below the first.
+;;
+;; All four of these rose. `join(int=8, int=[0..5])` is `int=~[5..8]`: the INT bit is present and the
+;; range is inverted, which is the high element of that axis. `val-high?` tested only the kinds axis,
+;; so it called that LOW, and `int-arith` answered `int` (the axis BOTTOM) for it; when the Cast's
+;; input fell to `int=[0..5]` the Add answered `int=[1..6]`, which is ABOVE `int`. `g-analyze!`'s own
+;; assertion aborted the compiler on a 14-node program because of it, which is the end-to-end half
+;; below.
+(defn falls-or-fail [(what (slice u8)) (before i64) (after i64)] (-> i64)
+  (if (ty-falls? before after) 0
+    (do (let [w (stderr)]
+          (ps w "\n") (ps w what) (ps w ": ") (ty-print w before)
+          (ps w " ROSE to ") (ty-print w after) (ps w "\n"))
+        (abort) 0)))
+
+(deftest no_compute_rises_when_an_uninhabited_input_falls
+  (let [inv  (ty-join (t-int-con 8) (t-int-range 0 5))        ; int=~[5..8], no integer fits
+        low  (t-int-range 0 5)                                 ; what it falls to
+        invb (ty-join (t-bool-con true) (t-bool-con false))    ; bool=~[0..1]
+        lowb (t-bool-con true)]
+    (assert (ty-high? inv))
+    (assert (ty-high? invb))
+    (falls-or-fail "arith ADD" (arith-compute OP-ADD inv (t-int-con 1))
+                               (arith-compute OP-ADD low (t-int-con 1)))
+    (falls-or-fail "arith SUB" (arith-compute OP-SUB inv (t-int-con 1))
+                               (arith-compute OP-SUB low (t-int-con 1)))
+    (falls-or-fail "arith MUL" (arith-compute OP-MUL inv (t-int-con 2))
+                               (arith-compute OP-MUL low (t-int-con 2)))
+    (falls-or-fail "minus" (minus-compute inv) (minus-compute low))
+    (falls-or-fail "not"   (not-compute invb)  (not-compute lowb))
+    ; and the axis rule at the level below, so a future caller of int-arith cannot reintroduce it
+    (falls-or-fail "int-arith directly" (int-arith OP-ADD 8 5 1 1) (int-arith OP-ADD 0 5 1 1)))
+
+  ;; if-compute, which needs a node. An If whose PREDICATE holds no value takes neither arm; the old
+  ;; code fell through to [ctrl ctrl], the bottom of that axis, and then rose to [ctrl ~ctrl].
+  (let [(mut before) 0 (mut after) 0]
+    (graph-reset! 1)
+    (let [x (n-peephole (n-new1 OP-ARG (ty-join (t-bool-con true) (t-bool-con false)) (g-start)))]
+      (store! before (n-compute (n-new2 OP-IF 0 (g-start) x))))
+    (graph-reset! 1)
+    (let [x (n-peephole (n-new1 OP-ARG (t-bool-con true) (g-start)))]
+      (store! after (n-compute (n-new2 OP-IF 0 (g-start) x))))
+    (falls-or-fail "if-compute" (load before) (load after))))
+
+;; The end-to-end half: `if (p) x = 8; else x = 0; return ((int[0..5]) x) + 1;` built raw and handed
+;; to `g-analyze!`. The transient is `join(int=8, int=[0..5])`, and the compiler used to ABORT here
+;; with "type monotonicity violated at Add: int rose to int=[1..6]" at seed 22. The Cast is what mints
+;; the uninhabited type, so it is not an artificial input: an annotation that disagrees with one arm
+;; of a merge is the ordinary way to produce one.
+(deftest a_cast_that_contradicts_one_arm_analyses_under_every_seed
+  (let [(mut s) 0]
+    (loop
+      (if (>= (load s) 300) (break)
+        (do (graph-reset! (+ 1 (load s)))
+            (let [p   (n-new1 OP-ARG (t-dyn) (g-start))
+                  iff (n-new2 OP-IF 0 (g-start) p)]
+              (let [tt (n-new1 OP-CPROJ 0 iff)
+                    ff (n-new1 OP-CPROJ 1 iff)
+                    r  (n-new OP-REGION 0)]
+                (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+                (let [ph (n-new OP-PHI (t-int))]
+                  (n-add-def! ph r)
+                  (n-add-def! ph (n-new1 OP-CONST (t-int-con 8) (g-start)))
+                  (n-add-def! ph (n-new1 OP-CONST (t-int-con 0) (g-start)))
+                  (let [c   (n-new2 OP-CAST (t-int-range 0 5) r ph)
+                        add (n-new3 OP-ADD 0 NO-NODE c (n-new1 OP-CONST (t-int-con 1) (g-start)))]
+                    (n-add-def! (g-stop) (n-new2 OP-RETURN 0 r add))
+                    (g-analyze!)
+                    ; the monotonicity check really ran: without this the test would pass just as
+                    ; well with the assertion inside g-analyze! deleted
+                    (assert (> (g-analyze-checks) 0))))))
+            (store! s (+ (load s) 1))
+            0)))))
+
+; ---------------------------------------------------------------------------
+; AN UNANALYSED NODE MAKES NO CLAIM
+; ---------------------------------------------------------------------------
+;; These are unit gates on the ANSWER of two computes, not on a program's result, and they exist
+;; because the end-to-end gates cannot see these two defects on their own: the irreversible rewrites
+;; downstream now demand a PROVEN type, so a producer minting a false proof is masked by the
+;; consumers refusing to act on it. Two overlapping defences is the right place to be, but it means
+;; each one needs its own gate or the pair degrades to one silently.
+;;
+;; ANY means "not analysed yet". XCtrl means "proven dead". `region-compute` seeds its meet with
+;; `~ctrl` and meet(~ctrl, ANY) is `~ctrl`, so a merge none of whose paths had a type yet reported
+;; PROVABLY UNREACHABLE out of no information at all, and four rewrites that test `= (t-xctrl)` read
+;; that as a proof: a live path and its Phi arm dropped, a live Return dropped and the kill cascade
+;; run over the whole program, a Phi collapsed onto one arm, a live projection replaced by XCtrl.
+(deftest an_unanalysed_merge_does_not_claim_to_be_unreachable
+  (graph-reset! 1)
+  (let [iff (n-new2 OP-IF 0 (g-start) (n-peephole (n-new1 OP-ARG (t-dyn) (g-start))))
+        r   (n-new OP-REGION 0)]
+    (let [tt (n-new1 OP-CPROJ 0 iff)
+          ff (n-new1 OP-CPROJ 1 iff)]
+      (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+      ; nothing has been peepholed, so both paths are still ANY
+      (assert (= (n-ty tt) (t-top)))
+      (assert (= (n-ty ff) (t-top)))
+      (assert (!= (n-compute r) (t-xctrl)))     ; the claim that broke five rewrites
+      (assert (= (n-compute r) (t-top)))
+      ; one path analysed and live is enough to be reachable, but the merge still says nothing while
+      ; the other is unknown: a merge is reachable if ANY path is, so the second path cannot
+      ; retract that, and this is where the old code was actually right
+      (n-peephole iff) (n-peephole tt)
+      (assert (= (n-ty tt) (t-ctrl)))
+      (assert (= (n-compute r) (t-top)))
+      ; both analysed: now it answers
+      (n-peephole ff)
+      (assert (= (n-compute r) (t-ctrl)))))
+
+  ;; And a merge every one of whose paths is PROVEN dead really is unreachable, so the guard above
+  ;; did not simply switch the answer off.
+  (graph-reset! 1)
+  (let [r (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r (n-xctrl)) (n-add-def! r (n-xctrl))
+    (assert (= (n-compute r) (t-xctrl)))))
+
+;; `if-compute`'s unreachable-control test was `(and (!= c (t-ctrl)) (!= c (t-bot)))`, and ANY
+;; satisfies it, so an If whose own control had not been computed reported [~ctrl ~ctrl]:
+;; BOTH arms provably not taken. `cproj-idealize` then replaced both live projections with XCtrl.
+(deftest an_if_whose_control_is_unanalysed_does_not_claim_neither_arm
+  (graph-reset! 1)
+  (let [outer (n-new2 OP-IF 0 (g-start) (n-peephole (n-new1 OP-ARG (t-dyn) (g-start))))]
+    (let [tt (n-new1 OP-CPROJ 0 outer)
+          q  (n-peephole (n-new1 OP-ARG (t-dyn) (g-start)))]
+      (let [inner (n-new2 OP-IF 0 tt q)]
+        ; the inner If's control is an unanalysed projection, its predicate is a known `dyn`
+        (assert (= (n-ty tt) (t-top)))
+        (assert (= (n-ty q) (t-dyn)))
+        (assert (!= (n-compute inner) (t-if-neither)))
+        (assert (= (n-compute inner) (t-top)))
+        ; with the control analysed and live, an opaque predicate takes both arms
+        (n-peephole outer) (n-peephole tt)
+        (assert (= (n-compute inner) (t-if-both)))))))
+
+;; PROVEN dead control is still acted on, which is the other half of the same claim: these guards
+;; distinguish "unknown" from "dead" rather than disabling dead-code elimination.
+(deftest an_if_in_proven_dead_control_still_takes_neither_arm
+  (graph-reset! 1)
+  (let [iff (n-new2 OP-IF 0 (n-xctrl) (n-peephole (n-new1 OP-ARG (t-dyn) (g-start))))]
+    (assert (= (n-compute iff) (t-if-neither)))))
+
+;; A PHI'S REVISIT DEPENDENCY GOES ON THE PATH, NOT ON THE REGION.
+;; `phi-compute` skips a path whose control is still high, so it MUST be revisited when that control
+;; falls. Recording the dependency on the region does not achieve that: a region already at `ctrl`
+;; does not change type when a second path goes live (meet(ctrl,ctrl) is ctrl), so nothing flushes
+;; the region's deps and the phi keeps a type computed while a live path was invisible to it. Simple's
+;; PhiNode.compute records `addDep(r.in(i))`; the port had lost the `.in(i)`.
+;; Take the node off the worklist so that "it is on the worklist" afterwards means the flush put it
+;; there, rather than it having been queued by an earlier edge change.
+(defn drain-off-worklist [(n i64)] (-> i64)
+  (loop
+    (if (not (wl-on? n)) (break)
+      (do (wl-pop!) 0)))
+  (assert (not (wl-on? n)))
+  0)
+
+(deftest a_phi_records_its_revisit_dependency_on_the_skipped_path
+  (graph-reset! 1)
+  (let [iff (n-new2 OP-IF 0 (g-start) (n-peephole (n-new1 OP-ARG (t-dyn) (g-start))))
+        r   (n-new OP-REGION 0)]
+    (let [tt (n-new1 OP-CPROJ 0 iff)
+          ff (n-new1 OP-CPROJ 1 iff)]
+      (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+      (let [ph (n-new OP-PHI (t-int))]
+        (n-add-def! ph r) (n-add-def! ph (n-const (t-int-con 8))) (n-add-def! ph (n-const (t-int-con 0)))
+        ; compute the phi while both paths are unanalysed: that is when the dependency is recorded
+        (n-compute ph)
+        ; flushing the PATH's deps must re-queue the phi. Recorded on the region, this is false.
+        (drain-off-worklist ph)
+        (n-move-deps! tt)
+        (assert (wl-on? ph))
+        (drain-off-worklist ph)
+        (n-move-deps! ff)
+        (assert (wl-on? ph))))))
+
+;; THE ANALYSIS DROPS A PROVEN-DEAD ARM, which is what the phi's revisit dependency buys once the
+;; path's type falls all the way to XCtrl rather than merely becoming live: `if (0) x = 8; else x = 0;
+;; return x;` built raw. The true path is proven dead, so the published phi type must be `int=0` and
+;; not `int=[0..8]`. Getting there needs the dependency to be recorded on the PATH and needs
+;; `g-analyze!` to flush the deps list at all, which it did not do.
+(deftest the_analysis_drops_a_proven_dead_phi_arm
+  (let [(mut s) 0]
+    (loop
+      (if (>= (load s) 100) (break)
+        (do (graph-reset! (+ 1 (load s)))
+            (let [iff (n-new2 OP-IF 0 (g-start) (n-new1 OP-CONST (t-int-con 0) (g-start)))]
+              (let [tt (n-new1 OP-CPROJ 0 iff)
+                    ff (n-new1 OP-CPROJ 1 iff)
+                    r  (n-new OP-REGION 0)]
+                (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+                (let [ph (n-new OP-PHI (t-int))]
+                  (n-add-def! ph r)
+                  (n-add-def! ph (n-new1 OP-CONST (t-int-con 8) (g-start)))
+                  (n-add-def! ph (n-new1 OP-CONST (t-int-con 0) (g-start)))
+                  (n-add-def! (g-stop) (n-new2 OP-RETURN 0 r ph))
+                  (g-analyze!)
+                  (assert (> (g-analyze-checks) 0))
+                  (if (= (n-ty ph) (t-int-con 0)) 0
+                    (do (let [w (stderr)]
+                          (fmt w "\nseed {d}: the phi published " (+ 1 (load s)))
+                          (ty-print w (n-ty ph))
+                          (ps w " and the dead arm's 8 should not be in it\n")
+                          (g-print-flat w))
+                        (abort) 0)))))
+            (store! s (+ (load s) 1))
+            0)))))
+
+
+;; `= (t-xctrl)` IS NOT PROOF, AND HERE IS A GRAPH WHERE IT IS WRONG.
+;;
+;; XCtrl is the HIGH element of the control axis: `meet(~ctrl, ctrl)` is `ctrl`, so a node reporting
+;; `~ctrl` may still FALL to `ctrl`. Four rewrites tested for it exactly and called that the proven
+;; answer (`region-dead-path`, `phi-single-input`, `stop-idealize`, `cproj-idealize`), which is why
+;; switching them from `ty-high?` to `= (t-xctrl)` did not close anything on the control axis.
+;;
+;; The witness uses ordinary operations and no type poking. Types are put on the projections the way
+;; `g-analyze!` does it, with `n-compute` and no rewriting, because peepholing a multi's projections
+;; one at a time is the LAW 4 violation `n-if-arms!` exists to prevent and would kill the If between
+;; them. Then the If's predicate is changed to something unanalysed, the way any rewrite would change
+;; an edge: now the true projection's STORED type still says `~ctrl` while its cone says nothing,
+;; which is exactly the state a partly-peepholed graph is in.
+(defn analyse-only! [(n i64)] (-> i64) (n-set-ty! n (n-compute n)) n)
+
+(deftest a_provisional_xctrl_is_not_a_licence_to_drop_a_control_path
+  (graph-reset! 1)
+  (let [iff (n-peephole (n-new2 OP-IF 0 (g-start) (n-const (t-int-con 0))))]
+    (let [tt (analyse-only! (n-new1 OP-CPROJ 0 iff))
+          ff (analyse-only! (n-new1 OP-CPROJ 1 iff))]
+      ; while the predicate is the constant 0, the true arm really is proven dead
+      (assert (= (n-ty tt) (t-xctrl)))
+      (assert (n-ty-proven? tt))
+      ; now the predicate becomes an unanalysed opaque value. Nothing recomputed `tt` yet, so its
+      ; stored type still says XCtrl and it is now a LIE.
+      (n-set-def! iff 1 (n-new1 OP-ARG (t-dyn) (g-start)))
+      (assert (= (n-ty tt) (t-xctrl)))
+      (assert (not (n-ty-proven? tt)))
+      (let [r  (n-new OP-REGION 0)
+            ph (n-new OP-PHI (t-int))]
+        (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+        (n-add-def! ph r)
+        (n-add-def! ph (n-const (t-int-con 1)))
+        (n-add-def! ph (n-const (t-int-con 2)))
+        ; the whole graph exists before anything is peepholed, so no rewrite below can be handed the
+        ; id of a node an earlier rewrite killed
+        (n-add-def! (g-stop) (n-new2 OP-RETURN 0 tt (n-const (t-int-con 3))))
+        ; the merge keeps the path: that arity is what `region-remove-path!` would drop, together
+        ; with the matching arm of every Phi on the region (LAW 5)
+        (n-peephole r)
+        (assert (= (n-nins r) 3))
+        (assert (= (n-nins ph) 3))
+        ; the Phi does not collapse onto the arm a provisional XCtrl would have left standing
+        (assert (= (n-peephole ph) ph))
+        ; the projection itself is not replaced by XCtrl
+        (assert (= (n-peephole tt) tt))
+        ; and the Return on the provisionally dead arm is not dropped
+        (n-peephole (g-stop))
+        (assert (= (n-nins (g-stop)) 1)))))
+
+  ;; And when the predicate really is the constant 0 and really is analysed, every one of those
+  ;; rewrites fires. Without this half, refusing them unconditionally would pass the part above.
+  (graph-reset! 1)
+  (let [iff (n-peephole (n-new2 OP-IF 0 (g-start) (n-const (t-int-con 0))))]
+    (let [tt (analyse-only! (n-new1 OP-CPROJ 0 iff))
+          ff (analyse-only! (n-new1 OP-CPROJ 1 iff))]
+      (assert (= (n-ty tt) (t-xctrl)))
+      (assert (n-ty-proven? tt))
+      (let [r  (n-new OP-REGION 0)
+            ph (n-new OP-PHI (t-int))]
+        (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+        (n-add-def! ph r)
+        (n-add-def! ph (n-const (t-int-con 1)))
+        (n-add-def! ph (n-const (t-int-con 2)))
+        (n-add-def! (g-stop) (n-new2 OP-RETURN 0 tt (n-const (t-int-con 3))))
+        ; the Return goes first: dropping the path kills `tt`, and a Return whose control has been
+        ; killed is the corruption a dead input causes rather than the rewrite under test
+        (n-peephole (g-stop))
+        (assert (= (n-nins (g-stop)) 0))
+        (n-peephole r)
+        ; the dead path is gone, and the Phi lost the matching arm in the same operation
+        (assert (= (n-nins r) 2))
+        (assert (= (n-nins ph) 2))))))

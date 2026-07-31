@@ -1,0 +1,907 @@
+;; The shared fixture corpus: the programs every later gate runs over.
+;;
+;; M3's gate says "on the whole corpus" three times (print/parse round-trip is the identity,
+;; the verifier is green, the interpreter agrees before and after Opto), so the corpus has to
+;; be a THING that can be indexed, not a list of functions copied into whichever tool needs
+;; them. It lived in tools/dot-dump.coil and was partly duplicated in tests/; it lives here
+;; now, and the diagram gallery is one consumer of it rather than its owner.
+;;
+;; It is in src/ and not tests/ because from M3 onwards it is a product artifact: the
+;; differential oracle, the verifier and the textual round-trip all range over it.
+;;
+;; MODE IS PART OF THE CORPUS. A fixture built raw and merely ANALYSED is legitimately not
+;; where a peepholed graph would be: nothing has been rewritten, so a foldable constant is
+;; still an Add whose type happens to be a constant. That is the whole point of the
+;; before/after pictures. A checker therefore has to be told which contract a fixture claims
+;; to satisfy, which is what `corpus-mode` is for.
+;;
+;; Three tables are keyed by the SAME named index constants: name, mode, and builder. Keying
+;; them by literal 0..14 is how inserting a fixture at position 3 silently renames four
+;; diagrams and re-points every mode.
+(module corpus)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "ty.coil"        :use *)
+(import "shape.coil"     :use *)
+(import "node.coil"      :use *)
+
+; ============================================================================
+; The index
+; ============================================================================
+(const CX-FOLD-BEFORE i64 0)
+(const CX-FOLD-AFTER  i64 1)
+(const CX-GVN-BEFORE  i64 2)
+(const CX-GVN-AFTER   i64 3)
+(const CX-BIG-BEFORE  i64 4)
+(const CX-BIG-AFTER   i64 5)
+(const CX-RANGES      i64 6)
+(const CX-BRANCH      i64 7)
+(const CX-DEAD-BEFORE i64 8)
+(const CX-DEAD-AFTER  i64 9)
+(const CX-DIAMOND     i64 10)
+(const CX-LOOP        i64 11)
+(const CX-GUARD       i64 12)
+(const CX-NESTED      i64 13)
+(const CX-NESTED-DEAD i64 14)
+(const CX-MERGE-OF-MERGE i64 15)
+(const CX-MERGE-TREE  i64 16)
+(const CX-DIAMOND-RAW i64 17)
+(const CX-OBJECT      i64 18)
+(const CX-OBJECT-RAW  i64 19)
+(const CX-SHAPE-POLY  i64 20)
+(const CX-OBJECT-LOOP i64 21)
+(const CX-OBJECT-TWO  i64 22)
+(const CX-OBJECT-RET  i64 23)
+(const CX-OBJECT-RET-SCRATCH i64 24)
+(const CX-STORE-OVER-STORE     i64 25)
+(const CX-STORE-OVER-STORE-RAW i64 26)
+(const CX-STORE-GUARDED        i64 27)
+
+;; RAW-ANALYSED: every node created, nothing peepholed, then `g-analyze!` to a type fixpoint.
+;; OPTIMISED:    peepholed during construction and then `iterate!` to a peephole fixpoint.
+;;
+;; BOTH modes satisfy the WHOLE verifier, which is why the raw mode is raw-ANALYSED and not
+;; raw-unanalysed: a graph left at ANY everywhere is not at its type fixpoint and would report
+;; VERR-STALE-TYPE on nearly every node, which is a true statement about a graph nobody claimed
+;; was finished. What the raw mode is NOT at is the PEEPHOLE fixpoint: `1+2*3` is still an Add
+;; there, with a constant type. The verifier deliberately never asks about that, because asking
+;; means running `idealize`, which rewrites (see verify.coil). So `g-verify` needs no mode
+;; argument today; the mode is what tells a LATER gate which contract to hold a fixture to, and
+;; the differential interpreter in particular has to run over both.
+(const CORPUS-RAW-ANALYSED i64 0)
+(const CORPUS-OPTIMISED    i64 1)
+
+(defn corpus-count [] (-> i64) 28)
+
+(defn panic-corpus [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "corpus: ") (ps w msg) (ps w "\n"))
+  (abort) 0)
+
+;; Names are the diagram file names, and the gallery is built from them, so they are stable
+;; identifiers rather than prose. Changing one changes an artifact somebody has a link to.
+(defn corpus-name [(i i64)] (-> (slice u8))
+  (case i
+    CX-FOLD-BEFORE "01-fold-before"
+    CX-FOLD-AFTER  "02-fold-after"
+    CX-GVN-BEFORE  "03-gvn-before"
+    CX-GVN-AFTER   "04-gvn-after"
+    CX-BIG-BEFORE  "05-big-before"
+    CX-BIG-AFTER   "06-big-after"
+    CX-RANGES      "07-ranges"
+    CX-BRANCH      "08-branch"
+    CX-DEAD-BEFORE "09-dead-branch-before"
+    CX-DEAD-AFTER  "10-dead-branch-after"
+    CX-DIAMOND     "11-diamond"
+    CX-LOOP        "12-loop"
+    CX-GUARD       "13-guard"
+    CX-NESTED      "14-nested-loops"
+    CX-NESTED-DEAD "15-nested-dead-branch"
+    CX-MERGE-OF-MERGE "16-merge-of-merge"
+    CX-MERGE-TREE     "17-merge-tree"
+    CX-DIAMOND-RAW    "18-diamond-raw"
+    CX-OBJECT         "19-object"
+    CX-OBJECT-RAW     "20-object-raw"
+    CX-SHAPE-POLY     "21-shape-polymorphic"
+    CX-OBJECT-LOOP    "22-object-loop"
+    CX-OBJECT-TWO     "23-object-two"
+    CX-OBJECT-RET     "24-object-returned"
+    CX-OBJECT-RET-SCRATCH "25-object-returned-scratch"
+    CX-STORE-OVER-STORE     "26-store-over-store"
+    CX-STORE-OVER-STORE-RAW "27-store-over-store-raw"
+    CX-STORE-GUARDED        "28-store-guarded"
+    (do (panic-corpus "corpus-name: index out of range") "")))
+
+(defn corpus-mode [(i i64)] (-> i64)
+  (case i
+    CX-FOLD-BEFORE CORPUS-RAW-ANALYSED
+    CX-FOLD-AFTER  CORPUS-OPTIMISED
+    CX-GVN-BEFORE  CORPUS-RAW-ANALYSED
+    CX-GVN-AFTER   CORPUS-OPTIMISED
+    CX-BIG-BEFORE  CORPUS-RAW-ANALYSED
+    CX-BIG-AFTER   CORPUS-OPTIMISED
+    CX-RANGES      CORPUS-OPTIMISED
+    CX-BRANCH      CORPUS-OPTIMISED
+    CX-DEAD-BEFORE CORPUS-RAW-ANALYSED
+    CX-DEAD-AFTER  CORPUS-OPTIMISED
+    CX-DIAMOND     CORPUS-OPTIMISED
+    CX-LOOP        CORPUS-OPTIMISED
+    CX-GUARD       CORPUS-OPTIMISED
+    CX-NESTED      CORPUS-OPTIMISED
+    CX-NESTED-DEAD CORPUS-OPTIMISED
+    CX-MERGE-OF-MERGE CORPUS-OPTIMISED
+    CX-MERGE-TREE     CORPUS-OPTIMISED
+    ;; The only RAW-ANALYSED fixture with a MERGE in it, which is the gap that let `g-analyze!`
+    ;; publish a phi type that was too specific: `phi-compute` recorded its revisit dependency on
+    ;; the region instead of on the region's control input, and `g-analyze!` never flushed the deps
+    ;; list at all, so nothing re-queued the phi when the second path went live. Every other raw
+    ;; fixture is straight-line, so nothing exercised `phi-compute` under the analysis-only pass.
+    CX-DIAMOND-RAW    CORPUS-RAW-ANALYSED
+    CX-OBJECT         CORPUS-OPTIMISED
+    CX-OBJECT-RAW     CORPUS-RAW-ANALYSED
+    CX-SHAPE-POLY     CORPUS-OPTIMISED
+    CX-OBJECT-LOOP    CORPUS-OPTIMISED
+    CX-OBJECT-TWO     CORPUS-OPTIMISED
+    CX-OBJECT-RET     CORPUS-OPTIMISED
+    CX-OBJECT-RET-SCRATCH CORPUS-OPTIMISED
+    CX-STORE-OVER-STORE     CORPUS-OPTIMISED
+    ;; The "before" of the only diff-pair whose transformation is 4c-2, and the graph in which the
+    ;; opportunity demonstrably still EXISTS: nothing is peepholed here, so the two stores on one
+    ;; word are both still in the chain for a gate to count.
+    CX-STORE-OVER-STORE-RAW CORPUS-RAW-ANALYSED
+    CX-STORE-GUARDED        CORPUS-OPTIMISED
+    (do (panic-corpus "corpus-mode: index out of range") 0)))
+
+(defn corpus-mode-name [(m i64)] (-> (slice u8))
+  (case m
+    CORPUS-RAW-ANALYSED "raw-analysed"
+    CORPUS-OPTIMISED    "optimised"
+    (do (panic-corpus "corpus-mode-name: unknown mode") "")))
+
+; ============================================================================
+; Builders
+; ============================================================================
+;; Two sets, because the before/after pictures are the argument that the optimiser does
+;; anything at all. The eager set peepholes as it goes, which is what a front end does; the
+;; raw set creates nodes and rewrites nothing.
+;;
+;; These are exported: a test that wants a hand-built graph should use them rather than grow a
+;; fourth copy.
+
+; --- eager builders: peephole as we go ---------------------------------------
+(defn mk-arg [(t i64)] (-> i64) (n-peephole (n-new1 OP-ARG t (g-start))))
+(defn mk-int [(v i64)] (-> i64) (n-const (t-int-con v)))
+(defn mk-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
+(defn mk-un  [(op i64) (a i64)] (-> i64) (n-peephole (n-new2 op 0 NO-NODE a)))
+(defn mk-ret [(v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 (g-start) v))]
+    (n-add-def! (g-stop) r)
+    (n-peephole (g-stop))
+    (iterate!)
+    r))
+
+; --- raw builders: create nodes, peephole nothing ----------------------------
+(defn raw-arg [(t i64)] (-> i64) (n-new1 OP-ARG t (g-start)))
+(defn raw-int [(v i64)] (-> i64) (n-new1 OP-CONST (t-int-con v) (g-start)))
+(defn raw-bin [(op i64) (a i64) (b i64)] (-> i64) (n-new3 op 0 NO-NODE a b))
+(defn raw-un  [(op i64) (a i64)] (-> i64) (n-new2 op 0 NO-NODE a))
+(defn raw-ret [(v i64)] (-> i64)
+  (let [r (n-new2 OP-RETURN 0 (g-start) v)]
+    (n-add-def! (g-stop) r)
+    ; analysis WITHOUT rewriting: the before picture should show what the lattice concluded,
+    ; not a graph of ANYs, which would say nothing about the analysis at all
+    (g-analyze!)
+    r))
+
+; --- control-flow builders ---------------------------------------------------
+(defn mk-if [(ctrl i64) (pred i64)] (-> i64) (n-peephole (n-new2 OP-IF 0 ctrl pred)))
+;; There is deliberately no `mk-cproj` here. One projection at a time is the shape that kills the
+;; If between the two arms (see `n-multi-open!`); `n-if-arms!` in node.coil is the builder, and
+;; `cproj-idealize` aborts by name if anything builds them the other way.
+(defn mk-cast [(ctrl i64) (t i64) (v i64)] (-> i64) (n-peephole (n-new2 OP-CAST t ctrl v)))
+
+;; A merge is created UNPEEPHOLED: a two-armed region with no Phi yet is a degenerate diamond
+;; and collapses on sight. A real parser has the same problem and solves it the same way,
+;; which is why the builders are shaped like this rather than being a convenience.
+(defn new-region2 [(a i64) (b i64)] (-> i64)
+  (let [r (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r a) (n-add-def! r b) r))
+(defn new-phi2 [(r i64) (declared i64) (a i64) (b i64)] (-> i64)
+  (let [p (n-new OP-PHI declared)]
+    (n-add-def! p r) (n-add-def! p a) (n-add-def! p b) p))
+(defn ret-to [(ctrl i64) (v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 ctrl v))]
+    (n-add-def! (g-stop) r) (n-peephole (g-stop)) r))
+
+;; A Return that also carries the program's final memory. Every memory fixture ends with one,
+;; and it is not decoration: with nothing reading the last store, the kill cascade collects the
+;; entire heap as unused, the fixture's own diagram shows no memory at all, and 4c's store
+;; elimination would be gated against a program whose stores had already been deleted for
+;; unrelated reasons.
+(defn ret-to-mem [(ctrl i64) (v i64) (m i64)] (-> i64)
+  (let [r (n-peephole (n-new3 OP-RETURN 0 ctrl v m))]
+    (n-add-def! (g-stop) r) (n-peephole (g-stop)) r))
+
+;; THE INITIAL MEMORY OF ONE ALIAS CLASS. A whole program starts with an EMPTY heap, so its
+;; contents is ANY: no value is in that class, because no object exists yet. It arrives as an
+;; `Arg` because that is precisely what an Arg is (an opaque value of a declared type), and
+;; because it is the same node M6 will use for the memory a function receives from its caller.
+(defn mk-mem-in [(alias i64)] (-> i64) (mk-arg (t-mem-alias alias (t-top))))
+
+; ============================================================================
+; The fixtures
+; ============================================================================
+;; Every one starts from `graph-reset!`, so a fixture is a whole program and not an addition
+;; to whatever was there before. Seed 1 throughout: the multi-seed claim is a separate gate,
+;; and a corpus whose graphs depended on the seed would make every golden comparison a
+;; two-variable question.
+
+;; 1 + 2*3, entirely constant, so the optimiser should leave a single literal behind.
+(defn fx-fold-raw [] (-> i64)
+  (graph-reset! 1)
+  (raw-ret (raw-bin OP-ADD (raw-int 1) (raw-bin OP-MUL (raw-int 2) (raw-int 3)))) 0)
+(defn fx-fold [] (-> i64)
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-ADD (mk-int 1) (mk-bin OP-MUL (mk-int 2) (mk-int 3)))) 0)
+
+;; (arg+2) - (2+arg). Needs operand canonicalisation, then value numbering, then x-x, and
+;; all three have to fire for this to reach zero.
+(defn fx-gvn-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [a (raw-arg (t-int))]
+    (raw-ret (raw-bin OP-SUB (raw-bin OP-ADD a (raw-int 2))
+                             (raw-bin OP-ADD (raw-int 2) a)))) 0)
+(defn fx-gvn [] (-> i64)
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-SUB (mk-bin OP-ADD a (mk-int 2))
+                           (mk-bin OP-ADD (mk-int 2) a)))) 0)
+
+;; Ranges, not constants: nothing folds to a literal, but every node carries what the lattice
+;; worked out. This is the fixture that shows the analysis rather than the rewriting.
+(defn fx-ranges [] (-> i64)
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 0 10))
+        b (mk-arg (t-int-range 2 3))
+        c (mk-arg (t-dyn))
+        e (mk-bin OP-ADD (mk-bin OP-MUL a b) (mk-int 5))]
+    (mk-ret (mk-bin OP-ADD e (mk-bin OP-SUB c (mk-int 1))))) 0)
+
+;; The M1 test fixture: nine expressions that collapse to one multiply.
+(defn fx-big-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [a  (raw-arg (t-int-range 0 100))
+        b  (raw-arg (t-int-range 1 4))
+        e1 (raw-bin OP-ADD a (raw-int 0))
+        e2 (raw-bin OP-MUL e1 (raw-int 1))
+        e3 (raw-bin OP-ADD (raw-int 3) e2)
+        e4 (raw-bin OP-ADD e2 (raw-int 3))
+        e5 (raw-bin OP-SUB e3 e4)
+        e6 (raw-bin OP-MUL b (raw-int 2))
+        e7 (raw-bin OP-ADD e5 e6)]
+    (raw-ret (raw-un OP-MINUS (raw-un OP-MINUS e7)))) 0)
+(defn fx-big [] (-> i64)
+  (graph-reset! 1)
+  (let [a  (mk-arg (t-int-range 0 100))
+        b  (mk-arg (t-int-range 1 4))
+        e1 (mk-bin OP-ADD a (mk-int 0))
+        e2 (mk-bin OP-MUL e1 (mk-int 1))
+        e3 (mk-bin OP-ADD (mk-int 3) e2)
+        e4 (mk-bin OP-ADD e2 (mk-int 3))
+        e5 (mk-bin OP-SUB e3 e4)
+        e6 (mk-bin OP-MUL b (mk-int 2))
+        e7 (mk-bin OP-ADD e5 e6)]
+    (mk-ret (mk-un OP-MINUS (mk-un OP-MINUS e7)))) 0)
+
+;; `if (arg) return 1; else return 2;` with an unknown predicate: both arms survive.
+(defn fx-branch [] (-> i64)
+  (graph-reset! 1)
+  (let [arms (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))]
+    (ret-to (arms-t arms) (mk-int 1))
+    (ret-to (arms-f arms) (mk-int 2)))
+  (iterate!) 0)
+
+;; The same shape with a predicate that cannot be truthy. Built raw so the before picture shows
+;; what the analysis concluded without any rewriting having happened yet.
+(defn fx-branch-dead-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [iff (n-new2 OP-IF 0 (g-start) (n-new1 OP-CONST (t-int-con 0) (g-start)))
+        t   (n-new1 OP-CPROJ 0 iff)
+        f   (n-new1 OP-CPROJ 1 iff)]
+    (let [r1 (n-new2 OP-RETURN 0 t (n-new1 OP-CONST (t-int-con 1) (g-start)))
+          r2 (n-new2 OP-RETURN 0 f (n-new1 OP-CONST (t-int-con 2) (g-start)))]
+      (n-add-def! (g-stop) r1)
+      (n-add-def! (g-stop) r2)))
+  (g-analyze!) 0)
+(defn fx-branch-dead [] (-> i64)
+  (graph-reset! 1)
+  (let [arms (n-if-arms! (mk-if (g-start) (mk-int 0)))]
+    (ret-to (arms-t arms) (mk-int 1))
+    (ret-to (arms-f arms) (mk-int 2)))
+  (iterate!) 0)
+
+;; A diamond that merges a value: this is what a Phi is for.
+(defn fx-diamond [] (-> i64)
+  (graph-reset! 1)
+  (let [arms (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))
+        t   (arms-t arms)
+        f   (arms-f arms)
+        r   (new-region2 t f)
+        ph  (new-phi2 r (t-dyn) (mk-int 1) (mk-bin OP-ADD (mk-arg (t-int-range 0 9)) (mk-int 2)))]
+    (ret-to r ph)
+    (wl-push! r) (wl-push! ph))
+  (iterate!) 0)
+
+;; `i = 0; while (true) i = i + 1;`  The dashed edge is the back edge. The phi's type is the
+;; whole termination story: widening is what stops the range climbing for ever.
+;; Built in the order the in-progress contract requires: open the merge, open the phi, build
+;; and peephole the body INSIDE that window, close the phis, then close control.
+;; `i = 0; while (i < 5) i = i + 1; return i;`
+;;
+;; This was originally a bodyless loop whose back edge was the Loop itself, which drew a tidy
+;; diagram and was NOT a loop: control's only forward step from the header was the Return, so
+;; nothing ever iterated. The interpreter found that immediately. A fixture that cannot be run is a
+;; fixture no differential test covers, so it has a real exit test now and actually counts to 5.
+(defn fx-loop [] (-> i64)
+  (graph-reset! 1)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE) (n-add-def! lp (g-start)) (n-add-def! lp NO-NODE)
+    (n-peephole lp)
+    (let [ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph lp) (n-add-def! ph (mk-int 0)) (n-add-def! ph NO-NODE)
+      (n-peephole ph)
+      (let [nx   (mk-bin OP-ADD ph (mk-int 1))
+            test (mk-bin OP-LT ph (mk-int 5))
+            arms (n-if-arms! (mk-if lp test))
+            body (arms-t arms)
+            exit (arms-f arms)]
+        (n-set-def! ph 2 nx)
+        (n-set-def! lp 2 body)
+        (ret-to exit ph)
+        (wl-push! lp) (wl-push! ph) (wl-push! nx))))
+  (iterate!) 0)
+
+(defn fx-guard [] (-> i64)
+  (graph-reset! 1)
+  (let [x   (mk-arg (t-dyn))
+        arms (n-if-arms! (mk-if (g-start) (mk-bin OP-LT x (mk-int 100))))
+        t   (arms-t arms)
+        f   (arms-f arms)
+        fast (mk-bin OP-ADD (mk-cast t (t-int) x) (mk-int 1))
+        slow (mk-bin OP-ADD x (mk-int 1))
+        r    (new-region2 t f)
+        ph   (new-phi2 r (t-dyn) fast slow)]
+    (ret-to r ph)
+    (wl-push! r) (wl-push! ph))
+  (iterate!) 0)
+
+;; Two nested loops with real exits, so the loop tree has something to nest. The annotations on
+;; the control nodes are the loop-nesting depth, which is what block frequency will be estimated
+;; from once there is a scheduler.
+(defn fx-nested [] (-> i64)
+  (graph-reset! 1)
+  (let [outer (n-new OP-LOOP 0)]
+    (n-add-def! outer NO-NODE) (n-add-def! outer (g-start)) (n-add-def! outer NO-NODE)
+    (n-peephole outer)
+    (let [inner (n-new OP-LOOP 0)]
+      (n-add-def! inner NO-NODE) (n-add-def! inner outer) (n-add-def! inner NO-NODE)
+      (n-peephole inner)
+      (let [iarms (n-if-arms! (mk-if inner (mk-arg (t-dyn))))
+            ibody (arms-t iarms)
+            iexit (arms-f iarms)]
+        (n-set-def! inner 2 ibody)
+        (let [oarms (n-if-arms! (mk-if iexit (mk-arg (t-dyn))))
+              obody (arms-t oarms)
+              oexit (arms-f oarms)]
+          (n-set-def! outer 2 obody)
+          (ret-to oexit (mk-int 0))))))
+  (iterate!) 0)
+
+;; A DEAD BRANCH NESTED INSIDE A LIVE ONE: `if (p) return 1; else { if (0) return 2; else return 3; }`
+;;
+;; The flat `fx-branch-dead` above is not this test. There the inner If's control input is Start,
+;; which M3 pins, so a rewrite that reached for a killed If's cleared input list still happened to
+;; come back with a live node and the fixture stayed correct for the wrong reason. Here the inner
+;; If's control is an ordinary CProj, and getting it wrong leaves the surviving Return reading a
+;; DEAD control node: `g-verify` reports VERR-DEAD-INPUT and the arm that should return 3 reports
+;; EV-STUCK instead. That is what `n-if-arms!` and `cproj-idealize`'s named abort are for, and this
+;; is the fixture that puts both the verifier and the differential oracle on them.
+(defn fx-nested-dead [] (-> i64)
+  (graph-reset! 1)
+  (let [outer (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))]
+    (ret-to (arms-t outer) (mk-int 1))
+    (let [inner (n-if-arms! (mk-if (arms-f outer) (mk-int 0)))]
+      (ret-to (arms-t inner) (mk-int 2))
+      (ret-to (arms-f inner) (mk-int 3))))
+  (iterate!) 0)
+
+;; A MERGE WHOSE INPUT IS ANOTHER MERGE: `if (p) x = 1; else { if (q) x = 2; else x = 3; }  return x;`
+;;
+;; The corpus had no such shape, and that single gap hid a whole family of miscompiles. An
+;; unanalysed Region reported `~ctrl` out of nothing (`region-compute` seeds its meet with `~ctrl`
+;; and meet(~ctrl, ANY) is `~ctrl`), so the outer merge, whose second path IS the inner merge, was
+;; born "provably unreachable". Everything downstream that tests `= (t-xctrl)` believing it has the
+;; proven answer then fired: a live path and its Phi arm dropped, a live Return dropped and the kill
+;; cascade run over the whole program, a Phi collapsed onto one arm. On 55 of 200 worklist seeds this
+;; program compiled to `return 1`, wrong for every input, and `g-verify` reported no violation
+;; because the wreckage is internally consistent.
+;;
+;; Built the documented way: arms EAGER via `n-if-arms!`, both merges RAW on the worklist, then
+;; `iterate!`.
+(defn fx-merge-of-merge [] (-> i64)
+  (graph-reset! 1)
+  (let [p (mk-arg (t-dyn))
+        q (mk-arg (t-dyn))]
+    (let [o (n-if-arms! (mk-if (g-start) p))]
+      (let [i2 (n-if-arms! (mk-if (arms-f o) q))]
+        (let [ri (new-region2 (arms-t i2) (arms-f i2))]
+          (let [pi (new-phi2 ri (t-int) (mk-int 2) (mk-int 3))
+                ro (new-region2 (arms-t o) ri)]
+            (let [po (new-phi2 ro (t-int) (mk-int 1) pi)]
+              (ret-to ro po)
+              (wl-push! ri) (wl-push! pi) (wl-push! ro) (wl-push! po)))))))
+  (iterate!) 0)
+
+;; TWO MERGES FEEDING A MERGE, which is one level worse than the above and is the shape that
+;; deleted the entire program: `if (p) { if (q) x=1; else x=2; } else { if (r) x=3; else x=4; }
+;; return x;`. Both of the outer merge's paths are themselves merges, so both were unanalysed at
+;; once, `stop-idealize` dropped the only Return, and the graph became Start and Stop with nothing
+;; in between: 31 of 200 seeds, no violation reported, and the printer omits dead nodes so the
+;; diagram simply showed an empty program.
+(defn fx-merge-tree [] (-> i64)
+  (graph-reset! 1)
+  (let [p (mk-arg (t-dyn))
+        q (mk-arg (t-dyn))
+        r (mk-arg (t-dyn))]
+    (let [o (n-if-arms! (mk-if (g-start) p))]
+      (let [a (n-if-arms! (mk-if (arms-t o) q))
+            b (n-if-arms! (mk-if (arms-f o) r))]
+        (let [ra (new-region2 (arms-t a) (arms-f a))
+              rb (new-region2 (arms-t b) (arms-f b))]
+          (let [pa (new-phi2 ra (t-int) (mk-int 1) (mk-int 2))
+                pb (new-phi2 rb (t-int) (mk-int 3) (mk-int 4))]
+            (let [ro (new-region2 ra rb)]
+              (let [po (new-phi2 ro (t-int) pa pb)]
+                (ret-to ro po)
+                (wl-push! ra) (wl-push! pa) (wl-push! rb) (wl-push! pb)
+                (wl-push! ro) (wl-push! po))))))))
+  (iterate!) 0)
+
+;; `if (p) x = 8; else x = 0; return x + 1;` RAW, so `g-analyze!` has to reach the type fixpoint
+;; through a Phi with nothing rewritten. The published phi type must be `int=[0..8]`; it settled at
+;; `int=8` on 5 of 40 seeds, i.e. the analysis concluded the program always returns 9, which is the
+;; too-SPECIFIC direction and therefore the miscompile direction. `n-set-ty-falling!` cannot catch
+;; it, because the stale type never changes at all.
+(defn fx-diamond-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [p   (raw-arg (t-dyn))
+        iff (n-new2 OP-IF 0 (g-start) p)]
+    (let [tt (n-new1 OP-CPROJ 0 iff)
+          ff (n-new1 OP-CPROJ 1 iff)
+          r  (n-new OP-REGION 0)]
+      (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+      (let [ph (n-new OP-PHI (t-int))]
+        (n-add-def! ph r) (n-add-def! ph (raw-int 8)) (n-add-def! ph (raw-int 0))
+        (let [add (raw-bin OP-ADD ph (raw-int 1))
+              ret (n-new2 OP-RETURN 0 r add)]
+          (n-add-def! (g-stop) ret)
+          (g-analyze!)))))
+  0)
+
+; ---------------------------------------------------------------------------
+; Memory
+; ---------------------------------------------------------------------------
+;; EVERY MEMORY FIXTURE RESETS THE SHAPE TABLE, for exactly the reason each one resets the graph:
+;; a fixture is a whole program, and a shape id is only meaningful against the table that is live.
+;; Without this, running fixture 21 after fixture 19 would build its shapes on top of 19's, every
+;; id in its golden text would depend on which fixture ran first, and the round trip would be
+;; comparing a text against a table it was not printed from.
+
+;; `o = {x}; o.x = 5; return o.x;` — the smallest program with a heap in it.
+;;
+;; SINCE 4c-1 THIS IS THE FIXTURE THAT FORWARDS. `load-idealize` sees that the load's memory input
+;; is the Store, on the same alias class, with the SAME POINTER NODE, and hands back the stored 5;
+;; the load is gone from the optimised graph and the Return's value is a literal.
+;;
+;; WHAT THE LOAD REPORTED IS STILL THE MEASUREMENT, and it moved to `fx-object-raw`, which is
+;; never rewritten and still exhibits it exactly: `undefined|int=5` rather than `int=5`. A memory
+;; type describes a whole ALIAS CLASS, so the allocation puts `undefined` in class x, the store
+;; puts 5 there, and no alias-level type can say that THIS pointer's word is the one the store
+;; wrote. That union is what pointer identity beats, it is asserted exactly in tests/mem-test.coil
+;; against the raw twin, and nothing about it was weakened by this slice: the claim simply lives
+;; on the fixture that still shows it.
+(defn fx-object [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        ax (shape-field-alias sx 0)]
+    (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+      (let [o  (n-obj-ptr nw)
+            m1 (n-obj-mem nw 0)]
+        (let [m2 (n-store! m1 o (mk-int 5) ax)]
+          ; THE MEMORY IS PINNED ACROSS THE LOAD'S CONSTRUCTION, and this is a trap that was
+          ; measured rather than anticipated. `n-load!` peepholes on the spot, the load forwards to
+          ; the stored 5, and subsuming it drops the Store's ONLY use: the kill cascade then takes
+          ; the Store, the New's projections, the New and the entire memory chain, and the
+          ; `ret-to-mem` on the next line wires a corpse into the Return's memory slot. Nothing at
+          ; this line says a word; the corpus-wide verifier reports VERR-DEAD-INPUT much later.
+          ; `n-keep!` is the same mechanism `n-peephole` uses to stop a cascade eating the
+          ; replacement it is installing, and it works here because `n-del-use!` reports a pinned
+          ; node as still used. The Return is what roots memory at the exit, and it does not exist
+          ; until after the load, so the window has to be held open by hand.
+          (n-keep! m2)
+          (let [v (n-load! m2 o ax)]
+            (n-unkeep! m2)
+            (ret-to-mem (g-start) v m2))))))
+  (iterate!) 0)
+
+;; The same program built RAW, so `g-analyze!` has to reach the memory fixpoint with nothing
+;; rewritten. It is the only fixture that runs `new-compute`, `store-compute` and `load-compute`
+;; under the analysis-only pass, which is where a memory type that RISES would be caught: the
+;; falling check in `n-set-ty-falling!` runs on every node this pass touches, and no eagerly
+;; peepholed graph exercises it, because `n-peephole` deliberately does not assert it.
+(defn fx-object-raw [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        ax (shape-field-alias sx 0)]
+    (let [m0 (raw-arg (t-mem-alias ax (t-top)))
+          nw (n-new OP-NEW sx)]
+      (n-add-def! nw (g-start))
+      (n-add-def! nw m0)
+      (let [o  (n-new1 OP-PROJ 0 nw)
+            m1 (n-new1 OP-PROJ 1 nw)]
+        (let [m2 (n-new4 OP-STORE ax NO-NODE m1 o (raw-int 5))]
+          (let [ld  (n-new3 OP-LOAD ax NO-NODE m2 o)
+                ret (n-new3 OP-RETURN 0 (g-start) NO-NODE NO-NODE)]
+            ; the Return's value and memory are wired after it exists, because `n-new3` cannot
+            ; take a node that does not exist yet; nothing is peepholed either way
+            (n-set-def! ret 1 ld)
+            (n-set-def! ret 2 m2)
+            (n-add-def! (g-stop) ret)
+            (g-analyze!))))))
+  0)
+
+;; A SHAPE-POLYMORPHIC MERGE, which is the M4 gate clause that is not about rewriting:
+;;
+;;   if (p) { a = {x}; a.x = 1; o = a; } else { b = {y}; b.y = 2; o = b; }  return o;
+;;
+;; `{x}` and `{y}` are two DIFFERENT shapes reached by two different edges from the root, so they
+;; carry two different alias classes for what a field-set-based table would have called one field
+;; each. Three things have to hold and each is asserted in tests/mem-test.coil:
+;;
+;;   - the merged pointer's type keeps BOTH shape bits. Collapsing it to plain `obj` is what a
+;;     lattice without a shape set does, and it is what makes a polymorphic site un-inlineable:
+;;     with the set, M9 can emit one guarded path per shape; without it, there is nothing to
+;;     guard on.
+;;   - the two stores name DIFFERENT alias classes, so neither arm's memory chain is ordered
+;;     against the other's, and 4c can forward each one independently.
+;;   - the MemMerge at the exit combines them into a state describing BOTH classes. That is the
+;;     union the bitset alias axis exists for, and it is where Simple's collapse rule would have
+;;     answered "all of memory" (DESIGN.md section 4).
+(defn fx-shape-poly [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        sy (shape-transition SHAPE-ROOT "y" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)
+          ay (shape-field-alias sy 0)]
+      (let [mx0 (mk-mem-in ax)
+            my0 (mk-mem-in ay)
+            arms (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))]
+        (let [na (n-new-obj1! (arms-t arms) sx mx0)
+              nb (n-new-obj1! (arms-f arms) sy my0)]
+          (let [oa (n-obj-ptr na) ob (n-obj-ptr nb)]
+            (let [ma (n-store! (n-obj-mem na 0) oa (mk-int 1) ax)
+                  mb (n-store! (n-obj-mem nb 0) ob (mk-int 2) ay)
+                  r  (new-region2 (arms-t arms) (arms-f arms))]
+              ; the object, and one memory phi per class: on the arm that did not touch a class,
+              ; that class's memory is the one the program came in with
+              (let [po (new-phi2 r (t-obj-shapes (| (<< 1 sx) (<< 1 sy))) oa ob)
+                    px (new-phi2 r (t-mem-alias ax (t-dyn)) ma mx0)
+                    py (new-phi2 r (t-mem-alias ay (t-dyn)) my0 mb)]
+                (ret-to-mem r po (n-memmerge2! px py))
+                (wl-push! r) (wl-push! po) (wl-push! px) (wl-push! py))))))))
+  (iterate!) 0)
+
+;; A STORE INSIDE A LOOP, which is the fixture 4a said would be needed and could not have:
+;;
+;;   o = {x};  i = 0;  while (i < 3) { o.x = i; i = i + 1; }  return o.x;
+;;
+;; The memory phi on the loop header is why. Its type meets a FRESH memory type on every trip
+;; round the analysis, and `ty-widen`, `ty-widen-from` and `ty-iwide` used to answer identity for
+;; every non-`TVal`: with the widening counter invisible inside a `TMem`, no widening ever lands,
+;; the contents creeps by one step per round for ever, and the symptom is a HANG inside the loop
+;; phi's fixpoint with nothing reported at all. 4a fixed that in three match arms and had no
+;; memory op to build a witness with; this is the witness.
+;;
+;; The store is "in the loop body" purely by being on the memory back edge: a Store has no control
+;; input, and the chain phi -> store -> phi is what orders it. That is the property that makes
+;; memory motion fall out of ordinary dataflow, and it is only true because the memory edge is the
+;; ONLY thing ordering a store.
+(defn fx-object-loop [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o (n-obj-ptr nw) m0 (n-obj-mem nw 0)]
+          (let [lp (n-new OP-LOOP 0)]
+            (n-add-def! lp NO-NODE) (n-add-def! lp (g-start)) (n-add-def! lp NO-NODE)
+            (n-peephole lp)
+            ; both phis are opened before the body is built and closed before the control back
+            ; edge, which is the in-progress contract in node.coil
+            (let [ph (n-new OP-PHI (t-int))
+                  mp (n-new OP-PHI (t-mem-alias ax (t-dyn)))]
+              (n-add-def! ph lp) (n-add-def! ph (mk-int 0)) (n-add-def! ph NO-NODE)
+              (n-peephole ph)
+              (n-add-def! mp lp) (n-add-def! mp m0) (n-add-def! mp NO-NODE)
+              (n-peephole mp)
+              (let [nx   (mk-bin OP-ADD ph (mk-int 1))
+                    test (mk-bin OP-LT ph (mk-int 3))]
+                (let [arms (n-if-arms! (mk-if lp test))]
+                  (let [st (n-store! mp o ph ax)]
+                    (n-set-def! ph 2 nx)
+                    (n-set-def! mp 2 st)
+                    (n-set-def! lp 2 (arms-t arms))
+                    (ret-to-mem (arms-f arms) (n-load! mp o ax) mp)
+                    (wl-push! lp) (wl-push! ph) (wl-push! mp)
+                    (wl-push! nx) (wl-push! st))))))))))
+  (iterate!) 0)
+
+;; `a = {x}; a.x = 1; b = {x}; b.x = 2; return a.x;` — the NEGATIVE witness for 4c-1's forwarding,
+;; and the reason the gate on it is not vacuous.
+;;
+;; TWO ALLOCATIONS OF ONE SHAPE. Both stores therefore name the SAME alias class, and both pointers
+;; have the SAME TYPE, `obj{x}`. Every fact a type could offer says the two stores are
+;; interchangeable, and the load's memory input is `b.x = 2`. The only thing that says the load
+;; must not take that 2 is that the store's pointer is a DIFFERENT NODE from the load's, which is
+;; exactly the structural fact `load-idealize` is built on. A forwarding rule that compared alias
+;; classes and skipped the pointer check returns 2 here; the answer is 1, and the graph that
+;; returns 2 passes the verifier, the print/parse round trip and every structural count. Only the
+;; interpreter tells them apart, which is what D12's oracle is for.
+;;
+;; SO THE LOAD SURVIVES IN THIS FIXTURE, and that is the other half of the measurement: "the load
+;; disappeared" is also satisfied by a rule that deletes every load it sees.
+;;
+;; Appended at the end of the corpus, never inserted: an index is a diagram file name and a golden
+;; string, so inserting one renames every later fixture's artifacts at once.
+(defn fx-object-two [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      ; ONE memory chain, because one shape is one alias class: the second allocation takes the
+      ; first store's memory as its incoming state for class x, which is what puts `b`'s store
+      ; between `a`'s store and the load.
+      (let [na (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [oa (n-obj-ptr na)]
+          (let [ma (n-store! (n-obj-mem na 0) oa (mk-int 1) ax)]
+            (let [nb (n-new-obj1! (g-start) sx ma)]
+              (let [ob (n-obj-ptr nb)]
+                (let [mb (n-store! (n-obj-mem nb 0) ob (mk-int 2) ax)]
+                  ; Pinned for the same reason `fx-object` pins, even though the load declines here
+                  ; and so nothing cascades today. The pin is what makes a REGRESSION in
+                  ; `load-idealize` fail with the right diagnosis: if the pointer check were ever
+                  ; dropped, this load would fold, and with memory rooted the fixture reports the
+                  ; wrong ANSWER (2 instead of 1) from the interpreter, rather than a corrupt graph
+                  ; and a VERR-DEAD-INPUT that says nothing about pointer identity.
+                  (n-keep! mb)
+                  (let [v (n-load! mb oa ax)]
+                    (n-unkeep! mb)
+                    (ret-to-mem (g-start) v mb))))))))))
+  (iterate!) 0)
+
+;; `o = {x}; o.x = 5; return o;` -- THE FIRST FIXTURE WHOSE RESULT IS AN OBJECT, and it exists in
+;; a pair for one reason: to make the differential oracle say something about object identity.
+;;
+;; Until this pair, every fixture with a `diff-pair` twin returned an integer, and `fx-shape-poly`
+;; returned an object but had no twin. That is the only reason nothing was red, because the
+;; comparison was `rt-eq?`, which compares an object by its INDEX IN THE ALLOCATION STREAM. Under
+;; that rule this fixture and its scratch twin below differ (`obj0` against `obj1`) while
+;; computing the same thing, and two objects of different shapes that both land at index 0 compare
+;; EQUAL. See `ev-render-outcome` for the notion that replaced it.
+(defn fx-object-ret [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o (n-obj-ptr nw)]
+          (let [m (n-store! (n-obj-mem nw 0) o (mk-int 5) ax)]
+            (ret-to-mem (g-start) o m))))))
+  (iterate!) 0)
+
+;; The SAME program with a scratch object allocated first: `d = {x}; d.x = 9; o = {x}; o.x = 5;
+;; return o;`. Nothing ever reads `d` back, so the two programs have identical observable
+;; behaviour, and 4c-3's dead-allocation removal is exactly the pass that turns this one into the
+;; one above.
+;;
+;; ITS ONE JOB IS TO SHIFT THE ALLOCATION INDEX. The returned object is the SECOND allocation here
+;; and the first one there, so a cross-run comparison that names an object by its position in the
+;; allocation stream reports DIFFERENTIAL FAILURE on a pair that agrees, which is the pass 4c-3
+;; would have landed on. The scratch store also puts a 9 into class x, so the exit memory's
+;; contents differs as a TYPE (`undefined|int=[5..9]` against `undefined|int=5`) while the
+;; reachable heap under the result does not: the oracle must see the second thing and not the
+;; first.
+(defn fx-object-ret-scratch [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      ; one shape is one alias class, so the scratch object's store is the incoming memory of the
+      ; allocation that follows it: one chain, two objects
+      (let [nd (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [od (n-obj-ptr nd)]
+          (let [md (n-store! (n-obj-mem nd 0) od (mk-int 9) ax)]
+            (let [nw (n-new-obj1! (g-start) sx md)]
+              (let [o (n-obj-ptr nw)]
+                (let [m (n-store! (n-obj-mem nw 0) o (mk-int 5) ax)]
+                  (ret-to-mem (g-start) o m)))))))))
+  (iterate!) 0)
+
+;; `o = {x}; o.x = 1; o.x = 2; return o.x;` -- THE FIXTURE 4c-2 IS ABOUT, and the smallest program
+;; in which a write is unobservable.
+;;
+;; TWO REWRITES FIRE HERE AND THEY COMPOSE IN ONE DIRECTION ONLY. `store-idealize` sees that the
+;; second store's memory input is a store to the same alias class through the same pointer NODE,
+;; with nothing else reading it, and rewires past it; the first store dies of having no uses. THEN
+;; the load forwards through what is left, by 4c-1, and the Return's value is the literal 2. The
+;; order matters for the counters, not for the answer: `g-forwards` is 1 and `g-store-elims` is 1,
+;; and the dead-Load count that used to stand in for the first of those is also 1 here, which is
+;; exactly why it stopped being a safe stand-in the moment a second rewrite could remove a load.
+;;
+;; THE MEMORY IS PINNED ACROSS THE LOAD'S CONSTRUCTION, for `fx-object`'s measured reason: the load
+;; forwards on the spot, that drops the surviving store's only reader, and the cascade would take
+;; the store, the New and the whole chain before `ret-to-mem` on the next line exists to root them.
+;; The first store needs no pin, because the store built immediately after it is a real consumer.
+(defn fx-store-over-store [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o (n-obj-ptr nw)]
+          ; one chain: the second store's incoming memory IS the first store, which is the shape
+          ; 4c-2 recognises
+          (let [m1 (n-store! (n-obj-mem nw 0) o (mk-int 1) ax)]
+            (let [m2 (n-store! m1 o (mk-int 2) ax)]
+              (n-keep! m2)
+              (let [v (n-load! m2 o ax)]
+                (n-unkeep! m2)
+                (ret-to-mem (g-start) v m2))))))))
+  (iterate!) 0)
+
+;; The same program built RAW: every node created, nothing peepholed, `g-analyze!` only. It is the
+;; "before" half of 4c-2's differential pair, and it is the graph in which the opportunity is still
+;; visible -- both stores are in the chain, on one word, and a gate can count them.
+;;
+;; IT IS ALSO THE ONLY PLACE THE TWO STORES' TYPES ARE OBSERVABLE UNREWRITTEN. `store-compute`
+;; MEETS the stored value into the incoming contents, so the second store here reports
+;; `undefined|int=[1..2]` while its optimised twin reports `undefined|int=2`. That difference is
+;; the type RISE the rewrite produces, it is a NARROWING of an over-approximation rather than a new
+;; claim, and this fixture is where the un-narrowed number can be read off.
+(defn fx-store-over-store-raw [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        ax (shape-field-alias sx 0)]
+    (let [m0 (raw-arg (t-mem-alias ax (t-top)))
+          nw (n-new OP-NEW sx)]
+      (n-add-def! nw (g-start))
+      (n-add-def! nw m0)
+      (let [o  (n-new1 OP-PROJ 0 nw)
+            mm (n-new1 OP-PROJ 1 nw)]
+        (let [m1 (n-new4 OP-STORE ax NO-NODE mm o (raw-int 1))]
+          (let [m2 (n-new4 OP-STORE ax NO-NODE m1 o (raw-int 2))]
+            (let [ld  (n-new3 OP-LOAD ax NO-NODE m2 o)
+                  ret (n-new3 OP-RETURN 0 (g-start) NO-NODE NO-NODE)]
+              ; the Return's value and memory are wired after it exists, because `n-new3` cannot
+              ; take a node that does not exist yet; nothing is peepholed either way
+              (n-set-def! ret 1 ld)
+              (n-set-def! ret 2 m2)
+              (n-add-def! (g-stop) ret)
+              (g-analyze!)))))))
+  0)
+
+;; `o = {x}; o.x = 1; if (p) { o.x = 2; } return o.x;` -- THE NEGATIVE WITNESS for 4c-2, and the
+;; clause it holds up is the one that makes store elimination harder than load forwarding.
+;;
+;; The guarded store is the same word of the same object as the first store, its memory input IS
+;; the first store, and `n-ty-proven?` and `access-refused?` both say go. Every guard except one
+;; passes. The one that refuses is ONLY MEMORY CONSUMER: the first store feeds two nodes, the
+;; guarded store on the true path and the memory Phi's ELSE arm.
+;;
+;; WHAT THIS WITNESS DOES AND DOES NOT SHOW, measured rather than assumed, because the obvious
+;; claim about it is false. Deleting the only-consumer clause and rebuilding this fixture returns
+;; the IDENTICAL answer on every seed: the bypass leaves the first store alive (the Phi still reads
+;; it) and both orderings write the same value to the same word, so the interpreter cannot tell the
+;; two builds apart. This is NOT a differential witness, and a gate that claimed it was would be
+;; asserting something that stays green with the clause removed.
+;;
+;; What it IS is the only program in the corpus that REACHES the clause and is refused by it, and
+;; that is observable two ways, both of which flip the moment the clause goes: `g-store-elims` is 0
+;; here rather than 1, and the guarded store's memory input is the first store rather than the
+;; New's projection. The property being defended is serialisability, not a value: with the clause
+;; gone the graph holds two live writes to one word with nothing ordering them (see
+;; `store-sole-consumer?`), which is a scheduling hazard M10 inherits and no oracle available today
+;; can see.
+;;
+;; THE STORE IS "IN THE ARM" BY MEMORY EDGE ALONE. A Store has no control input, so nothing pins it
+;; to the true path except that the Phi reads it from slot 1 and reads the earlier state from slot
+;; 2; the interpreter is demand-driven, so on the false path the guarded store is never evaluated.
+;; That is the same property `fx-object-loop` rests on, and it is why the memory phi is the whole
+;; mechanism here rather than a detail.
+;;
+;; THE FIRST STORE IS PINNED WHILE THE ARM IS BUILT, and without that pin this fixture would not
+;; exist. Between creating the guarded store and wiring the Phi, the first store has EXACTLY ONE
+;; consumer, `n-store!` peepholes on the spot, and 4c-2 eliminates it before the else arm that
+;; needs it is ever created -- the negative witness deletes itself during construction. `keeps` is
+;; the only signal in the graph that says a use is still coming, which is why `store-sole-consumer?`
+;; treats a pinned store as still consumed. The pin comes off once the Phi is wired, so the
+;; `iterate!` below exercises the USE-COUNT clause rather than the pin.
+(defn fx-store-guarded [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o (n-obj-ptr nw)]
+          (let [m1 (n-store! (n-obj-mem nw 0) o (mk-int 1) ax)]
+            (let [arms (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))]
+              (n-keep! m1)
+              (let [m2 (n-store! m1 o (mk-int 2) ax)
+                    r  (new-region2 (arms-t arms) (arms-f arms))]
+                ; the merge is open (slot 0 null) while the arm's Phi is built and closed, which is
+                ; the in-progress contract in node.coil
+                (let [mp (new-phi2 r (t-mem-alias ax (t-dyn)) m2 m1)]
+                  (n-unkeep! m1)
+                  ; and the merged memory is pinned across the load, for `fx-object`'s reason: the
+                  ; Return that roots it does not exist yet
+                  (n-keep! mp)
+                  (let [v (n-load! mp o ax)]
+                    (n-unkeep! mp)
+                    (ret-to-mem r v mp)
+                    (wl-push! r) (wl-push! mp))))))))))
+  (iterate!) 0)
+
+; ============================================================================
+; Building by index
+; ============================================================================
+;; Leaves the graph holding fixture `i`, in the mode `corpus-mode` declares. Every caller
+;; drives the corpus through this, so "the corpus" cannot drift between two tools.
+(defn corpus-build! [(i i64)] (-> i64)
+  (case i
+    CX-FOLD-BEFORE (fx-fold-raw)
+    CX-FOLD-AFTER  (fx-fold)
+    CX-GVN-BEFORE  (fx-gvn-raw)
+    CX-GVN-AFTER   (fx-gvn)
+    CX-BIG-BEFORE  (fx-big-raw)
+    CX-BIG-AFTER   (fx-big)
+    CX-RANGES      (fx-ranges)
+    CX-BRANCH      (fx-branch)
+    CX-DEAD-BEFORE (fx-branch-dead-raw)
+    CX-DEAD-AFTER  (fx-branch-dead)
+    CX-DIAMOND     (fx-diamond)
+    CX-LOOP        (fx-loop)
+    CX-GUARD       (fx-guard)
+    CX-NESTED      (fx-nested)
+    CX-NESTED-DEAD (fx-nested-dead)
+    CX-MERGE-OF-MERGE (fx-merge-of-merge)
+    CX-MERGE-TREE     (fx-merge-tree)
+    CX-DIAMOND-RAW    (fx-diamond-raw)
+    CX-OBJECT         (fx-object)
+    CX-OBJECT-RAW     (fx-object-raw)
+    CX-SHAPE-POLY     (fx-shape-poly)
+    CX-OBJECT-LOOP    (fx-object-loop)
+    CX-OBJECT-TWO     (fx-object-two)
+    CX-OBJECT-RET     (fx-object-ret)
+    CX-OBJECT-RET-SCRATCH (fx-object-ret-scratch)
+    CX-STORE-OVER-STORE     (fx-store-over-store)
+    CX-STORE-OVER-STORE-RAW (fx-store-over-store-raw)
+    CX-STORE-GUARDED        (fx-store-guarded)
+    (do (panic-corpus "corpus-build!: index out of range") 0)))

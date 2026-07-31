@@ -154,14 +154,14 @@ its behavior while it was running."
 # Scry demo, Phase 8c - a REAL agent loop (watch/pause/hot-swap a live agent)
 
 Phase 8c upgrades the assistant's brain from a canned string to a **model-driven tool-use loop**.
-Offline it uses a deterministic `ScriptedModel`; with a key it uses a real `AnthropicModel` that
-calls Claude and does live tool use. The loop is identical either way.
+It starts with a deterministic `ScriptedModel`. The terminal's `/models` command opens the live
+Claude/Codex model picker.
 
 ## 0. Offline first - the loop is real with zero network
 
 ```
 ./scry run examples/assistant.scry
-brain: ScriptedModel - offline (set DEEPSEEK_API_KEY for the live model)
+brain: ScriptedModel - offline
 you> what is 17 times 23?
 [agent] -> tool_use: calculate({"a":17,"b":23,"op":"mul"})
 [agent] <- tool_result: calculate => 17 * 23 = 391
@@ -175,18 +175,26 @@ assistant Here you go: Tokyo: 18C, cloudy
 The model **chose** the tool and its arguments; the tool ran for real (17*23=391 is arithmetic, not
 a canned string); the result fed back and shaped the final answer. That is the whole loop.
 
-## 1. With a key - a LIVE model actually calls the tool
+## 1. Choose a live provider in the agent TUI
+
+At `you>`, type `/models` and choose Fable 5, Opus, Sonnet, GPT-5.6 Sol, Terra, or Luna. Existing
+`claude auth` / `codex login` sessions supply subscription authentication. Responses stream into
+the terminal through Claude partial-message events or Codex app-server agent-message deltas.
+Type `status` whenever you want to see the active configuration. The developer viewer exposes the
+same state, but is not needed for normal use.
+
+For the separate native API tool loop, API keys remain process secrets and the developer control
+surface can still select it; it is intentionally not mixed into the subscription model picker.
 
 Default target is **DeepSeek's Anthropic-compatible endpoint** (`deepseek-v4-pro` over
 `https://api.deepseek.com/anthropic`) — same `/v1/messages` tool-use protocol, so the only thing
-that changes is the key. Overridable: `ANTHROPIC_BASE_URL`, `SCRY_MODEL`, and the key resolves from
-`DEEPSEEK_API_KEY` | `DEEPSEEK_KEY` | `ANTHROPIC_API_KEY`. (To target Anthropic instead:
-`export ANTHROPIC_BASE_URL=https://api.anthropic.com SCRY_MODEL=claude-sonnet-5 ANTHROPIC_API_KEY=sk-ant-...`.)
+that changes is the key. The key resolves from `DEEPSEEK_API_KEY` | `DEEPSEEK_KEY` |
+`ANTHROPIC_API_KEY`; model and base URL are set through the agent-setup actions.
 
 ```
 export DEEPSEEK_API_KEY=sk-...
 ./scry run examples/assistant.scry
-brain: AnthropicModel (deepseek-v4-pro @ https://api.deepseek.com/anthropic) - LIVE
+# developer control surface → Use native API
 you> what is 17 times 23?
 [agent] -> tool_use: calculate({"a":17,"b":23,"op":"mul"})   # the live model emitted this tool_use
 [agent] <- tool_result: calculate => 17 * 23 = 391            # our loop ran the tool + fed it back

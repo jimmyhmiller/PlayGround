@@ -21,9 +21,10 @@
 // deps are absent; never skips.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, realpathSync, existsSync } from "node:fs";
+import { realpathSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { MANIFEST_FILES, loadServerConsumerManifest } from "./ssr-module-map.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = realpathSync(join(here, "..", ".."));
@@ -37,13 +38,10 @@ function fail(message) {
 
 const rscRenderEntry = join(output, "rsc-render", "server.mjs");
 const ssrEntry = join(output, "server", "server.mjs");
-const clientManifestPath = join(output, "client-references-manifest.json");
-const ssrManifestPath = join(output, "server-references-manifest.json");
 for (const [label, p] of [
   ["react-server render bundle", rscRenderEntry],
   ["SSR bundle", ssrEntry],
-  ["client-references manifest", clientManifestPath],
-  ["server-references manifest", ssrManifestPath],
+  ...MANIFEST_FILES.map(([label, file]) => [label, join(output, file)]),
 ]) {
   if (!existsSync(p)) fail(`${label} not found at ${p} — run scripts/rsc/flight-check.sh (builds all three graphs) first`);
 }
@@ -52,19 +50,21 @@ if (!existsSync(join(fixture, "node_modules", "react-server-dom-webpack"))) {
 }
 
 // --- Manifest #2: the divergent-id ssrModuleMapping ------------------------------
-const clientRefs = JSON.parse(readFileSync(clientManifestPath, "utf8"));
-const ssrRefs = JSON.parse(readFileSync(ssrManifestPath, "utf8"));
-const moduleMap = {};
-for (const [moduleId, clientEntry] of Object.entries(clientRefs)) {
-  const ssrEntryRef = ssrRefs[moduleId];
-  if (!ssrEntryRef) fail(`no SSR reference for ${moduleId}; the SSR graph did not bundle this "use client" module`);
-  moduleMap[String(clientEntry.id)] = { "*": { id: ssrEntryRef.id, chunks: ssrEntryRef.chunks, name: "*" } };
+// Joined from the three graphs' manifests by ./ssr-module-map.mjs (see its header).
+let clientManifestPath;
+let moduleMap;
+let serverConsumerManifest;
+try {
+  ({ clientManifestPath, moduleMap, serverConsumerManifest } = loadServerConsumerManifest(output));
+} catch (error) {
+  fail(error.message);
 }
-const serverConsumerManifest = { moduleMap, serverModuleMap: null, moduleLoading: { prefix: "", crossOrigin: null } };
 console.log(`OK: divergent-id ssrModuleMapping ${JSON.stringify(moduleMap)} (flight/client id -> SSR id)`);
 
 // --- The react-server render child produces the flight ---------------------------
-const render = spawnSync(process.execPath, [rscRenderEntry, "render", clientManifestPath], {
+// See `next-server.mjs`: a process whose entry is an emitted chunk gets source maps
+// by flag, so a failing check reports the app's own file rather than a chunk offset.
+const render = spawnSync(process.execPath, ["--enable-source-maps", rscRenderEntry, "render", clientManifestPath], {
   encoding: "buffer",
   input: "",
 });

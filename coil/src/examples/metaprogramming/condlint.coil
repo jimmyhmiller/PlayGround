@@ -1,0 +1,88 @@
+(module condlint)
+; A lint with a FIX: an `if` chain of three or more tests is a `cond`.
+;
+;   (if (= x 1) "one"                      (cond (= x 1) "one"
+;      (if (= x 2) "two"          =>             (= x 2) "two"
+;         (if (= x 3) "three"                    (= x 3) "three"
+;            "other")))                          :else   "other")
+;
+; The rule reports with `(suggest NODE MSG REPLACEMENT)`, so the replacement is a
+; Code value built from the author's OWN test and body nodes — `coil lint --fix`
+; then splices it in, reprinting those subtrees as their original bytes. Comments
+; and formatting inside a branch survive the rewrite; only the spine changes.
+;
+; Two tests, deliberately: two-armed `if` is exactly what `if` is for, and a chain
+; of two reads fine. Three is where the staircase starts to hurt.
+
+;; The chain length is counted at THREE, not two: `(if a b (if c d e))` is still
+;; readable, and rewriting it would be churn rather than a fix.
+(defn cl-min-tests [] (-> i64)
+  3)
+
+; `(if TEST THEN ELSE)` — Coil's `if` always has both arms, so a real one has 4
+; elements. `code-macro?` is the load-bearing half of this test: checkers run on the
+; EXPANDED program, where every `when`/`unless`/`case`/`cond` in the file has already
+; become nested ifs. Those are the compiler's ifs, not the author's, and flagging them
+; would report a `cond` for being a `cond`.
+(defn cl-hand-if? [(f Code)] (-> bool)
+  (if (code-list? f)
+      (if (icmp-eq (code-count f) 4)
+          (if (code-eq (code-nth f 0) `if) (not (code-macro? f)) false)
+          false)
+      false))
+
+; How many tests the chain rooted at `f` has: 0 if `f` is not a hand-written `if`,
+; else 1 + the length of the chain in its else-branch.
+(defn cl-chain-len [(f Code)] (-> i64)
+  (if (cl-hand-if? f) (iadd 1 (cl-chain-len (code-nth f 3))) 0))
+
+; The clause list `(t1 e1 t2 e2 … :else E)` for the chain rooted at `f`. The tests and
+; bodies are the author's own nodes, spliced through untouched — which is what lets the
+; renderer put their original source text back.
+(defn cl-clauses [(f Code)] (-> Code)
+  (if (cl-hand-if? f)
+      `(~(code-nth f 1) ~(code-nth f 2) ~@(cl-clauses (code-nth f 3)))
+      `(:else ~f)))
+
+(defn cl-as-cond [(f Code)] (-> Code)
+  `(cond ~@(cl-clauses f)))
+
+; ---- the walk ---------------------------------------------------------------
+; A chain is reported ONCE, at its outermost `if`. Its inner ifs are the same chain,
+; so walking into them would report the same staircase again at every step; instead
+; `cl-walk-chain` descends into each test and body, where a *different* chain may hide.
+(defn cl-walk [(f Code)] (-> Code)
+  (if (code-list? f)
+      (if (icmp-ge (cl-chain-len f) (cl-min-tests))
+          (do
+            (suggest f "3 or more nested ifs — write this as a cond" (cl-as-cond f))
+            (cl-walk-chain f))
+          (cl-kids f 0 (code-count f)))
+      `0))
+
+(defn cl-walk-chain [(f Code)] (-> Code)
+  (if (cl-hand-if? f)
+      (do (cl-walk (code-nth f 1)) (cl-walk (code-nth f 2)) (cl-walk-chain (code-nth f 3)))
+      (cl-walk f)))
+
+(defn cl-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (cl-walk (code-nth f i)) (cl-kids f (iadd i 1) n))))
+
+; ---- module scoping ---------------------------------------------------------
+; A module record is `(name form1 form2 …)`; only look at the ones the user wrote,
+; never the bundled stdlib (there is no file on disk to fix).
+(defn cl-look-at? [(m Code)] (-> bool)
+  (if (icmp-gt (code-count m) 1) (code-from-user? (code-nth m 1)) false))
+
+(defn cl-forms [(m Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (cl-walk (code-nth m i)) (cl-forms m (iadd i 1) n))))
+
+(defn cl-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n)
+      `0
+      (do
+        (let [m (code-nth ms i)] (if (cl-look-at? m) (cl-forms m 1 (code-count m)) `0))
+        (cl-mods ms (iadd i 1) n))))
+
+(defn lint-nested-if [(modules Code)] (-> Code)
+  (cl-mods modules 0 (code-count modules)))

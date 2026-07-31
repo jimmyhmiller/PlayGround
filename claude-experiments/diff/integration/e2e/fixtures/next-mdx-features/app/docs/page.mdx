@@ -1,0 +1,29 @@
+import Badge from "../../components/badge";
+import Counter from "../../components/counter";
+
+export const audience = "diffpack";
+
+# MDX feature tour
+
+Written for {audience}, with ~~struck text~~, `inline code`, and a bare autolink to
+www.example.com.
+
+| construct     | native | notes |
+| :------------ | :----: | ----: |
+| tables        | yes    | GFM   |
+| strikethrough | yes    | GFM   |
+
+- [x] task list, checked
+- [ ] task list, unchecked
+
+A footnote reference[^why].
+
+```js
+export const fenced = "code";
+```
+
+<Badge>badge inside an MDX route</Badge>
+
+<Counter />
+
+[^why]: Footnotes are a GFM construct too.

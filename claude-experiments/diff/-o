@@ -1,0 +1,89 @@
+module.exports=(()=>{
+"use strict";
+const __newModules={0:function(module,exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal){
+exports=module.exports=__esmNamespace();
+Object.defineProperty(exports,"__esModule",{value:true});
+let __diffpack_import_0;
+__diffpack_import_0=__toESM(require("./hub.js"));
+console.log("stable:" + (__diffpack_import_0.legacy === __diffpack_import_0.legacy));
+
+console.log("default:" + __diffpack_import_0.legacy.default);
+
+__seal(exports);
+
+},
+1:function(module,exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal){
+exports=module.exports=__esmNamespace();
+Object.defineProperty(exports,"__esModule",{value:true});
+__export(exports,"legacy",()=>__toESM(require("./num.cjs")));
+__seal(exports);
+
+},
+2:function(module,exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal){
+module.exports = 42;
+
+
+},
+};
+const __newMaps={0:{"./hub.js":1,},
+1:{"./num.cjs":2,},
+2:{},
+};
+const __newChunks={0:{},
+1:{},
+2:{},
+};
+const __runtime=globalThis["__diffpack_runtime:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/diff/conformance/fixtures/probe-primitive-identity/entry.js"]??=(()=>{
+const __modules=Object.create(null),__maps=Object.create(null),__chunks=Object.create(null),__cache=Object.create(null);
+const __exportStates=new WeakMap(),__esmNamespaces=new WeakSet(),__cjsNamespaces=new WeakMap(),__cjsInterops=new WeakMap(),__cjsOrigins=new WeakMap();
+function __esmNamespace(){const namespace=Object.create(null);Object.defineProperty(namespace,Symbol.toStringTag,{value:"Module"});__esmNamespaces.add(namespace);return namespace;}
+function __seal(namespace){const movable=Reflect.ownKeys(namespace).filter(key=>typeof key==="string"&&Object.getOwnPropertyDescriptor(namespace,key).configurable);const sorted=[...movable].sort();if(movable.some((key,index)=>key!==sorted[index])){const descriptors={};for(const key of movable){descriptors[key]=Object.getOwnPropertyDescriptor(namespace,key);delete namespace[key];}for(const key of sorted)Object.defineProperty(namespace,key,descriptors[key]);}for(const key of Reflect.ownKeys(namespace)){const descriptor=Object.getOwnPropertyDescriptor(namespace,key);if(descriptor?.configurable)Object.defineProperty(namespace,key,{configurable:false});}Object.preventExtensions(namespace);}
+function __exportState(target){let state=__exportStates.get(target);if(!state){state={explicit:new Set(),stars:new Map(),ambiguous:new Set()};__exportStates.set(target,state);}return state;}
+function __export(target,name,getter){const state=__exportState(target);const descriptor=Object.getOwnPropertyDescriptor(target,name);if(descriptor?.configurable)delete target[name];if(!Object.prototype.hasOwnProperty.call(target,name))Object.defineProperty(target,name,{enumerable:true,configurable:true,get:getter});state.explicit.add(name);state.stars.delete(name);state.ambiguous.delete(name);}
+function __reExport(target,source){const state=__exportState(target);for(const key of Object.keys(source)){if(key==="default"||key==="__esModule"||state.explicit.has(key)||state.ambiguous.has(key))continue;const previous=state.stars.get(key);if(previous&&previous!==source){delete target[key];state.stars.delete(key);state.ambiguous.add(key);continue;}if(!previous){Object.defineProperty(target,key,{enumerable:true,configurable:true,get:()=>source[key]});state.stars.set(key,source);}}}
+function __holdsProperties(value){return value!==null&&value!==undefined&&(typeof value==="object"||typeof value==="function");}
+function __origin(exports,specifier){if(__holdsProperties(exports)&&!__cjsOrigins.has(exports))__cjsOrigins.set(exports,specifier);return exports;}
+function __isESM(value){if(!value||(typeof value!=="object"&&typeof value!=="function"))return false;if(__esmNamespaces.has(value)||__cjsInterops.has(value))return true;return Object.getPrototypeOf(value)===null&&value[Symbol.toStringTag]==="Module";}
+function __syncCJS(namespace,value){if(__holdsProperties(value))for(const key of Object.keys(value))if(key!=="default"&&!Object.prototype.hasOwnProperty.call(namespace,key))__export(namespace,key,()=>value[key]);return namespace;}
+function __toESM(value){
+  if(__isESM(value))return value;
+  const cached=__cjsNamespaces.get(value);
+  if(cached)return __syncCJS(cached,value);
+  const namespace=Object.create(null);
+  Object.defineProperty(namespace,"__esModule",{value:true});
+  __export(namespace,"default",()=>value);
+  __syncCJS(namespace,value);
+  __cjsInterops.set(namespace,{exports:value});
+  if(__holdsProperties(value))__cjsNamespaces.set(value,namespace);
+  return namespace;
+}
+function __import(namespace,name){
+  if(Object.prototype.hasOwnProperty.call(namespace,name))return namespace[name];
+  const interop=__cjsInterops.get(namespace);
+  if(interop&&__holdsProperties(interop.exports)&&Object.prototype.hasOwnProperty.call(interop.exports,name)){const exports=interop.exports;__export(namespace,name,()=>exports[name]);return exports[name];}
+  const origin=__cjsOrigins.get(namespace)??(interop?__cjsOrigins.get(interop.exports):undefined);
+  throw new SyntaxError("The requested module "+(origin===undefined?"(unknown)":JSON.stringify(origin))+" does not provide an export named "+JSON.stringify(name));
+}
+function __dynamic(require,specifier){return Promise.resolve().then(()=>require.dynamic(specifier)).then(exports=>__toESM(__origin(exports,specifier)));}
+function __register(modules,maps,chunks){Object.assign(__modules,modules);Object.assign(__maps,maps);Object.assign(__chunks,chunks);}
+function __require(id){
+  if(__cache[id])return __cache[id].exports;
+  const factory=__modules[id];
+  if(!factory)throw new Error("Module is not loaded: "+id);
+  const module={exports:{}};
+  __cache[id]=module;
+  
+  const require=specifier=>{const target=__maps[id][specifier];if(target===undefined){if(requireNative)return __origin(requireNative(specifier),specifier);throw new Error("Cannot resolve "+specifier+" from "+id);}return __origin(__require(target),specifier);};
+  require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");requireNative(chunk[0]);}return __require(chunk[1]);};
+  factory(module,module.exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal);
+  return module.exports;
+}
+const requireNative=typeof require==="function"?require:null;
+
+return {register:__register,require:__require};
+})();
+
+__runtime.register(__newModules,__newMaps,__newChunks);
+
+return __runtime.require(0);
+})();

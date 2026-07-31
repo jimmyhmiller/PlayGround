@@ -53,10 +53,25 @@ pub enum Injection {
     Blocked { reason: String, fix: String },
 }
 
+/// Is this thing a program you can launch, or a module a host process loads?
+///
+/// It decides which capture path even applies: an executable can be injected
+/// into (`memscope run`), a dynamic module can't — it has no `main`, and
+/// injecting the *host* records against the host's binary, leaving every
+/// module frame unresolvable. Modules take the in-process path instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryKind {
+    Executable,
+    /// A `.dylib` / `.so` / `.node` — a Node native addon, a Python extension.
+    DynamicModule,
+}
+
 /// Everything we can tell about a binary without running it.
 #[derive(Debug, Clone)]
 pub struct BinaryFacts {
     pub path: PathBuf,
+    /// Launchable program vs host-loaded module.
+    pub kind: BinaryKind,
     /// Rust mangled symbols present (affects wording only — injection works on
     /// C programs too).
     pub is_rust: bool,
@@ -89,10 +104,7 @@ pub fn inspect_binary(path: &Path, generate_dsym: bool) -> Result<BinaryFacts, D
         // is insensitive to the extra underscore.)
         let n = raw.strip_prefix('_').unwrap_or(raw);
 
-        if !is_rust
-            && (raw.contains("_ZN4core") || raw.contains("_ZN3std") || raw.contains("__rust_alloc")
-                || raw.contains("rust_begin_unwind") || raw.contains("_RNv"))
-        {
+        if !is_rust && looks_rust(raw) {
             is_rust = true;
         }
         // `memscope_core` (not just "memscope"): the CLI links memscope-replay /
@@ -118,8 +130,53 @@ pub fn inspect_binary(path: &Path, generate_dsym: bool) -> Result<BinaryFacts, D
 
     let debug_info = probe_debug_info(path, &obj, generate_dsym);
     let injection = probe_injection(path);
+    let kind = binary_kind(path, &obj);
 
-    Ok(BinaryFacts { path: path.to_path_buf(), is_rust, memscope_linked, allocator, debug_info, injection })
+    Ok(BinaryFacts {
+        path: path.to_path_buf(),
+        kind,
+        is_rust,
+        memscope_linked,
+        allocator,
+        debug_info,
+        injection,
+    })
+}
+
+/// Does this symbol name prove the binary contains Rust code?
+///
+/// It has to be *proof*, because "is this Rust?" decides whether we tell someone
+/// their Rust is somewhere else (in an addon). The obvious markers `_ZN3std…` /
+/// `_ZN4core…` are NOT proof: Itanium C++ mangling spells `std::` exactly the
+/// same way, so every C++ program (node, for one) matched and read as Rust.
+///
+/// What is proof:
+/// * `__rust_alloc` / `rust_begin_unwind` — emitted by rustc, by nothing else.
+/// * `_RNv…` — the v0 Rust mangling scheme, unambiguous by design.
+/// * legacy Rust mangling's trailing disambiguator: `…17h<16 hex digits>E`.
+///   C++ has no such suffix.
+fn looks_rust(sym: &str) -> bool {
+    if sym.contains("__rust_alloc") || sym.contains("rust_begin_unwind") || sym.contains("_RNv") {
+        return true;
+    }
+    // `_ZN…17h9e8f1a2b3c4d5e6fE`: the hash length byte (17) + 'h' + 16 hex.
+    let Some(rest) = sym.strip_suffix('E') else { return false };
+    let Some(hash) = rest.len().checked_sub(19).map(|i| &rest[i..]) else { return false };
+    hash.starts_with("17h") && hash[3..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Executable or host-loaded module. The object kind is the real signal; the
+/// extension is the backstop, because a Node addon is often a *copy* of a
+/// cdylib renamed to `.node` (and Mach-O bundles report as `Unknown`).
+fn binary_kind(path: &Path, obj: &object::File) -> BinaryKind {
+    if obj.kind() == object::ObjectKind::Dynamic {
+        return BinaryKind::DynamicModule;
+    }
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("node" | "dylib" | "so" | "bundle") => BinaryKind::DynamicModule,
+        _ => BinaryKind::Executable,
+    }
 }
 
 fn probe_debug_info(path: &Path, obj: &object::File, generate_dsym: bool) -> DebugInfo {
@@ -259,4 +316,32 @@ fn human_bytes(n: u64) -> String {
         u += 1;
     }
     if u == 0 { format!("{n} B") } else { format!("{v:.1} {}", UNITS[u]) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_markers_are_proof_not_guesses() {
+        // Unambiguous rustc artifacts.
+        assert!(looks_rust("___rust_alloc"));
+        assert!(looks_rust("_rust_begin_unwind"));
+        assert!(looks_rust("__RNvCs1234_4core3fmt"));
+        // Legacy mangling, identified by its trailing hash disambiguator.
+        assert!(looks_rust("__ZN4core3fmt9Formatter3pad17h9e8f1a2b3c4d5e6fE"));
+    }
+
+    #[test]
+    fn cpp_std_is_not_rust() {
+        // The bug this guards: Itanium C++ mangling spells `std::`/`core::` the
+        // same way Rust's legacy scheme does, so these matched and `node` (and
+        // every other C++ program) reported as a Rust binary.
+        assert!(!looks_rust("__ZN3std6vectorIiSaIiEE9push_backERKi"));
+        assert!(!looks_rust("__ZN4core8internal5thingEv"));
+        assert!(!looks_rust("_napi_create_function"));
+        // Hash-shaped but not a hash: wrong length / non-hex.
+        assert!(!looks_rust("__ZN3foo3bar17hzzzzzzzzzzzzzzzzE"));
+        assert!(!looks_rust("__ZN3foo3bar17h9e8fE"));
+    }
 }

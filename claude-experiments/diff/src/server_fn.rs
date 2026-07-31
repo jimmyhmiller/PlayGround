@@ -38,7 +38,7 @@ use oxc_ast::ast::{
 };
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_span::{GetSpan, Span};
 
 use crate::js_reachability::dead_declaration_spans;
 use crate::transform::Target;
@@ -102,9 +102,7 @@ pub fn transform_server_fns(
     }
 
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let program = &parsed.program;
 
@@ -198,9 +196,7 @@ pub fn scan_server_fns(path: &Path, source: &str) -> Vec<(String, String)> {
         return Vec::new();
     }
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let program = &parsed.program;
     let locals = server_fn_locals(program);

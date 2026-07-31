@@ -1,0 +1,30 @@
+// SCENARIO 4 — repair code and data without reverting the type change.
+//
+// `advance` now preserves the enum field and `tint` matches it. Fixing those
+// roots revives untouched callers automatically. The migration maps every old
+// bool held by the already-running particles to a fieldless enum value; it is
+// lazy, so each particle crosses when the resumed frame first reads it.
+
+fn advance(p: Particle) -> Particle {
+    let nx = p.x + p.vx;
+    let ny = p.y + p.vy;
+    let nvx = p.vx;
+    let nvy = p.vy;
+    if nx < 14 { nx = 14; nvx = -nvx; }
+    if nx > 626 { nx = 626; nvx = -nvx; }
+    if ny < 14 { ny = 14; nvy = -nvy; }
+    if ny > 386 { ny = 386; nvy = -nvy; }
+    Particle { x: nx, y: ny, vx: nvx, vy: nvy, visible: p.visible }
+}
+
+fn tint(p: Particle) -> i64 {
+    match p.visible {
+        Hidden => 0,
+        Visible => p.hue + p.x / 3,
+    }
+}
+
+migrate Particle.visible(old) {
+    if old { return Visibility::Visible; }
+    Visibility::Hidden
+}

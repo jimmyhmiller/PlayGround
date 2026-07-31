@@ -1,0 +1,61 @@
+# Behavioral corpus for the arm64 backend gate: <file> [argv...]
+# Programs must be deterministic (verified by running twice) and non-interactive.
+# Lines prefixed `R ` snapshot their reference behavior from the RUST compiler:
+# the self-host LLVM backend cannot build them (inline-asm streamer limitation)
+# but the arm64 backend assembles :shim trampolines natively.
+src/examples/allocation.coil
+src/examples/allocators.coil
+src/examples/args.coil alpha beta gamma
+src/examples/arraylist.coil
+src/examples/bitfields.coil
+src/examples/calc.coil
+src/examples/cinterop.coil
+src/examples/closure-lib.coil
+src/examples/closure.coil
+src/examples/control.coil
+src/examples/conventions.coil
+src/examples/defclosure.coil
+src/examples/defer.coil
+src/examples/dyn_write.coil
+src/examples/explicit-layout.coil
+src/examples/extern.coil
+src/examples/fib.coil
+src/examples/fmt.coil
+src/examples/generics.coil
+src/examples/hashmap.coil
+src/examples/inference.coil
+src/examples/io.coil
+src/examples/iter.coil
+src/examples/json.coil
+src/examples/layout.coil
+src/examples/lisp.coil
+src/examples/lockfree.coil
+src/examples/loops.coil
+src/examples/macros.coil
+src/examples/mem.coil
+src/examples/nl.coil
+src/examples/per-arch.coil
+src/examples/references.coil
+src/examples/simd.coil
+src/examples/slice.coil
+src/examples/structabi.coil
+src/examples/structs.coil
+src/examples/sums.coil
+src/examples/threads.coil
+src/examples/try.coil
+src/examples/vector.coil
+src/examples/widths.coil
+R src/examples/everything.coil
+R src/examples/shim.coil
+tests/compiler/oracle/arm64/tests/int-edges.coil
+tests/compiler/oracle/arm64/tests/float-edges.coil
+tests/compiler/oracle/arm64/tests/abi-stress.coil
+tests/compiler/oracle/arm64/tests/aggregates.coil
+tests/compiler/oracle/arm64/tests/control-edges.coil
+tests/compiler/oracle/arm64/tests/bits-widths.coil
+tests/compiler/oracle/arm64/tests/varargs-fnptr.coil
+tests/compiler/oracle/arm64/tests/recursion-strings.coil
+tests/compiler/oracle/arm64/tests/sums-deep.coil
+tests/compiler/oracle/arm64/tests/atomics-globals.coil
+tests/compiler/oracle/arm64/tests/impl-structural.coil
+tests/compiler/oracle/arm64/tests/comptime-readback.coil

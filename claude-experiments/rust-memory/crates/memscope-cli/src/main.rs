@@ -117,6 +117,10 @@ fn print_help() {
          memscope dump    [--out FILE]                  one type-resolved heap dump (explore later: show)\n  \
          memscope events                                raw allocation event stream\n  \
          memscope mode    <off|full|sampled> [--rate N] switch tracking overhead on the fly\n\n\
+         CAPTURE — Rust inside another app (a Node .node addon, a Python extension)\n  \
+         memscope check <MODULE|CARGO_DIR>              1 line to add: memscope::init() in the module's init hook\n  \
+         MEMSCOPE_RECORD=rec-{{pid}}.mscope node app.js   record it ({{pid}} = one file per worker process)\n  \
+         MEMSCOPE_LIVE=1 node app.js                    live agent instead (monitor/graph/dump above)\n\n\
          ANALYZE a recording (.mscope from `run --out` or record_to_file)\n  \
          memscope analyze <FILE> [--json] [--top N]     what's WRONG, ranked: leaks, churn, realloc-thrash\n  \
          memscope diff    <FILE> <A> <B> [--json]       what grew between two checkpoints (marks, or start/end)\n  \

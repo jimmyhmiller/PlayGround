@@ -1,0 +1,940 @@
+;; The M3 slice 3b gate: the GRAPH round trip.
+;;
+;; M3's milestone gate says "`print` then `parse` is the identity on the whole corpus". Slice 3a
+;; proved that for a TYPE; this file is the clause itself, over whole graphs.
+;;
+;; THE IDENTITY IS THE EASY HALF TO FAKE, so most of this file exists to make it non-vacuous. A
+;; print-then-parse-then-print identity holds for a printer that emits nothing but op names, and it
+;; holds for a printer that emits nothing at all. Four separate defences, in the order the tests
+;; below appear:
+;;
+;;   1. BY COUNT. Every fixture's line count is summed and pinned with GTEXT-LINE-FLOOR, and each
+;;      fixture's line count must equal its LIVE NODE COUNT. A printer that dropped a node, or a
+;;      corpus that lost a fixture, fails here rather than passing over less text.
+;;   2. BY FIELD. Pairs of graphs that differ in exactly ONE printed field must render to DIFFERENT
+;;      text. Text identity then IMPLIES identity of op, projection slot, aux type, computed type,
+;;      which node an input names, the ORDER of the inputs, and arity, instead of being a claim
+;;      about whatever the printer happened to emit. Delete one field from `gline-write` and exactly
+;;      the matching pair goes red.
+;;   3. BY RUNNING IT (LAW 10). The reparsed graph must COMPUTE the same answers as the original,
+;;      for 12 argument seeds per fixture. This is the clause that catches a mis-wiring the text
+;;      cannot see, because the text and the wiring are printed by the same code and a systematic
+;;      error would agree with itself.
+;;   4. BY REFUSING TO GUESS. Nineteen malformed texts, each asserting the ONE named GERR code that
+;;      should be the check that noticed, with a floor on how many DISTINCT codes the table reaches
+;;      so that a table tripping one code nineteen times cannot pass.
+;;
+;; WHY THE DIFFERENTIAL CLAUSE IS SOUND ACROSS A RENUMBERING. `n<k>` is a print index, not an arena
+;; id, so the reparsed graph's node ids are generally different. `ev-bind-args!` keys bindings by an
+;; argument's DECLARED TYPE and its position among the arguments sharing that type, never by node
+;; id, which is exactly what survives a dense renumbering. That is asserted rather than assumed:
+;; `arg-signature` below compares the sequence of Arg aux types across the reparse.
+;;
+;; WHAT THIS FILE DOES NOT DO: it never calls `n-peephole`, `iterate!` or `g-analyze!` on a parsed
+;; graph. "Reparse then iterate to a fixpoint and get the same text" is a claim about the OPTIMISER
+;; rather than about this format (it is gated over the corpus by
+;; `iterate_reaches_a_peephole_fixpoint_on_every_optimised_fixture`), so mixing it in here would leave
+;; a failure ambiguous between the two. "The parser peepholes nothing" is gated as a property in its
+;; own right rather than left implied by byte identity.
+;;
+;;   coil test tests/gtext-test.coil
+(module gtexttest)
+
+(import "../src/ty.coil"     :use *)
+(import "../src/text.coil"   :use *)
+(import "../src/node.coil"   :use *)
+(import "../src/verify.coil" :use *)
+(import "../src/eval.coil"   :use *)
+(import "../src/corpus.coil" :use *)
+(import "../src/gtext.coil"  :use *)
+(import "assert.coil"    :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "alloc.coil"     :use *)
+(import "str.coil"       :use *)
+(import "slice.coil"     :use *)
+
+;; A HARD ERROR CAN ONLY BE TESTED FROM ANOTHER PROCESS. `abort` takes the whole program with it,
+;; so the child does the thing that must abort and `_exit(0)` if it survives; the parent asserts on
+;; the wait status. Same shape as verify-test.coil and text-test.coil.
+(extern fork    :cc c [] (-> i32))
+(extern waitpid :cc c [i32 (ptr i32) i32] (-> i32))
+(extern _exit   :cc c [i32] (-> void))
+
+; ---------------------------------------------------------------------------
+; Pins. A number written down here fails loudly when the thing it measures shrinks.
+; ---------------------------------------------------------------------------
+;; Node lines round-tripped across the whole corpus. It measures 151 today (8+4+9+4+19+6+12+10+10+
+;; 4+13+13+15+14+10). This is the "5 nodes on the worklist" defence: a printer that emitted only
+;; the two roots, or a corpus that lost fixtures, would still satisfy every byte-identity assertion
+;; while comparing almost no text.
+(const GTEXT-LINE-FLOOR i64 130)
+
+;; The corpus itself, so "over the whole corpus" cannot quietly become "over three fixtures".
+(const GTEXT-FIXTURE-FLOOR i64 15)
+
+;; How many DIFFERENT named failure codes the malformed table reaches. Every code except GERR-NONE,
+;; and the count is tied to `gtext-err-count` below so that adding a code without provoking it is a
+;; failure rather than a silently weaker table.
+(const GERR-CODE-FLOOR i64 22)
+
+;; One-field-apart graph pairs. Ten pairs cover op, projection slot, three aux kinds, the computed
+;; type, which node an input names, input ORDER, and arity.
+(const FIELD-PAIR-FLOOR i64 10)
+
+;; Argument bindings per fixture in the differential clause, matching eval-test.coil's `diff-pair`.
+(const DIFF-SEEDS i64 12)
+
+(const BUDGET i64 100000)
+
+;; Text buffers. Coil has no const array dimensions, so each size is written as a literal at both
+;; the `alloc-stack` and the `cap`; a const used for only one of the two is a buffer overrun waiting
+;; for someone to edit it. The largest corpus text is under 800 bytes.
+;; EVERY BUFFER LIVES IN A FUNCTION FRAME, never in a loop body: `alloc-stack` inside a loop
+;; allocates once per iteration and never releases.
+
+; ---------------------------------------------------------------------------
+; Located failure reporting. The offending object is a GRAPH, so a report dumps the graph, the
+; verifier's opinion of it, and the text under discussion. A bare `assert` on a byte comparison
+; says two strings differ and nothing about which graph produced them.
+; ---------------------------------------------------------------------------
+(defn gfail-head [(label (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "\nGRAPH TEXT GATE: ") (ps w label) (ps w "\n") 0))
+
+(defn gdump [] (-> i64)
+  (let [w (stderr)] (g-verify-print w) (g-print-flat w) 0))
+
+;; The two texts, with the byte the second one diverges at called out, because diffing two
+;; multi-line dumps by eye is exactly the work a gate is supposed to do for you.
+(defn show-texts [(ta (slice u8)) (tb (slice u8))] (-> i64)
+  (let [w (stderr)]
+    (fmt w "  printed  ({d} bytes):\n" (slice-len ta)) (ps w ta)
+    (fmt w "  reprinted ({d} bytes):\n" (slice-len tb)) (ps w tb)
+    (let [n (if (< (slice-len ta) (slice-len tb)) (slice-len ta) (slice-len tb))
+          (mut i) 0 (mut at) -1]
+      (loop
+        (if (or (>= (load i) n) (!= (load at) -1)) (break)
+          (do (if (!= (cast i64 (slice-get ta (load i))) (cast i64 (slice-get tb (load i))))
+                  (store! at (load i))
+                0)
+              (store! i (+ (load i) 1))
+              0)))
+      (fmt w "  first differing byte: {d}\n" (load at)))
+    0))
+
+(defn show-gerr [] (-> i64)
+  (let [w (stderr)]
+    (ps w "  the parser reports ") (ps w (gtext-err-name (gtext-err)))
+    (fmt w " on line {d} at byte {d}\n" (gtext-err-line) (gtext-err-pos))
+    ; the two codes that are a report about a TYPE rather than about a line keep `text-err`
+    ; readable, which is the layering `ty-print-exact` already uses
+    (if (or (= (gtext-err) GERR-BAD-TYPE) (= (gtext-err) GERR-BAD-AUX-TYPE))
+        (do (ps w "  the type on that line reports ") (ps w (text-err-name (text-err)))
+            (fmt w " at byte {d} of the type's own text\n" (text-err-pos))
+            0)
+      0)))
+
+; ---------------------------------------------------------------------------
+; Small structural readers. Structural lookups read better than node ids, which shift whenever a
+; builder gains a node, and every one of them is a hard error rather than a plausible answer when
+; the thing it is looking for is absent.
+; ---------------------------------------------------------------------------
+(defn count-lines [(s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (= (cast i64 (slice-get s (load i))) 10) (store! k (+ (load k) 1)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+(defn count-live-op [(op i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) op))
+                (store! k (+ (load k) 1))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+(defn find-live-op [(op i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut found) NO-NODE]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (and (not (n-dead? (load i))) (= (n-op (load i)) op))
+                     (= (load found) NO-NODE))
+                (store! found (load i))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (if (= (load found) NO-NODE)
+        (do (gfail-head "no live node with the op this test is about")
+            (ps (stderr) (op-name op)) (ps (stderr) "\n")
+            (gdump) (abort) NO-NODE)
+      (load found))))
+
+;; The sequence of Arg DECLARED types, in listing order, folded into one number. This is what
+;; `ev-bind-args!` keys its bindings on, so it is the thing that has to survive the renumbering for
+;; the differential clause below to be comparing the same program under the same inputs.
+(defn arg-signature [] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut acc) 1]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) OP-ARG))
+                (store! acc (+ (* (load acc) 1000003) (n-aux (load i))))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load acc)))
+
+;; How many live CONTROL nodes sit at each loop nesting depth, folded into one number. Loop depth is
+;; computed from `n-in header 2` (see `mark-loop-body!`), so this is a reading of "the back edge is
+;; in slot 2" that the TEXT cannot fake: a parser that wired the entry and the back edge the other
+;; way round marks a different set of nodes as loop body.
+(defn loop-depth-signature [] (-> i64)
+  (g-build-loop-tree!)
+  (let [n (n-count) (mut i) 0 (mut acc) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (op-control? (n-op (load i))))
+                (let [d (g-loop-depth (load i))]
+                  (store! acc (+ (load acc) (<< 1 (* 8 d)))))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load acc)))
+
+(defn max-loop-depth [] (-> i64)
+  (g-build-loop-tree!)
+  (let [n (n-count) (mut i) 0 (mut m) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (op-control? (n-op (load i))))
+                (let [d (g-loop-depth (load i))]
+                  (if (> d (load m)) (store! m d) 0))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load m)))
+
+; ===========================================================================
+; 1. THE IDENTITY, over the whole corpus
+; ===========================================================================
+;; Render to text A, parse A (which RESETS the graph, so what comes back is genuinely a rebuild and
+;; not the original), render the rebuild to text B, and require A and B to be byte-identical. Then
+;; three claims about the rebuilt graph itself, because two equal strings do not by themselves say
+;; a graph came back:
+;;
+;;   - the line count equals the LIVE NODE COUNT, before and after. One line per live node is the
+;;     format's whole contract, and this is what makes the summed floor meaningful.
+;;   - `g-verify` reports zero violations on the reparse. The parser restores types rather than
+;;     recomputing them, so the verifier's type pass is what proves the restored types are the ones
+;;     `compute` produces: a text that LIES about a type is VERR-STALE-TYPE here.
+;;   - `g-round-trip-check` (the library's own entry point, run on the REPARSE) reports GRT-OK with
+;;     no differing byte, so parsing is idempotent and not merely involutive-looking once.
+;;
+;; WHY IT WOULD FAIL IF THE FEATURE WERE REMOVED: there is no printer and no parser to run, so the
+;; test does not compile. With half the feature present it fails as soon as either half drops a
+;; field the other needs, because B then differs from A.
+(defn rt-corpus-fixture [(i i64)] (-> i64)
+  (let [ba (alloc-stack (array u8 32768))
+        bb (alloc-stack (array u8 32768))]
+    (corpus-build! i)
+    (let [live0 (g-live-count)
+          ta    (g-render (cast (ptr i8) ba) 32768)
+          lines (count-lines ta)]
+      (if (= lines live0) 0
+        (do (gfail-head (corpus-name i))
+            (fmt (stderr) "  {d} lines printed for {d} live nodes: the format is one line per live node\n"
+                 lines live0)
+            (ps (stderr) ta)
+            (gdump) (abort) 0))
+      (let [e (g-try-parse ta)]
+        (if (= e GERR-NONE) 0
+          (do (gfail-head (corpus-name i))
+              (ps (stderr) "  the printer produced a text its own parser rejects\n")
+              (show-gerr)
+              (ps (stderr) ta)
+              (abort) 0)))
+      (let [tb (g-render (cast (ptr i8) bb) 32768)]
+        (if (str-eq ta tb) 0
+          (do (gfail-head (corpus-name i))
+              (ps (stderr) "  print, parse, print is NOT the identity on this fixture\n")
+              (show-texts ta tb)
+              (gdump) (abort) 0)))
+      (if (= (g-live-count) live0) 0
+        (do (gfail-head (corpus-name i))
+            (fmt (stderr) "  the reparse has {d} live nodes, the original had {d}\n"
+                 (g-live-count) live0)
+            (gdump) (abort) 0))
+      (if (= (g-verify) 0) 0
+        (do (gfail-head (corpus-name i))
+            (ps (stderr) "  the reparsed graph is not well formed\n")
+            (gdump) (abort) 0))
+      ; the library's own checker, on the reparse: a second round trip from a graph that came out
+      ; of the parser rather than out of a builder
+      (let [c (g-round-trip-check)]
+        (if (= c GRT-OK) 0
+          (do (gfail-head (corpus-name i))
+              (ps (stderr) "  g-round-trip-check on the REPARSE reports ") (ps (stderr) (grt-name c))
+              (fmt (stderr) ", first differing byte {d}\n" (gtext-diff-pos))
+              (show-gerr)
+              (gdump) (abort) 0)))
+      (if (= (gtext-diff-pos) -1) 0
+        (do (gfail-head (corpus-name i))
+            (fmt (stderr) "  GRT-OK but a differing byte was recorded at {d}\n" (gtext-diff-pos))
+            (abort) 0))
+      lines)))
+
+(deftest the_whole_corpus_round_trips_to_identical_text
+  (let [w (stdout) n (corpus-count) (mut lines) 0 (mut i) 0]
+    (fmt w "\n--- print, parse, print over the whole corpus ---\n")
+    (loop
+      (if (>= (load i) n) (break)
+        (do (let [k (rt-corpus-fixture (load i))]
+              (ps w "  ") (ps w (corpus-name (load i)))
+              (fmt w ": {d} lines, identical, verify clean\n" k)
+              (store! lines (+ (load lines) k)))
+            (store! i (+ (load i) 1))
+            0)))
+    (fmt w "  {d} node lines round-tripped across {d} fixtures\n" (load lines) n)
+    ; the claim is MEASURED, not asserted: an emptied listing or a shrunken corpus fails here
+    (assert (>= (load lines) GTEXT-LINE-FLOOR))
+    (assert (>= n GTEXT-FIXTURE-FLOOR))))
+
+; ===========================================================================
+; 2. THE DIFFERENTIAL ORACLE ACROSS THE REPARSE (LAW 10)
+; ===========================================================================
+;; Text identity is a claim about bytes. This is the claim about MEANING: for every fixture and
+;; every argument seed, the reparsed graph must report the same status and the same value.
+;;
+;; It is the clause that would catch a phi wired to the wrong arm, a restored type that changed
+;; which branch an If takes, or anything observable that depended on `outs` ORDER, which the format
+;; does not carry and which a parsed graph rebuilds as a by-product of wiring. Every current reader
+;; of `outs` is order-insensitive by argument; this is the test that turns that argument into a
+;; measurement.
+(defn gbytes-eq? [(a (slice u8)) (b (slice u8))] (-> bool)
+  (if (!= (slice-len a) (slice-len b)) false
+    (let [n (slice-len a) (mut i) 0 (mut same) true]
+      (loop
+        (if (or (>= (load i) n) (not (load same))) (break)
+          (do (if (!= (slice-get a (load i)) (slice-get b (load i))) (store! same false) 0)
+              (store! i (+ (load i) 1))
+              0)))
+      (load same))))
+
+(defn diff-across-reparse [(i i64)] (-> i64)
+  (let [ba (alloc-stack (array u8 32768))
+        bo (alloc-stack (array u8 8192))
+        bp (alloc-stack (array u8 8192))
+        (mut seed) 1
+        (mut checked) 0]
+    ; the bindings are keyed by declared type and position, so the sequence of Arg types is what
+    ; has to survive the renumbering; asserted once per fixture, before the seeds run
+    (corpus-build! i)
+    (let [sig0 (arg-signature)
+          ta   (g-render (cast (ptr i8) ba) 32768)]
+      (if (= (g-try-parse ta) GERR-NONE) 0
+        (do (gfail-head (corpus-name i)) (show-gerr) (abort) 0))
+      (if (= (arg-signature) sig0) 0
+        (do (gfail-head (corpus-name i))
+            (ps (stderr) "  the reparse does not declare the same argument types in the same order,\n")
+            (ps (stderr) "  so ev-bind-args! would not be feeding the same program the same inputs\n")
+            (gdump) (abort) 0)))
+    (loop
+      (if (> (load seed) DIFF-SEEDS) (break)
+        (do (corpus-build! i)
+            (let [s1 (ev-run-bound (load seed) BUDGET)
+                  ; the OUTCOME and not `rt-eq?`: a fixture whose result is an object would
+                  ; otherwise be compared by its position in the allocation stream, which is a
+                  ; property of the run rather than of the program. See `ev-render-outcome`.
+                  o1 (ev-outcome (cast (ptr i8) bo) 8192)
+                  ta (g-render (cast (ptr i8) ba) 32768)]
+              (if (= (g-try-parse ta) GERR-NONE) 0
+                (do (gfail-head (corpus-name i)) (show-gerr) (abort) 0))
+              (let [s2 (ev-run-bound (load seed) BUDGET)
+                    o2 (ev-outcome (cast (ptr i8) bp) 8192)]
+                (if (and (= s1 s2) (gbytes-eq? o1 o2)) 0
+                  (do (gfail-head (corpus-name i))
+                      (fmt (stderr) "  the reparsed graph computes something else (seed {d})\n"
+                           (load seed))
+                      (ps (stderr) "    original: ") (ps (stderr) o1)
+                      (ps (stderr) "\n    reparsed: ") (ps (stderr) o2) (ps (stderr) "\n")
+                      (ps (stderr) ta)
+                      (gdump) (abort) 0))))
+            (store! checked (+ (load checked) 1))
+            (store! seed (+ (load seed) 1))
+            0)))
+    (load checked)))
+
+(deftest the_reparsed_graph_computes_the_same_answers
+  (let [w (stdout) n (corpus-count) (mut runs) 0 (mut i) 0]
+    (fmt w "\n--- the differential oracle across the reparse ---\n")
+    (loop
+      (if (>= (load i) n) (break)
+        (do (store! runs (+ (load runs) (diff-across-reparse (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (fmt w "  {d} paired runs agreed on status and value across {d} fixtures\n" (load runs) n)
+    (assert (= (load runs) (* n DIFF-SEEDS)))))
+
+; ===========================================================================
+; 3. EVERY FIELD IS OBSERVABLE IN THE TEXT
+; ===========================================================================
+;; This is what makes clause 1 mean something. Each pair below is two graphs differing in exactly
+;; ONE printed field; both must render to DIFFERENT text, with the SAME number of lines, so the
+;; difference cannot be "one graph has more nodes than the other".
+;;
+;; Every variant leaves node types at the value `n-new` gives them (ANY) except where the pair is
+;; ABOUT a type, so a pair differs in the field it is named for and in nothing else. That is also
+;; why the aux pairs are built this way: a Const's aux and its computed type are equal in a
+;; well-formed graph, so the only way to show the printer emits BOTH is to move one without the
+;; other.
+;;
+;; WHY IT WOULD FAIL IF THE FEATURE WERE REMOVED: delete any one field from `gline-write` and
+;; exactly the matching pair renders one string for two graphs and goes red.
+(const V-BASE      i64 0)
+(const V-OP        i64 1)    ; Sub where the base has Add
+(const V-IN-NODE   i64 2)    ; the second operand names a different node
+(const V-IN-ORDER  i64 3)    ; the same two operands, swapped
+(const V-ARITY     i64 4)    ; Stop collects the same Return twice
+(const V-TYPE      i64 5)    ; the Add's COMPUTED type is int, not ANY
+(const V-CONST-AUX i64 6)    ; Const int=1 where the base has int=0
+(const V-ARG-AUX   i64 7)    ; Arg dyn where the base has int
+(const V-SLOT-0    i64 8)    ; CProj.0
+(const V-SLOT-1    i64 9)    ; CProj.1
+(const V-CAST-INT  i64 10)   ; Cast int
+(const V-CAST-NUM  i64 11)   ; Cast num
+(const V-PHI-DYN   i64 12)   ; Phi declared dyn
+(const V-PHI-INT   i64 13)   ; Phi declared int
+
+(defn panic-gt [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "gtext gate: ") (ps w msg) (ps w "\n")) (abort) 0)
+
+;; `Arg`, `Const`, one binary node, a `Return`. Built with `n-new`/`n-add-def!` only: nothing is
+;; peepholed and nothing is analysed, so the graph is exactly what the arguments say it is.
+;; Returns the binary node, so the type variant can move its type without touching anything else.
+(defn build-arith! [(op i64) (argty i64) (conty i64)
+                    (arg-first bool) (same-node bool) (dup-stop bool)] (-> i64)
+  (graph-reset! 1)
+  (let [x (n-new1 OP-ARG   argty (g-start))
+        z (n-new1 OP-CONST conty (g-start))
+        other (if same-node x z)
+        b (if arg-first (n-new3 op 0 NO-NODE x other)
+                        (n-new3 op 0 NO-NODE other x))
+        ret (n-new2 OP-RETURN 0 (g-start) b)]
+    (n-add-def! (g-stop) ret)
+    (if dup-stop (n-add-def! (g-stop) ret) 0)
+    b))
+
+;; An If with ONE projection, so the pair differs only in the printed slot index.
+(defn build-if! [(slot i64)] (-> i64)
+  (graph-reset! 1)
+  (let [x   (n-new1 OP-ARG (t-dyn) (g-start))
+        iff (n-new2 OP-IF 0 (g-start) x)
+        pr  (n-new1 OP-CPROJ slot iff)
+        ret (n-new2 OP-RETURN 0 pr x)]
+    (n-add-def! (g-stop) ret)
+    pr))
+
+(defn build-cast! [(target i64)] (-> i64)
+  (graph-reset! 1)
+  (let [x (n-new1 OP-ARG (t-dyn) (g-start))
+        c (n-new2 OP-CAST target (g-start) x)
+        ret (n-new2 OP-RETURN 0 (g-start) c)]
+    (n-add-def! (g-stop) ret)
+    c))
+
+;; A diamond whose Phi carries a DECLARED type, which is the aux that `phi-compute` joins its live
+;; paths with. Deleting it deletes the declaration a guard rests on.
+(defn build-phi! [(declared i64)] (-> i64)
+  (graph-reset! 1)
+  (let [x   (n-new1 OP-ARG (t-dyn) (g-start))
+        iff (n-new2 OP-IF 0 (g-start) x)
+        t   (n-new1 OP-CPROJ 0 iff)
+        f   (n-new1 OP-CPROJ 1 iff)
+        r   (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r t) (n-add-def! r f)
+    (let [ph (n-new OP-PHI declared)]
+      (n-add-def! ph r) (n-add-def! ph x) (n-add-def! ph x)
+      (let [ret (n-new2 OP-RETURN 0 r ph)]
+        (n-add-def! (g-stop) ret)
+        ph))))
+
+(defn variant-build! [(v i64)] (-> i64)
+  (case v
+    V-BASE      (build-arith! OP-ADD (t-int) (t-int-con 0) true  false false)
+    V-OP        (build-arith! OP-SUB (t-int) (t-int-con 0) true  false false)
+    V-IN-NODE   (build-arith! OP-ADD (t-int) (t-int-con 0) true  true  false)
+    V-IN-ORDER  (build-arith! OP-ADD (t-int) (t-int-con 0) false false false)
+    V-ARITY     (build-arith! OP-ADD (t-int) (t-int-con 0) true  false true)
+    V-CONST-AUX (build-arith! OP-ADD (t-int) (t-int-con 1) true  false false)
+    V-ARG-AUX   (build-arith! OP-ADD (t-dyn) (t-int-con 0) true  false false)
+    V-TYPE      (let [b (build-arith! OP-ADD (t-int) (t-int-con 0) true false false)]
+                  (n-set-ty! b (t-int)) b)
+    V-SLOT-0    (build-if! 0)
+    V-SLOT-1    (build-if! 1)
+    V-CAST-INT  (build-cast! (t-int))
+    V-CAST-NUM  (build-cast! (t-num))
+    V-PHI-DYN   (build-phi! (t-dyn))
+    V-PHI-INT   (build-phi! (t-int))
+    (do (panic-gt "variant-build!: no such variant") 0)))
+
+(defn variant-name [(v i64)] (-> (slice u8))
+  (case v
+    V-BASE "base" V-OP "op" V-IN-NODE "input names another node" V-IN-ORDER "inputs swapped"
+    V-ARITY "arity" V-TYPE "computed type" V-CONST-AUX "Const aux" V-ARG-AUX "Arg aux"
+    V-SLOT-0 "CProj.0" V-SLOT-1 "CProj.1" V-CAST-INT "Cast int" V-CAST-NUM "Cast num"
+    V-PHI-DYN "Phi dyn" V-PHI-INT "Phi int"
+    (do (panic-gt "variant-name: no such variant") "")))
+
+;; A hand-shaped graph's text has to be one the parser reads back unchanged, or the field the pair
+;; differs in is only carried in one direction. These graphs include a null slot (`_`), an
+;; unanalysed ANY type and an unreachable node, none of which the corpus prints.
+(defn expect-text-round-trips [(label (slice u8)) (t (slice u8))] (-> i64)
+  (let [bc (alloc-stack (array u8 32768))]
+    (if (= (g-try-parse t) GERR-NONE) 0
+      (do (gfail-head label)
+          (ps (stderr) "  this hand-shaped graph's own text does not parse\n")
+          (show-gerr) (ps (stderr) t) (abort) 0))
+    (let [t2 (g-render (cast (ptr i8) bc) 32768)]
+      (if (str-eq t t2) 0
+        (do (gfail-head label)
+            (ps (stderr) "  a hand-shaped graph does not survive its own round trip\n")
+            (show-texts t t2) (gdump) (abort) 0)))
+    1))
+
+(defn expect-field-differs [(label (slice u8)) (va i64) (vb i64)] (-> i64)
+  (let [ba (alloc-stack (array u8 8192))
+        bb (alloc-stack (array u8 8192))]
+    (variant-build! va)
+    (let [ta (g-render (cast (ptr i8) ba) 8192)]
+      (variant-build! vb)
+      (let [tb (g-render (cast (ptr i8) bb) 8192)]
+        (if (str-eq ta tb)
+            (do (gfail-head label)
+                (ps (stderr) "  two graphs differing in exactly this ONE field print the SAME text,\n")
+                (ps (stderr) "  so text identity does not imply identity of it\n")
+                (ps (stderr) "    ") (ps (stderr) (variant-name va)) (ps (stderr) " vs ")
+                (ps (stderr) (variant-name vb)) (ps (stderr) "\n")
+                (ps (stderr) ta)
+                (abort) 0)
+          0)
+        (if (= (count-lines ta) (count-lines tb)) 0
+          (do (gfail-head label)
+              (ps (stderr) "  the pair differs in its NUMBER OF LINES, so it is not a one-field pair\n")
+              (show-texts ta tb)
+              (abort) 0))
+        1))))
+
+;; The control. Two builds of the SAME variant must print the SAME text, or the table above is
+;; measuring build noise rather than the field it names.
+(defn expect-field-same [(label (slice u8)) (v i64)] (-> i64)
+  (let [ba (alloc-stack (array u8 8192))
+        bb (alloc-stack (array u8 8192))]
+    (variant-build! v)
+    (let [ta (g-render (cast (ptr i8) ba) 8192)]
+      (variant-build! v)
+      (let [tb (g-render (cast (ptr i8) bb) 8192)]
+        (if (str-eq ta tb) 0
+          (do (gfail-head label)
+              (ps (stderr) "  two builds of ONE graph print two different texts\n")
+              (show-texts ta tb)
+              (abort) 0))
+        1))))
+
+(deftest every_printed_field_is_observable_in_the_text
+  (let [w (stdout) (mut n) 0]
+    (ps w "\n--- one field apart, and the text says so ---\n")
+    (store! n (+ (load n) (expect-field-differs "the op"            V-BASE V-OP)))
+    (store! n (+ (load n) (expect-field-differs "which node an input names" V-BASE V-IN-NODE)))
+    (store! n (+ (load n) (expect-field-differs "the ORDER of two inputs"   V-BASE V-IN-ORDER)))
+    (store! n (+ (load n) (expect-field-differs "arity"             V-BASE V-ARITY)))
+    (store! n (+ (load n) (expect-field-differs "the computed type" V-BASE V-TYPE)))
+    (store! n (+ (load n) (expect-field-differs "a Const's aux type" V-BASE V-CONST-AUX)))
+    (store! n (+ (load n) (expect-field-differs "an Arg's aux type"  V-BASE V-ARG-AUX)))
+    (store! n (+ (load n) (expect-field-differs "a projection's slot index" V-SLOT-0 V-SLOT-1)))
+    (store! n (+ (load n) (expect-field-differs "a Cast's aux type"  V-CAST-INT V-CAST-NUM)))
+    (store! n (+ (load n) (expect-field-differs "a Phi's declared type" V-PHI-DYN V-PHI-INT)))
+    (expect-field-same "the control: one graph, one text" V-BASE)
+    (expect-field-same "the control: one graph, one text" V-PHI-DYN)
+    (fmt w "  {d} one-field pairs each render to different text\n" (load n))
+    (assert (>= (load n) FIELD-PAIR-FLOOR))
+
+    ; SEPARATELY, and after the pairs so that a lost field is attributed to the pair that names it
+    ; rather than to whichever variant happened to be built first: every one of these hand-shaped
+    ; graphs survives its own round trip. They carry a null slot (`_`), an unanalysed ANY type and
+    ; an unreachable node, none of which the corpus prints.
+    (let [bd (alloc-stack (array u8 8192))       ; hoisted: an alloca in the loop leaks the C stack
+          (mut v) 0
+          (mut rt) 0]
+      (loop
+        (if (> (load v) V-PHI-INT) (break)
+          (do (variant-build! (load v))
+              (store! rt (+ (load rt)
+                            (expect-text-round-trips (variant-name (load v))
+                                                     (g-render (cast (ptr i8) bd) 8192))))
+              (store! v (+ (load v) 1))
+              0)))
+      (fmt w "  {d} hand-shaped graphs round-tripped\n" (load rt))
+      (assert (= (load rt) (+ V-PHI-INT 1))))))
+
+; ===========================================================================
+; 4. THE PARSER REFUSES TO GUESS
+; ===========================================================================
+;; THE CODE IS THE ASSERTION. "the parse failed" is satisfied by a parser that always fails, so
+;; every input below names the check that has to be the one to notice, and the table measures how
+;; many DIFFERENT checks it reached. A parser that fell back to a partial graph on malformed text
+;; would surface three passes later as a graph with a missing edge and nothing to say about where
+;; it came from.
+;;
+;; Each text is the WELL-FORMED baseline below with exactly one thing wrong with it, and the
+;; baseline is asserted to parse cleanly first, so a failure is caused by the mutation rather than
+;; by the surrounding text.
+(defn min-text [] (-> (slice u8)) "n0: Start <- : ctrl\nn1: Stop <- : ALL\n")
+
+(defn expect-gerr [(s (slice u8)) (want i64)] (-> i64)
+  (let [got (g-try-parse s)]
+    (if (and (and (= got want) (= (gtext-err) want)) (!= got GERR-NONE)) 0
+      (do (gfail-head "the parser did not report the check that should have noticed")
+          (let [w (stderr)]
+            (ps w "  input  = \"") (ps w s) (ps w "\"\n")
+            (ps w "  wanted ") (ps w (gtext-err-name want))
+            (ps w ", got ")     (ps w (gtext-err-name got)) (ps w "\n"))
+          (show-gerr)
+          (abort) 0))
+    (<< 1 want)))
+
+(deftest the_parser_reports_a_named_code_and_never_guesses
+  (let [w (stdout) (mut seen) 0]
+    (ps w "\n--- malformed graph text, one named code each ---\n")
+    ; the baseline: two roots and nothing else is a whole graph, and it verifies
+    (assert (= (g-try-parse (min-text)) GERR-NONE))
+    (assert (= (g-verify) 0))
+    (assert (= (g-live-count) 2))
+
+    ; a truncated text: the one failure that could make the identity clause pass on nothing, since
+    ; a truncated text compares EQUAL to another truncated text
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL" GERR-NO-NEWLINE)))
+    ; a missing `n<dec>`
+    (store! seen (| (load seen) (expect-gerr "x0: Start <- : ctrl\nn1: Stop <- : ALL\n" GERR-NO-NPREFIX)))
+    (store! seen (| (load seen) (expect-gerr "n: Start <- : ctrl\nn1: Stop <- : ALL\n" GERR-BAD-INDEX)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- n : ALL\n" GERR-BAD-INDEX)))
+    (store! seen (| (load seen) (expect-gerr "n99999999999999999999: Start <- : ctrl\nn1: Stop <- : ALL\n"
+                                             GERR-INDEX-RANGE)))
+    ; a listing whose indices are not exactly 0,1,2,... in order. A parser that quietly renumbered
+    ; would make a hand-written text mean something other than what it says.
+    (store! seen (| (load seen) (expect-gerr "n1: Start <- : ctrl\nn1: Stop <- : ALL\n" GERR-INDEX-ORDER)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn3: Const int=1 <- n0 : int=1\n"
+                                             GERR-INDEX-ORDER)))
+    (store! seen (| (load seen) (expect-gerr "n0 Start <- : ctrl\nn1: Stop <- : ALL\n" GERR-NO-COLON)))
+    ; an unknown op, delimiter included: `Startle` must not match `Start`
+    (store! seen (| (load seen) (expect-gerr "n0: Startle <- : ctrl\nn1: Stop <- : ALL\n" GERR-UNKNOWN-OP)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: Frobnicate <- n0 : ANY\n"
+                                             GERR-UNKNOWN-OP)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start : ctrl\nn1: Stop <- : ALL\n" GERR-NO-ARROW)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- ctrl\nn1: Stop <- : ALL\n" GERR-NO-SEP)))
+    ; a missing aux on an op whose aux is mandatory
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: Const <- n0 : int=1\n"
+                                             GERR-AUX-MISSING)))
+    ; an aux on an op whose aux has NO printed form
+    (store! seen (| (load seen) (expect-gerr "n0: Start int=1 <- : ctrl\nn1: Stop <- : ALL\n" GERR-AUX-EXTRA)))
+    ; a projection slot that is not `.<digits>`
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: CProj <- n0 : ctrl\n"
+                                             GERR-BAD-SLOT)))
+    ; a malformed aux TYPE, and a malformed computed type. Both leave `text-err` naming the type
+    ; production that failed, which is asserted separately below.
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: Const wat <- n0 : ANY\n"
+                                             GERR-BAD-AUX-TYPE)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : wat\nn1: Stop <- : ALL\n" GERR-BAD-TYPE)))
+    ; an input that is neither `n<dec>` nor `_`
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- x0 : ALL\n" GERR-BAD-INPUT)))
+    ; an input index past the node count
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- n9 : ALL\n" GERR-INPUT-RANGE)))
+    ; fewer than two lines: no graph has fewer than Start and Stop
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\n" GERR-MISSING-ROOTS)))
+    (store! seen (| (load seen) (expect-gerr "" GERR-MISSING-ROOTS)))
+    ; index 0 not Start, and index 1 not Stop
+    (store! seen (| (load seen) (expect-gerr "n0: Stop <- : ALL\nn1: Stop <- : ALL\n" GERR-ROOT-OP)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Start <- : ctrl\n" GERR-ROOT-OP)))
+    ; a SECOND root: without this the parser would `n-new` a Start that `g-start` does not name,
+    ; which is a root nothing anchors a constant to
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: Start <- : ctrl\n"
+                                             GERR-ROOT-DUP)))
+    ;; THE SHAPE TABLE IS NOT IN THE TEXT, so a shape id or an alias number is only meaningful
+    ;; against the table that is live. This suite never builds one, so its table is the root shape
+    ;; alone and every id below is outside it, which is the same failure as parsing a text printed
+    ;; from another program. It has to be refused HERE and not left to the verifier: the parser
+    ;; calls `n-new`, and `new-compute` aborts by name on an undefined shape at the first
+    ;; peephole, so a parser that accepted this could be made to abort the process by its input.
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: New <- n0 : ANY\n"
+                                             GERR-BAD-AUXNUM)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: New#9 <- n0 : ANY\n"
+                                             GERR-BAD-SHAPE)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: Load#0 <- _ n0 n0 : ANY\n"
+                                             GERR-BAD-ALIAS)))
+
+    (fmt w "  {d} different named checks reached\n" (popcount64 (load seen)))
+    ; a table that tripped one code twenty times would satisfy every assertion above
+    (assert (>= (popcount64 (load seen)) GERR-CODE-FLOOR))
+    ; and the floor is tied to the code table, so a new code that nothing provokes is a failure
+    ; rather than a silently weaker gate. GERR-NONE is the one code no malformed text reaches.
+    (assert (= (popcount64 (load seen)) (- (gtext-err-count) 1)))
+
+    ; THE TWO TYPE CODES KEEP `text-err` READABLE. "the graph line is malformed" and "the type on
+    ; it is malformed" are two bugs in two files, and the second one still names its production.
+    (assert (= (g-try-parse "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: Const wat <- n0 : ANY\n")
+               GERR-BAD-AUX-TYPE))
+    (assert (= (text-err) TERR-UNKNOWN-KIND))
+    (assert (= (g-try-parse "n0: Start <- : ctrl\nn1: Stop <- : int=[\n") GERR-BAD-TYPE))
+    (assert (= (text-err) TERR-BAD-BOUND))))
+
+;; The strict entry point. Malformed text means whatever produced it is broken, so `g-parse` must
+;; DIE rather than hand back a partial graph, which would surface passes later as a missing edge
+;; with nothing to say about where it came from. Only a child process can observe that: if the abort
+;; were removed the child would reach `_exit(0)` and this test fails.
+(deftest g_parse_aborts_instead_of_returning_a_partial_graph
+  (let [w (stdout) pid (fork)]
+    (if (= pid 0)
+        (do (g-parse "n0: Start <- : ctrl\nn1: Stop <- n9 : ALL\n")
+            (_exit 0)
+            0)
+      (let [st (alloc-stack i32)]
+        (store! st 0)
+        (waitpid pid st 0)
+        (let [status (cast i64 (load st))
+              sig    (& status 127)
+              code   (>> status 8)]
+          (fmt w "\n--- g-parse on malformed text ---\n  child wait status {d}: signal {d}, exit code {d}\n"
+               status sig code)
+          ; killed by a signal (abort), not returned from
+          (assert (!= sig 0))
+          0)))))
+
+; ===========================================================================
+; 5. THE PARSER PEEPHOLES NOTHING (LAWS 3 and 4)
+; ===========================================================================
+;; A hand-written text holding `Add(x, 0)` on an int-typed `x`, which is a node `add-idealize`
+;; would replace by `x` on sight. It has to come back with the Add still present, its edges exactly
+;; as written, and `g-verify` clean.
+;;
+;; Stated as a property of its own rather than left implied by byte identity: a parsed graph is the
+;; INPUT to a debugging session, so a parser that rewrites it hands back a different reduction than
+;; the one that was filed. It fails the moment anyone adds an `n-peephole` or an `iterate!` to the
+;; parser: the Add would be gone and the reprint would be a shorter text.
+;;
+;; The type on the Add is `int w0`, which is what `arith-compute` produces for `int + int=0` and is
+;; the reason this text verifies clean rather than reporting VERR-STALE-TYPE.
+(defn raw-add-text [] (-> (slice u8))
+  "n0: Start <- : ctrl\nn1: Stop <- n5 : ALL\nn2: Arg int <- n0 : int\nn3: Const int=0 <- n0 : int=0\nn4: Add <- _ n2 n3 : int w0\nn5: Return <- n0 n4 : [ctrl,int w0]\n")
+
+(deftest the_parser_peepholes_nothing
+  (let [w (stdout) bc (alloc-stack (array u8 8192))]
+    (ps w "\n--- a text holding a node an eager peephole would delete ---\n")
+    (if (= (g-try-parse (raw-add-text)) GERR-NONE) 0
+      (do (gfail-head "the raw Add text") (show-gerr) (abort) 0))
+    ; the Add survived, and its edges are the ones the text names
+    (assert (= (count-live-op OP-ADD) 1))
+    (let [a (find-live-op OP-ADD)]
+      (assert (= (n-nins a) 3))
+      (assert (= (n-in a 0) NO-NODE))                    ; the `_` control anchor, printed and read
+      (assert (= (n-op (n-in a 1)) OP-ARG))
+      (assert (= (n-op (n-in a 2)) OP-CONST))
+      (assert (= (n-aux (n-in a 2)) (t-int-con 0)))
+      ; and its type is the one the text restored, not one recomputed from ANY
+      (assert (= (n-ty a) (n-compute a))))
+    ; structurally sound, which is what says the restored types are the ones `compute` produces
+    (if (= (g-verify) 0) 0
+      (do (gfail-head "the reparsed raw Add graph") (gdump) (abort) 0))
+    ; and it reprints to the text it came from, so nothing was rewritten on the way out either
+    (let [t2 (g-render (cast (ptr i8) bc) 8192)]
+      (if (str-eq (raw-add-text) t2) 0
+        (do (gfail-head "the raw Add text") (show-texts (raw-add-text) t2) (gdump) (abort) 0)))
+
+    ; NON-VACUITY, measured: the same program built EAGERLY loses the Add, which is what says the
+    ; peephole this text survives is a real one that really fires.
+    (graph-reset! 1)
+    (let [x (n-peephole (n-new1 OP-ARG (t-int) (g-start)))
+          z (n-const (t-int-con 0))
+          a (n-peephole (n-new3 OP-ADD 0 NO-NODE x z))]
+      (assert (= a x))                       ; add-idealize handed back the argument itself
+      (assert (= (count-live-op OP-ADD) 0)))
+    (ps w "  the Add is kept by the parser and deleted by the eager builder\n")
+    0))
+
+; ===========================================================================
+; 6. REGION AND PHI SURVIVE AS ONE INVARIANT (LAW 5)
+; ===========================================================================
+;; Checked STRUCTURALLY, not only through the text, because the format cannot enforce it: region
+;; and phi arity are printed independently, so a text whose Phi is one input short is lexically
+;; legal and round-trips happily. The verifier is named as the thing that enforces the lockstep,
+;; and the last case below is the short-phi text being REPORTED rather than accepted.
+;; Split into a COUNTING half and an ASSERTING half, so the asserting half can itself be shown to
+;; fire: `phi-lockstep-bad` is asserted non-zero on the short-phi text at the end of this test. A
+;; structural checker nobody ever saw report anything is the same vacuity the verifier's corrupted
+;; graphs exist to rule out.
+(defn phi-lockstep-bad [] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut bad) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) OP-PHI))
+                (let [r (n-in (load i) 0)]
+                  (if (and (!= r NO-NODE) (op-merge? (n-op r)))
+                      (if (= (n-nins (load i)) (n-nins r)) 0
+                        (store! bad (+ (load bad) 1)))
+                    (store! bad (+ (load bad) 1))))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load bad)))
+
+(defn check-phi-lockstep [(label (slice u8))] (-> i64)
+  (if (= (phi-lockstep-bad) 0) 0
+    (do (gfail-head label)
+        (ps (stderr) "  a Phi and its merge are out of lockstep, which is LAW 5 broken:\n")
+        (let [n (n-count) (mut i) 0]
+          (loop
+            (if (>= (load i) n) (break)
+              (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) OP-PHI))
+                      (let [r (n-in (load i) 0)]
+                        (fmt (stderr) "    n{d} has {d} inputs, its input 0 is n{d}\n"
+                             (load i) (n-nins (load i)) r)
+                        0)
+                    0)
+                  (store! i (+ (load i) 1))
+                  0))))
+        (gdump) (abort) 0))
+  (count-live-op OP-PHI))
+
+;; Every Loop has exactly three inputs, slot 0 null, the ENTRY in slot 1 and the BACK EDGE in slot
+;; 2. The slot claim is read through the dominator depths rather than restated as a definition:
+;; a back edge comes from INSIDE the loop, so its source is deeper than the header, while the entry
+;; is shallower. Swap the two slots and both comparisons go the wrong way round.
+(defn check-loops [(label (slice u8))] (-> i64)
+  (g-build-loop-tree!)
+  (let [n (n-count) (mut i) 0 (mut loops) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) OP-LOOP))
+                (let [lp (load i)]
+                  (if (= (n-nins lp) 3) 0
+                    (do (gfail-head label)
+                        (fmt (stderr) "  n{d} is a Loop with {d} inputs, not 3\n" lp (n-nins lp))
+                        (gdump) (abort) 0))
+                  (if (= (n-in lp 0) NO-NODE) 0
+                    (do (gfail-head label)
+                        (fmt (stderr) "  n{d} is a Loop whose slot 0 is not null\n" lp)
+                        (gdump) (abort) 0))
+                  (if (and (< (g-idepth (n-in lp 1)) (g-idepth lp))
+                           (> (g-idepth (n-in lp 2)) (g-idepth lp))) 0
+                    (do (gfail-head label)
+                        (fmt (stderr) "  n{d}: entry n{d} at idepth {d}, back edge n{d} at idepth {d}, header {d}\n"
+                             lp (n-in lp 1) (g-idepth (n-in lp 1))
+                             (n-in lp 2) (g-idepth (n-in lp 2)) (g-idepth lp))
+                        (ps (stderr) "  the entry belongs in slot 1 and the back edge in slot 2\n")
+                        (gdump) (abort) 0))
+                  (store! loops (+ (load loops) 1))
+                  0)
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load loops)))
+
+(defn rt-loop-fixture [(i i64) (want-depth i64)] (-> i64)
+  (let [ba (alloc-stack (array u8 32768))]
+    (corpus-build! i)
+    (let [phis0 (check-phi-lockstep (corpus-name i))
+          loops0 (check-loops (corpus-name i))
+          sig0  (loop-depth-signature)
+          deep0 (max-loop-depth)
+          ta    (g-render (cast (ptr i8) ba) 32768)]
+      ; the fixture really has the shape this test is about
+      (assert (> loops0 0))
+      (assert (= deep0 want-depth))
+      (if (= (g-try-parse ta) GERR-NONE) 0
+        (do (gfail-head (corpus-name i)) (show-gerr) (abort) 0))
+      (let [phis1  (check-phi-lockstep (corpus-name i))
+            loops1 (check-loops (corpus-name i))
+            sig1   (loop-depth-signature)]
+        (assert (= phis1 phis0))
+        (assert (= loops1 loops0))
+        ; the loop NESTING is unchanged, which is a reading of "the back edge is in slot 2" that
+        ; the text cannot fake: loop membership is walked from `n-in header 2`
+        (if (= sig1 sig0) 0
+          (do (gfail-head (corpus-name i))
+              (fmt (stderr) "  loop nesting changed across the reparse: {d} -> {d}\n" sig0 sig1)
+              (gdump) (abort) 0))
+        (assert (= (max-loop-depth) deep0))
+        ; and the verifier, which is the thing that actually enforces the lockstep, is clean: in
+        ; particular it does NOT report VERR-PHI-ARITY
+        (if (= (g-verify) 0) 0
+          (do (gfail-head (corpus-name i)) (gdump) (abort) 0))
+        (assert (!= (g-verify-code) VERR-PHI-ARITY))
+        (+ phis1 loops1)))))
+
+;; A diamond whose Phi has one value for a Region with two paths. Lexically legal, so it PARSES;
+;; the defence is that every parsed graph goes through `g-verify`, which reports the lockstep as
+;; VERR-PHI-ARITY. The companion text below it is the same graph with the missing value restored,
+;; and it verifies clean, which is what says the code is caused by the short phi and not by the
+;; surrounding text.
+(defn short-phi-text [] (-> (slice u8))
+  "n0: Start <- : ctrl\nn1: Stop <- n9 : ALL\nn2: Arg dyn <- n0 : dyn\nn3: If <- n0 n2 : [ctrl,ctrl]\nn4: CProj.0 <- n3 : ctrl\nn5: CProj.1 <- n3 : ctrl\nn6: Region <- _ n4 n5 : ctrl\nn7: Const int=1 <- n0 : int=1\nn8: Phi dyn <- n6 n7 : int=1\nn9: Return <- n6 n8 : [ctrl,int=1]\n")
+
+(defn full-phi-text [] (-> (slice u8))
+  "n0: Start <- : ctrl\nn1: Stop <- n9 : ALL\nn2: Arg dyn <- n0 : dyn\nn3: If <- n0 n2 : [ctrl,ctrl]\nn4: CProj.0 <- n3 : ctrl\nn5: CProj.1 <- n3 : ctrl\nn6: Region <- _ n4 n5 : ctrl\nn7: Const int=1 <- n0 : int=1\nn8: Phi dyn <- n6 n7 n7 : int=1\nn9: Return <- n6 n8 : [ctrl,int=1]\n")
+
+;; The whole corpus, not only the two loop fixtures: every merge in every reparsed fixture has to be
+;; in lockstep with its phis. Three fixtures carry a Phi (11-diamond, 12-loop, 13-guard) and two
+;; carry a Loop, so the sweep is counted and floored rather than trusted to have found anything.
+(const PHI-FLOOR i64 3)
+
+(defn sweep-phi-lockstep [] (-> i64)
+  (let [ba (alloc-stack (array u8 32768))       ; hoisted out of the loop
+        n (corpus-count)
+        (mut i) 0
+        (mut phis) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (corpus-build! (load i))
+            (let [ta (g-render (cast (ptr i8) ba) 32768)]
+              (if (= (g-try-parse ta) GERR-NONE) 0
+                (do (gfail-head (corpus-name (load i))) (show-gerr) (abort) 0)))
+            (store! phis (+ (load phis) (check-phi-lockstep (corpus-name (load i)))))
+            (store! i (+ (load i) 1))
+            0)))
+    (load phis)))
+
+(deftest region_and_phi_survive_as_one_invariant
+  (let [w (stdout)]
+    (ps w "\n--- region and phi arity across the reparse ---\n")
+    (fmt w "  12-loop:        {d} phis and loops checked\n" (rt-loop-fixture CX-LOOP 1))
+    (fmt w "  14-nested-loops: {d} phis and loops checked\n" (rt-loop-fixture CX-NESTED 2))
+    (let [phis (sweep-phi-lockstep)]
+      (fmt w "  {d} reparsed Phis are in lockstep with their merge, across the whole corpus\n" phis)
+      (assert (>= phis PHI-FLOOR)))
+
+    ; the companion: the same text with the phi's second value present verifies clean
+    (if (= (g-try-parse (full-phi-text)) GERR-NONE) 0
+      (do (gfail-head "the full-phi text") (show-gerr) (abort) 0))
+    (if (= (g-verify) 0) 0
+      (do (gfail-head "the full-phi text should be a well formed graph") (gdump) (abort) 0))
+    (assert (= (check-phi-lockstep "the full-phi text") 1))
+    (assert (= (phi-lockstep-bad) 0))
+
+    ; and the short one PARSES, because the format cannot see it, and is then REPORTED
+    (if (= (g-try-parse (short-phi-text)) GERR-NONE) 0
+      (do (gfail-head "the short-phi text should parse: a short phi is lexically legal")
+          (show-gerr) (abort) 0))
+    ; the structural check above is live, independently of the verifier: it sees this one
+    (assert (= (phi-lockstep-bad) 1))
+    (let [c (g-verify)]
+      (if (and (> c 0) (= (g-verify-code) VERR-PHI-ARITY)) 0
+        (do (gfail-head "a phi one input short must be reported, not accepted")
+            (fmt (stderr) "  {d} violation(s), first " c) (ps (stderr) (verr-name (g-verify-code)))
+            (ps (stderr) "\n") (gdump) (abort) 0))
+      (fmt w "  the short-phi text parses and reports ") (ps w (verr-name (g-verify-code)))
+      (fmt w " ({d} violation)\n" c))
+    0))

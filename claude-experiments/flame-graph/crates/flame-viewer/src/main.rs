@@ -63,8 +63,50 @@ fn load_path(path: &Path) -> Result<flame_core::Profile, LoadError> {
         .ok_or(LoadError::UnknownFormat)?;
     log::info!("loading {} via {}", path.display(), src.name());
     let mut builder = ProfileBuilder::new();
+    // A samply profile recorded with --unstable-presymbolicate carries no
+    // names of its own; they're in a `.syms.json` next to it. Only the Firefox
+    // loader knows what to do with one.
+    if src.name() == flame_format_firefox::FirefoxSource.name() {
+        if let Some(syms) = load_syms_sidecar(path) {
+            flame_format_firefox::FirefoxSource
+                .load_with_symbols(&bytes, Some(&syms), &mut builder)?;
+            return Ok(builder.finish());
+        }
+    }
     src.load(&bytes, &mut builder)?;
     Ok(builder.finish())
+}
+
+/// Find and parse the presymbolication sidecar for `profile_path`. samply
+/// names it by replacing the profile's last extension with `syms.json`:
+/// `prof.json` -> `prof.syms.json`, `prof.json.gz` -> `prof.json.syms.json`.
+/// A missing sidecar is the normal case, not an error.
+fn load_syms_sidecar(profile_path: &Path) -> Option<flame_format_firefox::PrecogSymbols> {
+    let sidecar = profile_path.with_extension("syms.json");
+    if !sidecar.is_file() {
+        return None;
+    }
+    let bytes = match std::fs::read(&sidecar) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("reading {}: {e}", sidecar.display());
+            return None;
+        }
+    };
+    match flame_format_firefox::PrecogSymbols::parse(&bytes) {
+        Ok(syms) => {
+            log::info!(
+                "using symbols from {} ({} libs)",
+                sidecar.display(),
+                syms.lib_count()
+            );
+            Some(syms)
+        }
+        Err(e) => {
+            log::warn!("parsing {}: {e}", sidecar.display());
+            None
+        }
+    }
 }
 
 fn load_jsonl_dir(dir: &Path) -> Result<flame_core::Profile, LoadError> {

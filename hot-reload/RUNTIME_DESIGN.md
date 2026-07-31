@@ -103,7 +103,8 @@ is garbage-collected, a struct-typed value is simply a heap reference (no
 borrow/own distinction, so no `&`). Lowering
 gives locals fixed registers (this IR has no phi), sub-expressions fresh
 temporaries, and emits control flow with symbolic labels patched to program
-counters; a bad type is a clean *compile* error. IR ops added to make the
+counters; a bad type in an initial definition is a clean *compile* error, while
+a verifier-failing live redefinition is published Broken for repair. IR ops added to make the
 language real: `Copy`, `AddI64`, `MulI64`, `EqI64`, `Not`. Recursion works
 because functions install as a **batch verified against each other's
 signatures** (`verify_function_with` + `install_verified_function`), not in
@@ -369,4 +370,3 @@ repairable. What remains, in the owner's chosen direction:
 - **Update timing as a mode**: prefer static knowledge of where an update is
   safe, fall back to the runtime trap where it isn't. Needs the con-free
   liveness analysis; the trap stays as the floor.
-

@@ -1,0 +1,16 @@
+// SCENARIO 3 — make a genuinely non-type-preserving edit.
+//
+// `visible` changes from bool to a nominal enum. The new Particle version is
+// installed even though existing code still branches on the field as a bool
+// and constructs Particles without an enum value. Those functions are
+// published Broken, and brokenness propagates through `on_frame` to `main`.
+// The animation freezes at the outer call boundary; unrelated definitions are
+// still live and the last completed frame remains on screen.
+
+enum Visibility { Hidden, Visible }
+
+struct Particle {
+    x: i64, y: i64, vx: i64, vy: i64,
+    hue: i64 = 20,
+    visible: Visibility,
+}

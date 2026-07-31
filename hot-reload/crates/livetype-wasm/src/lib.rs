@@ -14,8 +14,7 @@
 //! observable behaviour.
 
 use livetype_core::{
-    Actor, ActorStatus, Condition, DefId, FunctionState, Instruction, Session, Turn, Type, Value,
-    Version, World,
+    Actor, ActorStatus, Condition, DefId, FunctionState, Instruction, Session, Turn, Type, Value, Version, World,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -26,9 +25,22 @@ const SCENE: &str = include_str!("../../../demo/scene.lt");
 
 /// The scripted edits, in the order the demo walks them.
 const SCENARIOS: &[(&str, &str)] = &[
-    ("Redefine a running function", include_str!("../../../demo/edit_1_radius.lt")),
-    ("Evolve a struct under live data", include_str!("../../../demo/edit_2_migrate.lt")),
-    ("Reject a breaking edit", include_str!("../../../demo/edit_3_rejected.lt")),
+    (
+        "Redefine a running function",
+        include_str!("../../../demo/edit_1_radius.lt"),
+    ),
+    (
+        "Evolve a struct under live data",
+        include_str!("../../../demo/edit_2_migrate.lt"),
+    ),
+    (
+        "Change bool to enum — break propagates",
+        include_str!("../../../demo/edit_3_non_preserving.lt"),
+    ),
+    (
+        "Repair code and migrate live values",
+        include_str!("../../../demo/edit_3_repair.lt"),
+    ),
     ("Introduce an enum", include_str!("../../../demo/edit_4_enum.lt")),
     ("Break it: add a variant", include_str!("../../../demo/edit_5_break.lt")),
     ("Repair the root cause", include_str!("../../../demo/edit_6_repair.lt")),
@@ -39,6 +51,14 @@ const SCENARIOS: &[(&str, &str)] = &[
 /// an unbounded loop, in which case the demo says so rather than hanging the tab.
 const FRAME_INSTRUCTION_CAP: usize = 2_000_000;
 
+/// Shape tags in the op stream. Every op is six `i32`s — `[tag, x, y, a, b,
+/// hue]` — so a frame stays one flat array however many shapes the toolkit
+/// grows. `a`/`b` are the radius and an unused 0 for the round shapes, and the
+/// width and height for a bar.
+const OP_CIRCLE: i32 = 0;
+const OP_RING: i32 = 1;
+const OP_BAR: i32 = 2;
+
 /// The "native toolkit": what the guest drew. `pending` accumulates the frame
 /// being rendered; `committed` is the last frame that ran to completion. A
 /// frozen program therefore leaves the last good frame on screen instead of a
@@ -47,9 +67,17 @@ const FRAME_INSTRUCTION_CAP: usize = 2_000_000;
 struct Toolkit {
     canvases_opened: u64,
     frames_cleared: u64,
-    circles_drawn: u64,
+    shapes_drawn: u64,
     pending: Vec<i32>,
     committed: Vec<i32>,
+}
+
+impl Toolkit {
+    fn push(&mut self, tag: i32, x: i64, y: i64, a: i64, b: i64, hue: i64) {
+        self.shapes_drawn += 1;
+        self.pending
+            .extend_from_slice(&[tag, x as i32, y as i32, a as i32, b as i32, hue as i32]);
+    }
 }
 
 /// Status of the last `step_frame`, mirrored into JS as a small integer.
@@ -107,7 +135,10 @@ impl Demo {
                     Box::new(move |_| {
                         let mut t = tk.lock().unwrap();
                         t.canvases_opened += 1;
-                        Value::Foreign { kind, ptr: t.canvases_opened }
+                        Value::Foreign {
+                            kind,
+                            ptr: t.canvases_opened,
+                        }
                     }),
                 )
                 .map_err(|e| JsError::new(&e))?;
@@ -126,33 +157,50 @@ impl Demo {
                 )
                 .map_err(|e| JsError::new(&e))?;
         }
+        // The two round shapes share an arity, so they share a binding shape;
+        // `bar` takes a width and a height instead of a radius.
+        for (name, tag) in [("circle", OP_CIRCLE), ("ring", OP_RING)] {
+            let tk = Arc::clone(&toolkit);
+            session
+                .register_foreign(
+                    name,
+                    Box::new(move |args| {
+                        // The verifier has already checked this call against the
+                        // declared signature, so a mismatch here is a host bug.
+                        let [_, Value::I64(x), Value::I64(y), Value::I64(r), Value::I64(hue)] = args else {
+                            return Value::Unit;
+                        };
+                        tk.lock().unwrap().push(tag, *x, *y, *r, 0, *hue);
+                        Value::Unit
+                    }),
+                )
+                .map_err(|e| JsError::new(&e))?;
+        }
         {
             let tk = Arc::clone(&toolkit);
             session
                 .register_foreign(
-                    "circle",
+                    "bar",
                     Box::new(move |args| {
-                        // The verifier has already checked this call against the
-                        // declared signature, so a mismatch here is a host bug.
-                        let [_, Value::I64(x), Value::I64(y), Value::I64(r), Value::I64(hue)] =
-                            args
+                        let [
+                            _,
+                            Value::I64(x),
+                            Value::I64(y),
+                            Value::I64(w),
+                            Value::I64(h),
+                            Value::I64(hue),
+                        ] = args
                         else {
                             return Value::Unit;
                         };
-                        let mut t = tk.lock().unwrap();
-                        t.circles_drawn += 1;
-                        t.pending.extend_from_slice(&[
-                            *x as i32, *y as i32, *r as i32, *hue as i32,
-                        ]);
+                        tk.lock().unwrap().push(OP_BAR, *x, *y, *w, *h, *hue);
                         Value::Unit
                     }),
                 )
                 .map_err(|e| JsError::new(&e))?;
         }
 
-        session
-            .eval(scene)
-            .map_err(|e| JsError::new(&e))?;
+        session.eval(scene).map_err(|e| JsError::new(&e))?;
         let main = session
             .fn_id("main")
             .ok_or_else(|| JsError::new("the scene has no `main`"))?;
@@ -161,7 +209,13 @@ impl Demo {
             .spawn(main, vec![])
             .map_err(|c| JsError::new(&format!("{c:?}")))?;
 
-        Ok(Demo { session, actor, toolkit, frames: 0, last_condition: String::new() })
+        Ok(Demo {
+            session,
+            actor,
+            toolkit,
+            frames: 0,
+            last_condition: String::new(),
+        })
     }
 
     /// Run the program until it crosses its next `yield` — one frame. Edits
@@ -184,9 +238,7 @@ impl Demo {
                 Turn::Done => return STATUS_DONE,
                 Turn::Paused => {
                     self.last_condition = match &self.actor.status {
-                        ActorStatus::Paused(c) => {
-                            self.session.engine.with_world(|w| describe(w, c))
-                        }
+                        ActorStatus::Paused(c) => self.session.engine.with_world(|w| describe(w, c)),
                         _ => String::new(),
                     };
                     return STATUS_FROZEN;
@@ -197,7 +249,7 @@ impl Demo {
         STATUS_CAPPED
     }
 
-    /// The last completed frame, as flat `[x, y, r, hue]` quads.
+    /// The last completed frame, as flat `[tag, x, y, a, b, hue]` ops.
     pub fn draw_ops(&self) -> Vec<i32> {
         self.toolkit.lock().unwrap().committed.clone()
     }
@@ -220,17 +272,13 @@ impl Demo {
 
         let changed: Vec<(DefId, String, bool)> = after
             .iter()
-            .filter(|(id, (version, ..))| {
-                before.get(id).map(|(v, ..)| v != version).unwrap_or(true)
-            })
+            .filter(|(id, (version, ..))| before.get(id).map(|(v, ..)| v != version).unwrap_or(true))
             .map(|(id, (_, name, broken))| (*id, name.clone(), *broken))
             .collect();
         // A function published Broken is not an installation, and calling it
         // one hides the whole point of the breaking step.
-        let (broken, installed): (Vec<_>, Vec<_>) =
-            changed.iter().partition(|(_, _, is_broken)| *is_broken);
-        let installed: Vec<(DefId, String)> =
-            installed.iter().map(|(id, name, _)| (*id, name.clone())).collect();
+        let (broken, installed): (Vec<_>, Vec<_>) = changed.iter().partition(|(_, _, is_broken)| *is_broken);
+        let installed: Vec<(DefId, String)> = installed.iter().map(|(id, name, _)| (*id, name.clone())).collect();
 
         let unobservable: Vec<String> = self.session.engine.with_world(|w| {
             match reachable_from_entry(w) {
@@ -250,9 +298,7 @@ impl Demo {
             let after_types = self.current_types();
             after_types
                 .iter()
-                .filter(|(id, (version, _))| {
-                    before_types.get(id).map(|(v, _)| v != version).unwrap_or(true)
-                })
+                .filter(|(id, (version, _))| before_types.get(id).map(|(v, _)| v != version).unwrap_or(true))
                 .map(|(_, (_, name))| name.clone())
                 .collect()
         };
@@ -386,8 +432,8 @@ impl Demo {
     }
 
     #[wasm_bindgen(getter)]
-    pub fn circles_drawn(&self) -> u64 {
-        self.toolkit.lock().unwrap().circles_drawn
+    pub fn shapes_drawn(&self) -> u64 {
+        self.toolkit.lock().unwrap().shapes_drawn
     }
 
     /// The live world, for the inspector: every current definition with its

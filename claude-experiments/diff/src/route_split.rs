@@ -37,7 +37,7 @@ use oxc_ast::ast::{
 use oxc_ecmascript::BoundNames;
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_span::{GetSpan, Span};
 use oxc_syntax::symbol::SymbolId;
 
 use crate::js_reachability::{
@@ -140,9 +140,7 @@ pub fn split_reference_route(path: &Path, source: &str) -> Option<String> {
     }
 
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let program = &parsed.program;
     let scoping = SemanticBuilder::new().build(program).semantic.into_scoping();
@@ -273,9 +271,7 @@ pub fn build_split_module(path: &Path, source: &str, target: &str) -> Result<Str
     }
 
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let program = &parsed.program;
     let scoping = SemanticBuilder::new().build(program).semantic.into_scoping();
@@ -390,9 +386,7 @@ pub fn route_id(path: &Path, source: &str) -> Option<String> {
         return None;
     }
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     for statement in &parsed.program.body {
         let declaration = match statement {

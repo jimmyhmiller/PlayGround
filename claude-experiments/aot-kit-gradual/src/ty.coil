@@ -1,0 +1,1306 @@
+;; The type lattice.
+;;
+;; Types form a symmetric bounded lattice with `meet` (greatest lower bound) and an
+;; involutive `dual`. `join` is the dual of the meet of the duals; `isa` is defined by
+;; `meet`. Types are INTERNED, so a type is a dense integer id and structural equality is
+;; id equality.
+;;
+;; THE UNIFORM RULE. Every axis of every type is stored so that `meet` is the *widening*
+;; or *union* operation on the stored representation and `dual` is the *complementing*
+;; operation, with "high" (optimistic, above the centreline) showing up as a stored form
+;; that is inverted or empty. Bitsets meet by OR and dual by complement; ranges meet by
+;; widening the interval and dual by swapping the ends, so an inverted range under a
+;; widening meet computes exactly the intersection of the high elements. One rule for
+;; every axis is what keeps the lattice laws provable instead of hoped for.
+;;
+;; TERMINATION. Bitset axes are finite and converge on their own. Interval axes do not: a
+;; loop induction variable could widen forever. The int axis therefore carries a small
+;; widening counter; after a few widenings it falls straight to the axis bottom.
+(module ty)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "hashmap.coil"   :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+
+; ============================================================================
+; Ids
+; ============================================================================
+;; A type id (`TyId` by convention) is a plain `i64`: an index into the interned table.
+;; It is deliberately NOT a one-field struct. Coil passes an aggregate by reference, so a
+;; wrapper would turn the compiler's hottest handle into a pointer to a stack slot. The
+;; discipline is naming instead: type ids are `tid`/`t`, node ids will be `nid`/`n`.
+
+(const TY-NO-ID i64 -1)          ; "no id yet", used while installing duals
+
+;; HOW DEEPLY A TUPLE MAY NEST, and it is a property of the TYPE and not of the printer, which is
+;; why it lives here. src/text.coil's exact form is the type's serialised contract and its parser
+;; recurses on the C stack, so a type nested deeper than this has a printed form that cannot be
+;; read back. Rather than let a legally interned type be unprintable, `ty-tuple-close` refuses to
+;; mint one, at construction, where the caller is still on the stack. src/text.coil's
+;; TEXT-MAX-DEPTH is this same number, and a gate pins them equal.
+;;
+;; 256 is far beyond anything the IR builds: nesting comes from tuple MEMBERS, and no pass nests
+;; parallel types at all yet. Arity, which is what M6's `Start` actually needs, is unbounded.
+(const TY-MAX-TUPLE-DEPTH i64 256)
+
+; ============================================================================
+; Value kinds
+; ============================================================================
+;; A dynamic value's coarse shape, as a bitset. `meet` unions the set, so the empty set is
+;; the TOP of this axis and the full set is its BOTTOM. Unions are therefore first class:
+;; `number | undefined` is a different lattice element from `dyn`, which is the difference
+;; between a load and a load plus a branch.
+;;
+;; `int` is split out from `flt` even though the source language has one number type. That
+;; split is the single highest-value refinement in the lattice: it is what turns `a + b`
+;; into an integer add. `number` is just `int | flt`.
+(const VK-UNDEF i64 1)
+(const VK-NULL  i64 2)
+(const VK-BOOL  i64 4)
+(const VK-INT   i64 8)
+(const VK-FLT   i64 16)
+(const VK-STR   i64 32)
+(const VK-SYM   i64 64)
+(const VK-BIG   i64 128)         ; bigint
+(const VK-OBJ   i64 256)
+(const VK-FUN   i64 512)
+(const VK-MASK  i64 1023)        ; every kind: the bottom of this axis
+(const VK-NONE  i64 0)           ; no kind: the top of this axis
+(const VK-NUM   i64 24)          ; VK-INT | VK-FLT
+;; The kinds with no refinement axis, so a present bit there always means at least one inhabitant.
+;; `val-high?` needs them named: every other kind can be present with an EMPTY refinement, which is
+;; uninhabited, and telling those two apart is the whole content of that predicate.
+(const VK-UNREFINED i64 227)     ; VK-UNDEF | VK-NULL | VK-STR | VK-SYM | VK-BIG
+
+; ============================================================================
+; Axis bounds
+; ============================================================================
+(const TY-IMIN  i64 (<< 1 63))            ; INT64_MIN
+(const TY-IMAX  i64 (^ (<< 1 63) -1))     ; INT64_MAX
+(const TY-WIDEN-MAX i64 3)                ; widenings before the int axis falls to bottom
+
+;; HOW MANY SHAPES AND HOW MANY ALIAS CLASSES THE LATTICE CAN NAME, and they live here rather
+;; than with the shape table because they are properties of the STORED REPRESENTATION of two
+;; axes: `Val.shapes` is a single-word shape-id bitset and `TMem.aliases` is a single-word alias
+;; bitset. 64 is therefore not a policy number, it is the width of an i64.
+;;
+;; The point of naming them is that the 65th allocation must ABORT rather than shift a bit off
+;; the word: `(<< 1 64)` is 0 in the C sense that matters here, so an unbounded `t-obj-shape 64`
+;; would silently mint "the empty shape set", which is the TOP of that axis, and an optimistic
+;; analysis would read that as "no object fits" and delete live code. Both bounds are checked at
+;; every site that turns a number into a bit: `t-obj-shape` and `t-mem-alias` here, and
+;; `shape-transition` in src/shape.coil.
+(const SHAPE-MAX i64 64)                  ; shape ids 0..63; `Val.shapes` is a 64-bit set
+(const ALIAS-MAX i64 64)                  ; alias ids 0..63; `TMem.aliases` is a 64-bit set
+
+;; The float axis is a three-element chain: high, a constant, low. Sizes are the marker,
+;; as in Simple's `TypeFloat._sz`: the sign carries high/low and 0 means "a constant".
+;; Only f64 exists here on purpose; the source language's numbers are doubles, and f32
+;; arrives with typed arrays or not at all.
+(const FSZ-HIGH i64 -64)
+(const FSZ-CON  i64 0)
+(const FSZ-LOW  i64 64)
+
+; ============================================================================
+; Val: the value sublattice
+; ============================================================================
+;; A product of independent axes. Meet and dual are componentwise, which is what makes the
+;; lattice laws hold by construction: a product of lattices is a lattice.
+;;
+;; A refinement is only *meaningful* when its kind bit is present, but it is still carried
+;; and still met when the bit is absent. That is deliberate. Canonicalising an unused
+;; refinement would not survive `dual` (dual maps an axis bottom to an axis top), so the
+;; redundancy is the price of an involutive dual. It costs a little interning space and
+;; never costs precision, because every decision consults `kinds` first.
+(defstruct Val
+  [(kinds  i64)     ; VK-* bitset;  meet = OR,  dual = complement within VK-MASK
+   (ilo    i64)     ; int axis: inclusive range. ilo > ihi means high (an inverted range)
+   (ihi    i64)
+   (iwide  i64)     ; widening counter, -3..3;  meet = max,  dual = negate
+   (fsz    i64)     ; float axis: FSZ-HIGH / FSZ-CON / FSZ-LOW
+   (fbits  i64)     ; the f64 constant as its BIT PATTERN when fsz = FSZ-CON, else 0.
+                    ; Bits, not an f64: NaN is not reflexive under fcmp, and interning
+                    ; needs exact identity. Bit patterns are also what NaN-boxing wants.
+   (fidxs  i64)     ; function-set bitset; meet = OR, dual = complement
+   (shapes i64)])   ; object-shape-set bitset; meet = OR, dual = complement
+
+(defn val-make [(kinds i64) (ilo i64) (ihi i64) (iwide i64)
+                (fsz i64) (fbits i64) (fidxs i64) (shapes i64)] (-> Val)
+  (let [(mut v) (zeroed Val)]
+    (store! (field v kinds)  kinds)
+    (store! (field v ilo)    ilo)
+    (store! (field v ihi)    ihi)
+    (store! (field v iwide)  iwide)
+    (store! (field v fsz)    fsz)
+    ; Canonical: a non-constant float carries no bits. Safe to normalise because `dual`
+    ; only flips the sign of fsz and never turns a non-constant into a constant.
+    (store! (field v fbits)  (if (= fsz FSZ-CON) fbits 0))
+    (store! (field v fidxs)  fidxs)
+    (store! (field v shapes) shapes)
+    (load v)))
+
+;; Field accessors. `match` binds a struct payload BY VALUE, and `field` needs a place, so
+;; a matched `Val` cannot be poked at directly. Passing it to a function gives a read-only
+;; reference, which is what these are for, and they read better than `(load (field …))` at
+;; every use site.
+(defn val-kinds  [(x Val)] (-> i64) (load (field x kinds)))
+(defn val-ilo    [(x Val)] (-> i64) (load (field x ilo)))
+(defn val-ihi    [(x Val)] (-> i64) (load (field x ihi)))
+(defn val-iwide  [(x Val)] (-> i64) (load (field x iwide)))
+(defn val-fsz    [(x Val)] (-> i64) (load (field x fsz)))
+(defn val-fbits  [(x Val)] (-> i64) (load (field x fbits)))
+(defn val-fidxs  [(x Val)] (-> i64) (load (field x fidxs)))
+(defn val-shapes [(x Val)] (-> i64) (load (field x shapes)))
+
+(defn val-eq [(x Val) (y Val)] (-> bool)
+  (and (= (val-kinds x)  (val-kinds y))
+   (and (= (val-ilo x)   (val-ilo y))
+    (and (= (val-ihi x)  (val-ihi y))
+     (and (= (val-iwide x) (val-iwide y))
+      (and (= (val-fsz x)  (val-fsz y))
+       (and (= (val-fbits x)  (val-fbits y))
+        (and (= (val-fidxs x)  (val-fidxs y))
+             (= (val-shapes x) (val-shapes y))))))))))
+
+(defn hash-step [(h i64) (x i64)] (-> i64) (* (^ h x) 1099511628211))
+
+(defn val-hash [(x Val)] (-> i64)
+  (hash-step
+   (hash-step
+    (hash-step
+     (hash-step
+      (hash-step
+       (hash-step
+        (hash-step
+         (hash-step -3750763034362895579 (val-kinds x))
+         (val-ilo x))
+        (val-ihi x))
+       (val-iwide x))
+      (val-fsz x))
+     (val-fbits x))
+    (val-fidxs x))
+   (val-shapes x)))
+
+(impl Eq Val (= [(x Val) (y Val)] (-> bool) (val-eq x y)))
+
+; ---------------------------------------------------------------------------
+; Axis operations. Each is meet + dual, named so the uniform rule is visible.
+; ---------------------------------------------------------------------------
+
+;; A bitset axis. Union to meet, complement to dual. `mask` bounds the complement so that
+;; dual stays involutive on a narrower-than-64-bit set.
+(defn bits-meet [(a i64) (b i64)] (-> i64) (| a b))
+(defn bits-dual [(a i64) (mask i64)] (-> i64) (& (^ a -1) mask))
+
+(defn imin2 [(a i64) (b i64)] (-> i64) (if (< a b) a b))
+(defn imax2 [(a i64) (b i64)] (-> i64) (if (> a b) a b))
+
+;; The float chain. `meet` walks down {high, constant, low}: two equal constants stay that
+;; constant, two unequal constants fall to low, and high is the identity.
+(defn fsz-meet [(asz i64) (abits i64) (bsz i64) (bbits i64)] (-> i64)
+  (if (= asz bsz)
+      (if (= asz FSZ-CON) (if (= abits bbits) FSZ-CON FSZ-LOW) asz)
+    (if (or (= asz FSZ-LOW) (= bsz FSZ-LOW)) FSZ-LOW
+      ; one side is high, which is the identity, so the result is the other side's size
+      (if (= asz FSZ-HIGH) bsz asz))))
+
+(defn fbits-meet [(asz i64) (abits i64) (bsz i64) (bbits i64)] (-> i64)
+  (if (= (fsz-meet asz abits bsz bbits) FSZ-CON)
+      (if (= asz FSZ-CON) abits bbits)
+    0))
+
+;; Constants are self-dual: they sit on the lattice centreline. Everything else flips.
+(defn fsz-dual [(sz i64)] (-> i64) (if (= sz FSZ-CON) FSZ-CON (- 0 sz)))
+
+; ---------------------------------------------------------------------------
+; Val meet / dual / predicates
+; ---------------------------------------------------------------------------
+(defn val-meet [(x Val) (y Val)] (-> Val)
+  (val-make
+   (bits-meet (val-kinds x) (val-kinds y))
+   (imin2 (val-ilo x)   (val-ilo y))
+   (imax2 (val-ihi x)   (val-ihi y))
+   (imax2 (val-iwide x) (val-iwide y))
+   (fsz-meet   (val-fsz x) (val-fbits x)
+               (val-fsz y) (val-fbits y))
+   (fbits-meet (val-fsz x) (val-fbits x)
+               (val-fsz y) (val-fbits y))
+   (bits-meet (val-fidxs x)  (val-fidxs y))
+   (bits-meet (val-shapes x) (val-shapes y))))
+
+(defn val-dual [(x Val)] (-> Val)
+  (let [lo  (val-ilo x)
+        hi  (val-ihi x)
+        con (= lo hi)]      ; an integer constant is self-dual, like a float constant
+    (val-make
+     (bits-dual (val-kinds x) VK-MASK)
+     (if con lo hi)
+     (if con hi lo)
+     (if con (val-iwide x) (- 0 (val-iwide x)))
+     (fsz-dual (val-fsz x))
+     (val-fbits x)
+     (bits-dual (val-fidxs x)  -1)
+     (bits-dual (val-shapes x) -1))))
+
+;; High means "no value can be here". IT IS A QUESTION ABOUT EVERY AXIS, and answering it with
+;; the kinds axis alone was a bug, not a conservative approximation:
+;;
+;; `join(int=8, int=[0..5])` is `int=~[5..8]`: the INT bit is present while the range is
+;; inverted, which is this lattice's high element on that axis (`ty-print` even spells it `~`).
+;; Reading that as LOW made four computes ANSWER WITH THE AXIS BOTTOM for it and then RISE when
+;; the input fell: `int-arith` said `int` and later `int=[1..6]`, `minus-compute` said `int` and
+;; later a range, `not-compute` said `bool` and later `bool=0`, `if-compute` said [ctrl ctrl] and
+;; later [ctrl ~ctrl]. `g-analyze!`'s monotonicity assertion aborted the compiler on a 14-node
+;; program because of it, and it also disabled `cast-compute`'s freeze rule for every Cast whose
+;; input disagrees with the target on the RANGE rather than on the kind.
+;;
+;; So the old comment's claim that erring toward `false` "never breaks correctness" was exactly
+;; backwards: erring toward false is what made those computes non-monotone.
+;;
+;; This is an INHABITATION test, not a lattice-position test. `int=~[5..8] isa ~dyn` is false,
+;; because the product lattice does not identify "uninhabited" with "at or above ~dyn"; a
+;; kind bit with an empty refinement is uninhabited without being above the value top.
+(defn val-high? [(x Val)] (-> bool)
+  (let [k (val-kinds x)]
+    (if (= k VK-NONE) true
+      (and (= (& k VK-UNREFINED) 0)
+       (and (if (!= (& k (| VK-INT VK-BOOL)) 0) (> (val-ilo x) (val-ihi x)) true)
+        (and (if (!= (& k VK-FLT) 0) (= (val-fsz x) FSZ-HIGH) true)
+         (and (if (!= (& k VK-FUN) 0) (= (val-fidxs x) 0) true)
+              (if (!= (& k VK-OBJ) 0) (= (val-shapes x) 0) true))))))))
+
+;; Exactly one kind, pinned to one inhabitant. `undefined` and `null` are single-inhabitant
+;; kinds, so naming the kind is naming the value. Booleans reuse the int axis (0 or 1).
+(defn val-const? [(x Val)] (-> bool)
+  (let [k (val-kinds x)]
+    (if (= k VK-UNDEF) true
+      (if (= k VK-NULL) true
+        (if (or (= k VK-INT) (= k VK-BOOL)) (= (val-ilo x) (val-ihi x))
+          (if (= k VK-FLT) (= (val-fsz x) FSZ-CON)
+            (if (= k VK-FUN) (= (popcount64 (val-fidxs x)) 1)
+              false)))))))
+
+;; Bit population count. Used for "is this a single function" and for printing.
+(defn popcount64 [(x i64)] (-> i64)
+  (let [(mut v) x (mut n) 0]
+    (loop
+      (if (= (load v) 0) (break)
+        (do (store! v (& (load v) (- (load v) 1)))
+            (store! n (+ (load n) 1))
+            0)))
+    (load n)))
+
+; ============================================================================
+; Ty: the full type
+; ============================================================================
+;; A closed set of mutually exclusive shapes, so `match` is exhaustive and forgetting a
+;; kind in `meet` is a compile error rather than a silent miscompile. Children of a tuple
+;; are type *ids* in a side array, which keeps this sum small and non-recursive.
+;;
+;; TMem IS A SEPARATE PRODUCTION AND NOT AN AXIS OF `Val`, because a memory state is not a value:
+;; it never boxes, never flows through arithmetic, and `meet`ing it with a value is a genuine
+;; "unrelated types were mixed" and so falls to ALL. It is a product of two axes, both stored the
+;; uniform way:
+;;
+;;   aliases : a bitset of alias classes.  meet = OR, dual = complement, empty = the axis top.
+;;   t       : the contents, one of TVal / TTop / TBot.
+;;
+;; THE ALIAS AXIS IS A BITSET AND SIMPLE'S COLLAPSE RULE IS DELIBERATELY NOT ADOPTED. Simple's
+;; `TypeMem.xmeet` reads `alias == that._alias ? alias : 1`, i.e. two unequal aliases collapse to
+;; its "all of memory" alias. That is not a greatest lower bound here and it is not self-dual, and
+;; the counterexample is two lines of arithmetic:
+;;
+;;   meet(mem#1 dyn, mem#2 dyn)  =  mem#3 dyn        (this lattice: bitwise OR)
+;;   mem#3 dyn  isa  mem#-1 dyn  and  mem#3 dyn != mem#-1 dyn
+;;
+;; so `mem#3 dyn` is a lower bound of both and lies STRICTLY ABOVE the collapse rule's answer:
+;; the collapse rule returns a lower bound that is not the greatest one. `meet-is-a-lower-bound`
+;; would still pass, and `dual-reverses-isa` is what would go red — or, far worse, nothing would
+;; go red because no memory type was in `ty-sample`, which is exactly how M3's `ty-meet-tuples`
+;; bug survived a green suite. So the axis and the samples are one change.
+(defsum Ty
+  (TBot)                              ; ALL: the bottom of everything, "mixed unrelated"
+  (TTop)                              ; ANY: the top
+  (TCtrl)                             ; control, reachable
+  (TXCtrl)                            ; control, unreachable (the dual of TCtrl)
+  (TVal   [(v Val)])                  ; a dynamic value
+  (TTuple [(off i64) (len i64)])      ; parallel types; members live in the kid array
+  (TMem   [(aliases i64) (t i64)]))   ; a memory state over an alias-class bitset
+
+(defn ty-tag [(t Ty)] (-> i64)
+  (match t (TBot [] 0) (TTop [] 1) (TCtrl [] 2) (TXCtrl [] 3) (TVal [v] 4) (TTuple [o l] 5)
+           (TMem [a c] 6)))
+
+; ============================================================================
+; The interning table
+; ============================================================================
+(defstruct Types
+  [(tab    (ArrayList Ty))       ; id -> Ty
+   (duals  (ArrayList i64))      ; id -> the id of its dual
+   (kids   (ArrayList i64))      ; tuple members, addressed by (off, len)
+   (depths (ArrayList i64))      ; id -> tuple nesting depth; 0 for everything that is not a tuple
+   (intern (HashMap Ty i64))     ; Ty -> id
+   (inited bool)])
+
+;; The one global. Coil has no top-level mutable binding; `alloc-static` in a zero-arg
+;; accessor returns the same cell every call, which is the idiom for a singleton.
+(defn types [] (-> (ptr Types))
+  (let [p (alloc-static Types)]
+    (if (load (field p inited)) 0
+      (do (store! (field p inited) true)   ; set FIRST: seeding re-enters through `types`
+          (store! (field p tab)    (al-new [Ty] (malloc-allocator)))
+          (store! (field p duals)  (al-new [i64] (malloc-allocator)))
+          (store! (field p kids)   (al-new [i64] (malloc-allocator)))
+          (store! (field p depths) (al-new [i64] (malloc-allocator)))
+          (store! (field p intern) (hm-new [Ty i64] (malloc-allocator) (ty-keyops)))
+          (ty-seed p)
+          0))
+    p))
+
+(defn ty-kid [(off i64) (i i64)] (-> i64)
+  (al-get (load (field (types) kids)) (+ off i)))
+
+;; How many member slots the kid array holds. Exported so a gate can assert that building,
+;; meeting or PRINTING an already-interned tuple does not grow it: the array is append-only and
+;; the growth would be unbounded in the number of CALLS. See `ty-tuple-close`.
+(defn ty-kids-len [] (-> i64) (al-len [i64] (load (field (types) kids))))
+
+(defn ty-panic [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "type table: ") (ps w msg) (ps w "\n"))
+  (abort) 0)
+
+; ---------------------------------------------------------------------------
+; Building a tuple: reserve the member window, then fill it
+; ---------------------------------------------------------------------------
+;; WHY RESERVE INSTEAD OF PUSH. This was a live bug, not a hypothetical one. A producer that
+;; INTERNS a member before handing it over appends to this same kid array while doing so, because
+;; a nested tuple's members and its dual's members live here too. `ty-meet-tuples` used to push
+;; each member's meet as it computed it, so meeting two tuples whose members were themselves
+;; tuples left the outer window pointing at the INNER tuple's members:
+;;
+;;     [[ctrl int] flt]  meet  [[ctrl dyn] flt]   ==>   [ctrl dyn]
+;;
+;; and `meet` stopped being a lower bound at all. Nothing caught it because no tuple in the
+;; corpus has a tuple member yet.
+;;
+;; Reserving the window up front makes it contiguous by construction: whatever an inner intern
+;; appends lands after the reservation, and the members are written in place. Every producer goes
+;; through here, so there is exactly one way a member window comes into existence.
+(defstruct TupleBuild [(off i64) (len i64) (nty i64)])
+
+(defn tb-off [(b TupleBuild)] (-> i64) (load (field b off)))
+(defn tb-len [(b TupleBuild)] (-> i64) (load (field b len)))
+(defn tb-nty [(b TupleBuild)] (-> i64) (load (field b nty)))
+
+;; Reserve `len` member slots. They hold TY-NO-ID until written, which is not a type id, so a
+;; slot nobody filled is detectable rather than a plausible index into the table.
+(defn ty-tuple-open [(len i64)] (-> TupleBuild)
+  (if (< len 0) (do (ty-panic "ty-tuple-open: negative tuple arity") 0) 0)
+  (let [p (types)
+        off (al-len [i64] (load (field p kids)))
+        n0  (ty-count)
+        (mut i) 0
+        (mut b) (zeroed TupleBuild)]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (al-push! [i64] (field p kids) TY-NO-ID)
+            (store! i (+ (load i) 1))
+            0)))
+    (store! (field b off) off)
+    (store! (field b len) len)
+    (store! (field b nty) n0)
+    (load b)))
+
+(defn ty-tuple-put! [(b TupleBuild) (i i64) (t i64)] (-> i64)
+  (if (or (< i 0) (>= i (tb-len b)))
+      (do (ty-panic "ty-tuple-put!: member index outside the reserved window") 0)
+    (do (al-set! [i64] (field (types) kids) (+ (tb-off b) i) t) 0)))
+
+;; Drop everything the kid array has grown past `off`. Only ever called with the `off` of a
+;; window whose tuple turned out to be already interned; see `ty-tuple-close`.
+(defn ty-kids-truncate! [(off i64)] (-> i64)
+  (let [p (types)]
+    (loop
+      (if (<= (al-len [i64] (load (field p kids))) off) (break)
+        (do (al-pop! [i64] (field p kids)) 0)))
+    0))
+
+;; THE WINDOW IS RECLAIMED WHEN THE TUPLE TURNS OUT TO ALREADY EXIST, and this is not a
+;; micro-optimisation. The kid array is append-only and `ty-intern` returns an existing id for a
+;; structurally equal tuple, so without this every REPEAT construction of an interned tuple leaks
+;; its reservation for ever: unbounded in the number of CALLS rather than in program size.
+;; `if-compute` builds its result with `t-tuple2` on every visit, so an M3 fixpoint leaked two
+;; words per If revisit, and `ty-print-exact` leaked two per print (it round-trips through the
+;; parser, which reserves a window to check the text decodes). Printing is supposed to be
+;; observation, and src/text.coil's "the only growth the parser causes is interning" was false.
+;;
+;; WHY IT IS SOUND TO DROP THE WHOLE TAIL, not just our own slots. Members are computed BETWEEN
+;; open and close, and computing one can intern nested tuples, which append after our window. But
+;; if the outer tuple was already interned then every member id already existed, and by induction
+;; nothing anywhere in that subtree was newly pushed either: a genuinely new inner id would make
+;; the outer tuple new too, because no pre-existing tuple can reference an id that did not exist.
+;; So on the hit path the tail is garbage by construction. That argument is CHECKED rather than
+;; trusted: if the table grew while we were filling the window, something live may point into the
+;; tail, and the window is simply left in place. Leaking is the safe answer there; a panic would
+;; be worse than the bug it guards.
+(defn ty-tuple-close [(b TupleBuild)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (tb-len b)) (break)
+        (do (if (= (ty-kid (tb-off b) (load i)) TY-NO-ID)
+                (do (ty-panic "ty-tuple-close: a member slot was never filled") 0)
+              0)
+            (store! i (+ (load i) 1))
+            0))))
+  (ty-tuple-check-depth b)
+  (let [p (types) found (ty-lookup p (TTuple (tb-off b) (tb-len b)))]
+    (if (= found TY-NO-ID) (ty-intern (TTuple (tb-off b) (tb-len b)))
+      (do (if (= (ty-count) (tb-nty b)) (ty-kids-truncate! (tb-off b)) 0)
+          found))))
+
+;; THE FORMAT IS PART OF THE TYPE'S CONTRACT. src/text.coil parses a tuple by recursing on the C
+;; stack and gives up past `TY-MAX-TUPLE-DEPTH`, so a type nested deeper than that has an exact
+;; printed form that cannot be read back, and `ty-print-exact` would refuse to print a type that
+;; was perfectly legal to construct. Two ways out: raise the parser's budget (impossible, nesting
+;; is unbounded) or refuse to MINT what the format cannot represent. This is the second, and it
+;; fails here, at construction, with the caller still on the stack, instead of three passes later
+;; inside a printer.
+;;
+;; Arity is deliberately NOT bounded: the window is reserved rather than staged in a frame, and
+;; M6's `Start` gets one output per parameter.
+(defn ty-tuple-check-depth [(b TupleBuild)] (-> i64)
+  (let [(mut i) 0 (mut d) 0]
+    (loop
+      (if (>= (load i) (tb-len b)) (break)
+        (do (let [dm (ty-depth (ty-kid (tb-off b) (load i)))]
+              (if (> dm (load d)) (store! d dm) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    (if (> (+ (load d) 1) TY-MAX-TUPLE-DEPTH)
+        (do (ty-panic "ty-tuple-close: tuple nesting is deeper than the textual form can represent (TY-MAX-TUPLE-DEPTH)") 0)
+      0)))
+
+;; Structural equality. Tuples compare by their MEMBERS, not by where those members happen
+;; to sit in the kid array, or two structurally identical tuples would intern separately.
+(defn ty-eq [(p Ty) (q Ty)] (-> bool)
+  (if (!= (ty-tag p) (ty-tag q)) false
+    (match p
+      (TBot   [] true)
+      (TTop   [] true)
+      (TCtrl  [] true)
+      (TXCtrl [] true)
+      (TVal [vp] (match q
+                   (TVal [vq] (val-eq vp vq))
+                   (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+                   (TTuple [o l] false) (TMem [a c] false)))
+      (TTuple [op lp] (match q
+                        (TTuple [oq lq] (and (= lp lq) (ty-kids-eq op oq lp)))
+                        (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+                        (TVal [v] false) (TMem [a c] false)))
+      (TMem [ap cp2] (match q
+                       (TMem [aq cq] (and (= ap aq) (= cp2 cq)))
+                       (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+                       (TVal [v] false) (TTuple [o l] false))))))
+
+(defn ty-kids-eq [(oa i64) (ob i64) (n i64)] (-> bool)
+  (let [(mut i) 0 (mut same) true]
+    (loop
+      (if (or (>= (load i) n) (not (load same))) (break)
+        (do (if (!= (ty-kid oa (load i)) (ty-kid ob (load i))) (store! same false) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load same)))
+
+(defn ty-hash [(p Ty)] (-> i64)
+  (match p
+    (TBot   [] 1099511628211)
+    (TTop   [] 2199023255551)
+    (TCtrl  [] 3331113965338635107)
+    (TXCtrl [] 8493516592567629853)
+    (TVal [v] (hash-step (val-hash v) 4))
+    (TTuple [o l] (ty-kids-hash o l 0 (hash-step 5 l)))
+    ; a distinct seed from TTuple's, so `mem#5 <c>` and a 5-member tuple do not start from the
+    ; same state; the alias bitset and the contents id are both mixed in
+    (TMem [a c] (hash-step (hash-step 6612633886727495271 a) c))))
+
+(defn ty-kids-hash [(off i64) (n i64) (i i64) (h i64)] (-> i64)
+  (if (>= i n) h (ty-kids-hash off n (+ i 1) (hash-step h (ty-kid off i)))))
+
+(impl Eq Ty (= [(x Ty) (y Ty)] (-> bool) (ty-eq x y)))
+
+;; HashMap keys are compared through a KeyOps vtable of byte-pointer callbacks. These two
+;; wrappers load the slot and hand off to the value-level functions above, so the
+;; structural definition of equality lives in exactly one place.
+(defn ty-keyhash [(slot (ptr i8)) (n i64)] (-> i64)
+  (ty-hash (load (cast (ptr Ty) slot))))
+(defn ty-keyeq [(ka (ptr i8)) (kb (ptr i8)) (n i64)] (-> bool)
+  (ty-eq (load (cast (ptr Ty) ka)) (load (cast (ptr Ty) kb))))
+(defn ty-keyops [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of ty-keyhash))
+    (store! (field o eq)   (fnptr-of ty-keyeq))
+    (store! (field o size) (sizeof Ty))
+    o))
+
+; ---------------------------------------------------------------------------
+; Interning, with duals installed in pairs
+; ---------------------------------------------------------------------------
+(defn ty-get [(t i64)] (-> Ty) (al-get (load (field (types) tab)) t))
+(defn ty-count [] (-> i64) (al-len [Ty] (load (field (types) tab))))
+
+(defn ty-push [(p (ptr Types)) (t Ty)] (-> i64)
+  (let [id (al-len [Ty] (load (field p tab)))]
+    (al-push! [Ty]  (field p tab)   t)
+    (al-push! [i64] (field p duals) TY-NO-ID)
+    ; the depth is recorded ONCE, here, because every member is already interned by now and so
+    ; already has a depth: computing it on demand instead would re-walk the whole subtree
+    (al-push! [i64] (field p depths) (ty-xdepth p t))
+    (hm-put! [Ty i64] (field p intern) t id)
+    id))
+
+;; Tuple nesting depth: 0 for anything that is not a tuple, and one more than its deepest member
+;; for one that is. A 0-tuple is depth 1: it is still a bracket the parser has to recurse into.
+(defn ty-depth [(t i64)] (-> i64) (al-get (load (field (types) depths)) t))
+
+(defn ty-xdepth [(p (ptr Types)) (t Ty)] (-> i64)
+  (match t
+    (TBot   [] 0) (TTop   [] 0) (TCtrl  [] 0) (TXCtrl [] 0) (TVal [v] 0)
+    ; A memory type's contents is restricted to TVal / TTop / TBot by `t-mem`, all of which have
+    ; depth 0, so a memory type can never contribute nesting the textual parser has to recurse
+    ; into. That restriction is the reason this is a literal 0 and not a lookup.
+    (TMem   [a c] 0)
+    (TTuple [off len]
+      (let [(mut i) 0 (mut d) 0]
+        (loop
+          (if (>= (load i) len) (break)
+            (do (let [dm (al-get (load (field p depths)) (ty-kid off (load i)))]
+                  (if (> dm (load d)) (store! d dm) 0))
+                (store! i (+ (load i) 1))
+                0)))
+        (+ (load d) 1)))))
+
+(defn ty-lookup [(p (ptr Types)) (t Ty)] (-> i64)
+  (match (hm-get (load (field p intern)) t) (Some [id] id) (None [] TY-NO-ID)))
+
+;; Intern a type and return its id. A type and its dual are installed together, so
+;; `ty-dual` is a table read rather than a computation, and `dual(dual(x)) == x` holds by
+;; construction instead of by luck.
+(defn ty-intern [(t Ty)] (-> i64)
+  (let [p (types) found (ty-lookup p t)]
+    (if (!= found TY-NO-ID) found
+      (let [id (ty-push p t)
+            d  (ty-xdual t)]
+        (if (ty-eq d t)
+            (al-set! [i64] (field p duals) id id)          ; self-dual: on the centreline
+          (let [did0 (ty-lookup p d)
+                did  (if (= did0 TY-NO-ID) (ty-push p d) did0)]
+            (al-set! [i64] (field p duals) id did)
+            (al-set! [i64] (field p duals) did id)))
+        id))))
+
+(defn ty-dual [(t i64)] (-> i64)
+  (al-get (load (field (types) duals)) t))
+
+;; The structural dual, used only while interning. Tuple members are already interned, so
+;; their duals are a table read and this does not recurse indefinitely.
+(defn ty-xdual [(t Ty)] (-> Ty)
+  (match t
+    (TBot   [] (TTop))
+    (TTop   [] (TBot))
+    (TCtrl  [] (TXCtrl))
+    (TXCtrl [] (TCtrl))
+    (TVal [v] (TVal (val-dual v)))
+    (TTuple [off len] (ty-tuple-of-duals off len))
+    ; both axes complement: the bitset by NOT, the contents through the dual table. `ty-dual` is a
+    ; table read and the contents is already interned, so this does not recurse indefinitely.
+    (TMem [a c] (TMem (bits-dual a -1) (ty-dual c)))))
+
+;; `ty-dual` is a table read and cannot intern, so this one could push directly and be correct.
+;; It reserves anyway: one way to build a member window means nobody has to re-derive which
+;; producers are safe, and "this one happens not to intern" is a property that changes silently.
+(defn ty-tuple-of-duals [(off i64) (len i64)] (-> Ty)
+  (let [b (ty-tuple-open len) (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (ty-tuple-put! b (load i) (ty-dual (ty-kid off (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (TTuple (tb-off b) (tb-len b))))
+
+; ============================================================================
+; meet / join / isa
+; ============================================================================
+(defn ty-meet [(a i64) (b i64)] (-> i64)
+  (if (= a b) a
+    (let [ta (ty-get a) tb (ty-get b)]
+      (match ta
+        (TBot   [] (t-bot))
+        (TTop   [] b)
+        (TCtrl  [] (ty-meet-ctrl b true))
+        (TXCtrl [] (ty-meet-ctrl b false))
+        (TVal [va] (match tb
+                     (TBot   [] (t-bot))
+                     (TTop   [] a)
+                     (TCtrl  [] (t-bot))
+                     (TXCtrl [] (t-bot))
+                     (TVal [vb] (ty-intern (TVal (val-meet va vb))))
+                     (TTuple [o l] (t-bot))
+                     (TMem [am cm] (t-bot))))
+        (TTuple [oa la] (match tb
+                          (TBot   [] (t-bot))
+                          (TTop   [] a)
+                          (TCtrl  [] (t-bot))
+                          (TXCtrl [] (t-bot))
+                          (TVal [v] (t-bot))
+                          (TMem [am cm] (t-bot))
+                          (TTuple [ob lb] (if (!= la lb) (t-bot)
+                                            (ty-meet-tuples oa ob la)))))
+        ;; A memory state mixed with a value, a control edge or a tuple is genuinely unrelated, so
+        ;; it falls to ALL exactly as those do among themselves. Memory against memory meets BOTH
+        ;; axes: the alias bitset by OR (the union of the classes described) and the contents by
+        ;; the ordinary meet. Nothing collapses; see the TMem note on `defsum Ty`.
+        (TMem [aa ca] (match tb
+                        (TBot   [] (t-bot))
+                        (TTop   [] a)
+                        (TCtrl  [] (t-bot))
+                        (TXCtrl [] (t-bot))
+                        (TVal [v] (t-bot))
+                        (TTuple [o l] (t-bot))
+                        (TMem [ab cb] (t-mem (bits-meet aa ab) (ty-meet ca cb)))))))))
+
+;; Control against anything: control meets control (reachable wins, since reachable is the
+;; low element), and control mixed with a value or a tuple is genuinely unrelated.
+(defn ty-meet-ctrl [(b i64) (a-reachable bool)] (-> i64)
+  (match (ty-get b)
+    (TBot   [] (t-bot))
+    (TTop   [] (if a-reachable (t-ctrl) (t-xctrl)))
+    (TCtrl  [] (t-ctrl))
+    (TXCtrl [] (if a-reachable (t-ctrl) (t-xctrl)))
+    (TVal [v]      (t-bot))
+    (TTuple [o l]  (t-bot))
+    (TMem [a c]    (t-bot))))
+
+;; `ty-meet` on a member INTERNS, and interning a tuple appends to the kid array. That is the
+;; whole reason the window is reserved first; see `ty-tuple-open` for what pushing instead did to
+;; a tuple of tuples.
+(defn ty-meet-tuples [(oa i64) (ob i64) (n i64)] (-> i64)
+  (let [b (ty-tuple-open n) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (ty-tuple-put! b (load i) (ty-meet (ty-kid oa (load i)) (ty-kid ob (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (ty-tuple-close b)))
+
+;; join(a,b) = ~(~a meet ~b). Defined, not implemented: the lattice has one primitive.
+(defn ty-join [(a i64) (b i64)] (-> i64)
+  (ty-dual (ty-meet (ty-dual a) (ty-dual b))))
+
+;; ORIENTATION. ANY (top) is "nothing is known yet, no value is possible"; ALL (bottom) is
+;; "any value at all". Analysis starts at ANY and FALLS toward ALL as it learns. So a more
+;; specific type is HIGHER, and `a isa b` means "a is at least as specific as b", i.e. a is
+;; at or above b. That makes `x isa ALL` true for every x and `ANY isa x` true for every x,
+;; which reads backwards until you hold the orientation in mind. It is Simple's convention
+;; and the tests pin it down explicitly.
+(defn ty-isa [(a i64) (b i64)] (-> bool) (= (ty-meet a b) b))
+
+;; "`new` is at or below `old`", which is the only direction an analysis is allowed to move a
+;; type. It is `isa` with its arguments named after the thing being asserted, because
+;; `(ty-isa old new)` reads backwards at the assertion site and an assertion nobody can read
+;; is an assertion that gets written the wrong way round. (M0 had three of those.)
+(defn ty-falls? [(old i64) (new i64)] (-> bool) (ty-isa old new))
+
+;; THE ABSENCE OF INFORMATION IS NOT INFORMATION, and this predicate is how the two are told
+;; apart. ANY is what an UNANALYSED node reports: `n-new` seeds every type to it and `n-in-ty`
+;; returns it for a missing input. Every OTHER high type is a claim someone computed. XCtrl
+;; says a control edge is dead, `~dyn` and `int=~[5..8]` say no value fits.
+;;
+;; `ty-high?` cannot make that distinction and must not be used for it. Five separate rewrites
+;; in node.coil were wrong because a producer minted a high answer out of an unanalysed input
+;; and the consumer read it as a proof.
+(defn ty-unanalysed? [(t i64)] (-> bool) (= t (t-top)))
+
+(defn ty-high? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TBot   [] false)
+    (TTop   [] true)
+    (TCtrl  [] false)
+    (TXCtrl [] true)
+    (TVal [v] (val-high? v))
+    (TTuple [o l] false)
+    ;; HIGH IS A QUESTION ABOUT EVERY AXIS, the same conjunctive form `val-high?` uses: a memory
+    ;; type is at the top of its sublattice exactly when the alias bitset is EMPTY (the top of a
+    ;; bitset axis) and the contents is itself high. `t-mem-none` is that element and its dual
+    ;; `t-mem-all` is the bottom; anything in between is neither.
+    ;;
+    ;; No `compute` consults this on a memory type in 4a, because no memory op exists yet. When
+    ;; 4b adds one, this is the predicate it will read, and the thing to check then is that
+    ;; answering `false` here for a partly-empty alias set does not make that compute RISE (the
+    ;; mistake `val-high?` documents at length).
+    (TMem [a c] (and (= a 0) (ty-high? c)))))
+
+(defn ty-const? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TBot   [] false)
+    (TTop   [] false)
+    (TCtrl  [] false)
+    (TXCtrl [] false)
+    (TVal [v] (val-const? v))
+    (TTuple [o l] false)
+    ; A memory state is never a constant, whatever its contents. `ty-const?` is what licenses
+    ; `n-peephole` to REPLACE a node with a Const, and there is no constant node whose runtime
+    ; value is a memory state; saying `true` here would put one in the graph.
+    (TMem [a c] false)))
+
+; ============================================================================
+; Well-known types
+; ============================================================================
+;; Seeded in a fixed order so the ids are stable, which is what makes printed IR and
+;; golden tests comparable across runs.
+(defn ty-seed [(p (ptr Types))] (-> i64)
+  (ty-intern (TBot))     ; 0, and TTop lands at 1 as its dual
+  (ty-intern (TCtrl))    ; 2, TXCtrl at 3
+  (t-dyn)                ; 4, ~dyn at 5
+  0)
+
+(defn t-bot   [] (-> i64) 0)
+(defn t-top   [] (-> i64) 1)
+(defn t-ctrl  [] (-> i64) 2)
+(defn t-xctrl [] (-> i64) 3)
+
+;; A value of a given kind set, with every refinement at the BOTTOM of its axis: the least
+;; type with those kinds. The int axis is fully widened, since this is already the widest
+;; integer range and cannot usefully widen further.
+(defn t-kinds [(kinds i64)] (-> i64)
+  (ty-intern (TVal (val-make kinds TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-LOW 0 -1 -1))))
+
+(defn t-dyn    [] (-> i64) (t-kinds VK-MASK))    ; any value at all
+(defn t-nodyn  [] (-> i64) (ty-dual (t-dyn)))    ; ~dyn: a value slot, but no value fits
+(defn t-num    [] (-> i64) (t-kinds VK-NUM))
+(defn t-int    [] (-> i64) (t-kinds VK-INT))
+(defn t-flt    [] (-> i64) (t-kinds VK-FLT))
+(defn t-str    [] (-> i64) (t-kinds VK-STR))
+(defn t-bool   [] (-> i64) (t-kinds VK-BOOL))
+(defn t-undef  [] (-> i64) (t-kinds VK-UNDEF))
+(defn t-null   [] (-> i64) (t-kinds VK-NULL))
+(defn t-obj    [] (-> i64) (t-kinds VK-OBJ))
+(defn t-fun    [] (-> i64) (t-kinds VK-FUN))
+
+;; A narrow value: refinements pinned on the named axis, every other axis at its bottom so
+;; that meeting with a wider type of the same kind behaves.
+(defn t-int-range [(lo i64) (hi i64)] (-> i64)
+  (ty-intern (TVal (val-make VK-INT lo hi 0 FSZ-LOW 0 -1 -1))))
+(defn t-int-con [(v i64)] (-> i64) (t-int-range v v))
+
+(defn t-bool-con [(b bool)] (-> i64)
+  (let [n (if b 1 0)]
+    (ty-intern (TVal (val-make VK-BOOL n n 0 FSZ-LOW 0 -1 -1)))))
+
+(defn t-flt-bits [(bits i64)] (-> i64)
+  (ty-intern (TVal (val-make VK-FLT TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-CON bits -1 -1))))
+(defn t-flt-con [(x f64)] (-> i64) (t-flt-bits (f64-bits x)))
+
+(defn t-fun-set [(fidxs i64)] (-> i64)
+  (ty-intern (TVal (val-make VK-FUN TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-LOW 0 fidxs -1))))
+(defn t-fun-con [(fidx i64)] (-> i64) (t-fun-set (<< 1 fidx)))
+
+(defn t-obj-shapes [(shapes i64)] (-> i64)
+  (ty-intern (TVal (val-make VK-OBJ TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-LOW 0 -1 shapes))))
+
+;; A single shape id, turned into a bit. THE BOUND IS CHECKED HERE because this is where a number
+;; becomes a bit: `(<< 1 64)` on this target is not "shape 64", it is 0, which is the EMPTY shape
+;; set, which is the top of that axis and means "no object fits". An unbounded caller would
+;; therefore hand an optimistic analysis a proof that live code is dead. See SHAPE-MAX.
+(defn t-obj-shape [(shape i64)] (-> i64)
+  (if (and (>= shape 0) (< shape SHAPE-MAX)) 0
+    (do (ty-panic "t-obj-shape: shape id is outside the value type's shape bitset (SHAPE-MAX)") 0))
+  (t-obj-shapes (<< 1 shape)))
+
+; ---------------------------------------------------------------------------
+; Memory types
+; ---------------------------------------------------------------------------
+;; THE CONTENTS IS RESTRICTED TO A VALUE, ANY OR ALL. Two reasons, and both are load-bearing:
+;; memory holds one NaN-boxed value per field (D3), so a memory state over a control edge or a
+;; tuple denotes nothing; and the restriction is what makes `ty-xdepth` able to answer 0 for a
+;; memory type without walking anything, which keeps the textual form's recursion budget a
+;; property of tuples alone.
+(defn ty-mem-contents-ok? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TVal [v] true) (TTop [] true) (TBot [] true)
+    (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false) (TMem [a c] false)))
+
+;; A memory state over an explicit alias bitset. The bitset is NOT bounds-checked: every one of
+;; the 64 bits is a legal alias class, so -1 (all of memory) is a legal argument and there is no
+;; out-of-range bitset. It is `t-mem-alias`, which turns an alias NUMBER into a bit, that has a
+;; bound to enforce.
+;; THE CONTENTS RESTRICTION IS ENFORCED HERE, which is what three other comments in this project
+;; already said it was: `ty-xdepth`'s literal 0 is justified by it, and `shape-transition` cites
+;; this function as the precedent for its own check. It was not actually checked, and the gap is
+;; not cosmetic. `store-compute` meets its value slot into the contents, a memory state is a value
+;; op by the numbering (`op-value?` is `>= OP-CONST`, and Store is 24), so a Store parked in
+;; another Store's value slot type-checked all the way through and minted `mem#1 mem#1 int`.
+;; Nesting is unbounded, `ty-depth` reports 0 at every level because of the restriction this
+;; function was supposed to guarantee, and `ty-print-exact` then aborts the process on a graph
+;; `g-verify` calls clean. A named panic at the mint site instead.
+(defn t-mem [(aliases i64) (contents i64)] (-> i64)
+  (if (ty-mem-contents-ok? contents) 0
+    (do (ty-panic "t-mem: a memory type's contents must be a value, ANY or ALL") 0))
+  (ty-intern (TMem aliases contents)))
+
+;; READING A VALUE SLOT THAT IS ABOUT TO BECOME A MEMORY STATE'S CONTENTS. The panic above is at
+;; the mint site, so a compute that feeds it has to stay TOTAL: `every_memory_compute_is_monotone_in_every_slot`
+;; sweeps every element of the lattice, memory types included, through `store-compute`'s value
+;; slot, and a panic there would kill the sweep rather than report anything.
+;;
+;; The conservative reading is the same one `ty-mem-contents` gives a non-memory type in a memory
+;; slot, and for the same reason: ANY means unanalysed and must stay ANY, and anything else in a
+;; value slot is a malformed graph whose honest description is ALL. It is monotone -- ANY maps to
+;; itself and every other unrepresentable type maps to the bottom, so a fall into one is a fall.
+(defn ty-as-mem-value [(t i64)] (-> i64)
+  (if (ty-mem-contents-ok? t) t (t-bot)))
+
+;; One alias class. See `t-obj-shape` for why the bound is here and not in the caller: `(<< 1 64)`
+;; is the EMPTY alias set, which is the top of the axis, so an unbounded caller would silently
+;; produce "this memory state describes nothing".
+(defn t-mem-alias [(alias i64) (contents i64)] (-> i64)
+  (if (and (>= alias 0) (< alias ALIAS-MAX)) 0
+    (do (ty-panic "t-mem-alias: alias number is outside the memory type's alias bitset (ALIAS-MAX)") 0))
+  (t-mem (<< 1 alias) contents))
+
+;; The two extremes of the memory sublattice, and they are each other's dual: `t-mem-none` has the
+;; empty alias set and ANY contents, which is the top (nothing is known and no memory state fits);
+;; `t-mem-all` has every alias and ALL contents, which is the bottom.
+(defn t-mem-none [] (-> i64) (t-mem 0 (t-top)))
+(defn t-mem-all  [] (-> i64) (t-mem -1 (t-bot)))
+
+;; READING A MEMORY TYPE FROM OUTSIDE THIS FILE. `Ty` is a sum and matching on it is exhaustive,
+;; so every consumer that only cares about the memory production would otherwise carry six arms
+;; it does not mean; these three name the answer once. `n-compute` for `Load`, `Store` and
+;; `MemMerge` is written in terms of them.
+;;
+;; THE ANSWER FOR A NON-MEMORY TYPE IS THE CONSERVATIVE ONE, NOT AN ERROR, and the split between
+;; ANY and everything else is the same distinction `ty-unanalysed?` exists for. A slot that has
+;; not been analysed yet reports ANY, and its contents must read as "nothing is known" (the top)
+;; or a compute reading it would RISE the moment the real memory type arrived. Anything else in a
+;; memory slot is a malformed graph, and the honest description of a memory state that could be
+;; anything at all is ALL contents over EVERY alias, which is the bottom: a compute built on it
+;; concludes nothing, which is what a verifier is for.
+(defn ty-mem? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TMem [a c] true)
+    (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+    (TVal [v] false) (TTuple [o l] false)))
+
+(defn ty-mem-aliases [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TMem [a c] a)
+    (TTop [] 0)                                  ; unanalysed: no alias is claimed yet
+    (TBot [] -1) (TCtrl [] -1) (TXCtrl [] -1)    ; not a memory state: assume all of memory
+    (TVal [v] -1) (TTuple [o l] -1)))
+
+(defn ty-mem-contents [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TMem [a c] c)
+    (TTop [] (t-top))
+    (TBot [] (t-bot)) (TCtrl [] (t-bot)) (TXCtrl [] (t-bot))
+    (TVal [v] (t-bot)) (TTuple [o l] (t-bot))))
+
+;; THE KIND SET OF A TYPE, on the same convention: ANY claims no kind (the top of the axis) and
+;; everything that is not a value claims every kind, which is the reading that keeps a consumer
+;; from concluding something from a kind's absence and then rising when the real type arrives.
+(defn ty-kinds [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (val-kinds v))
+    (TTop [] VK-NONE) (TXCtrl [] VK-NONE)
+    (TBot [] VK-MASK) (TCtrl [] VK-MASK) (TTuple [o l] VK-MASK) (TMem [a c] VK-MASK)))
+
+;; IS EVERY VALUE OF THIS TYPE A MANAGED REFERENCE. R1 (D2) says an interior or derived pointer is
+;; never a first-class IR value, and this is the predicate that makes that checkable.
+;;
+;; "OBJECT AND NOTHING ELSE", not "could be an object", and the difference is the whole strength of
+;; the check. `arith-compute` types `o + 8` as plain `dyn`, and `dyn` includes VK-OBJ, so the
+;; weaker form accepts an address computed by arithmetic -- which is exactly the value R1 exists to
+;; keep out of the graph. It also puts the obligation where D4 already puts every other narrowing:
+;; when M5 gives a `dyn` value objects, a memory access through it needs a Cast to refine it first,
+;; and the Cast is ordinary control flow's value side rather than a new mechanism. See D13.
+(defn ty-only-obj? [(t i64)] (-> bool)
+  (let [k (ty-kinds t)]
+    (and (!= (& k VK-OBJ) 0) (= (& k (bits-dual VK-OBJ VK-MASK)) 0))))
+
+;; THE SHAPE SET OF A POINTER, read from outside this file for the same reason the three memory
+;; readers above exist: `load-compute` asks which objects a pointer can be, and the alternative is
+;; a seven-arm `match` in node.coil that means one thing.
+;;
+;; The answers off the TVal arm follow the same convention as `ty-mem-aliases`: ANY is unanalysed
+;; and claims NO shape (the empty set is the top of a bitset axis), and everything else claims
+;; EVERY shape, which is the conservative reading of a type that cannot describe an object at all.
+;; It has to be that way round or a consumer would RISE: the set only grows as a type falls, so a
+;; consumer that concludes something from a shape being absent stays sound as the set fills in.
+(defn ty-shapes [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (val-shapes v))
+    (TTop [] 0) (TXCtrl [] 0)                    ; high: no object is here yet
+    (TBot [] -1) (TCtrl [] -1) (TTuple [o l] -1) (TMem [a c] -1)))
+
+(defn t-tuple2 [(a i64) (b i64)] (-> i64)
+  (let [tb (ty-tuple-open 2)]
+    (ty-tuple-put! tb 0 a)
+    (ty-tuple-put! tb 1 b)
+    (ty-tuple-close tb)))
+
+(defn t-tuple3 [(a i64) (b i64) (c i64)] (-> i64)
+  (let [tb (ty-tuple-open 3)]
+    (ty-tuple-put! tb 0 a)
+    (ty-tuple-put! tb 1 b)
+    (ty-tuple-put! tb 2 c)
+    (ty-tuple-close tb)))
+
+;; A 1-tuple and a 0-tuple. Nothing in the IR builds either yet, but `t-tuple-list` can mint both,
+;; and they are the arities the hand-written builders never reach: the 1-tuple is where a member
+;; separator and a refinement separator look most alike to a reader, and the 0-tuple is the only
+;; tuple with no members to compare. They exist so `ty-sample` can carry them and every lattice law
+;; is checked on them.
+(defn t-tuple1 [(a i64)] (-> i64)
+  (let [tb (ty-tuple-open 1)] (ty-tuple-put! tb 0 a) (ty-tuple-close tb)))
+
+(defn t-tuple0 [] (-> i64) (ty-tuple-close (ty-tuple-open 0)))
+
+;; A tuple of arbitrary arity from a list of member ids. `t-tuple2`/`t-tuple3` cover everything
+;; the IR builds by hand; the textual parser needs whatever arity the text says, and M6's `Start`
+;; will want one output per parameter.
+(defn t-tuple-list [(members (slice i64))] (-> i64)
+  (let [n  (slice-len members)
+        tb (ty-tuple-open n)
+        (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (ty-tuple-put! tb (load i) (slice-get members (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    (ty-tuple-close tb)))
+
+; ---------------------------------------------------------------------------
+; Widening: how an interval axis is forced to converge
+; ---------------------------------------------------------------------------
+;; Bump the widening counter; once it is spent, fall to the bottom of the int axis. A loop
+;; induction variable's range would otherwise creep upward forever and the optimistic pass
+;; would not terminate.
+;; How much widening fuel this type has already spent.
+;;
+;; A MEMORY TYPE MUST CARRY ITS CONTENTS' FUEL, and this is the cheap version of a bug that is
+;; otherwise very expensive. These three functions used to answer 0 / return `t` for every
+;; non-TVal. 4b's memory Phi on a loop back edge meets a fresh memory type every iteration; if the
+;; counter inside it is invisible then no widening ever lands, the interval creeps by one step per
+;; round for ever, and the symptom is a HANG inside a loop-phi fixpoint with nothing reported.
+;; Delegating into the contents costs three arms and is checked by "every ascending chain
+;; terminates" on a sample that now contains memory types.
+(defn ty-iwide [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (val-iwide v))
+    (TMem [a c] (ty-iwide c))
+    (TBot   [] TY-WIDEN-MAX)     ; already at the bottom; no fuel left to spend
+    (TTop   [] 0) (TCtrl [] 0) (TXCtrl [] 0) (TTuple [o l] 0)))
+
+(defn ty-with-iwide [(t i64) (w i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (ty-intern (TVal (val-make (val-kinds v) (val-ilo v) (val-ihi v) w
+                                         (val-fsz v) (val-fbits v)
+                                         (val-fidxs v) (val-shapes v)))))
+    (TMem [a c] (t-mem a (ty-with-iwide c w)))
+    (TBot [] t) (TTop [] t) (TCtrl [] t) (TXCtrl [] t) (TTuple [o l] t)))
+
+;; The type this becomes once its fuel is spent: the bottom of the interval axis, kinds kept. It is
+;; its own function because `ty-widen` and `ty-widen-from` both need it and a memory type has to
+;; reach its contents in exactly the same way in both. Recursion terminates because a memory type's
+;; contents can only be TVal / TTop / TBot.
+(defn ty-widen-spent [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (t-kinds (val-kinds v)))
+    (TMem [a c] (t-mem a (ty-widen-spent c)))
+    (TBot [] t) (TTop [] t) (TCtrl [] t) (TXCtrl [] t) (TTuple [o l] t)))
+
+;; Widen `t`, taking the fuel already spent from `prev` rather than from `t` itself.
+;;
+;; This distinction is the whole difference between terminating and not. A loop phi's new type is
+;; the meet of its incoming paths, and integer arithmetic MINTS A FRESH TYPE: `t-int-range` sets
+;; the counter to 0. So a phi that reads its fuel out of that meet is handed a full tank on every
+;; trip, one widening step never accumulates into the next, and the range creeps by one step per
+;; round for ever. The fuel has to come from the phi's own previous type, which is the only place
+;; that remembers how many times it has already widened.
+(defn ty-widen-from [(prev i64) (t i64)] (-> i64)
+  (let [w (imax2 (ty-iwide prev) (ty-iwide t))]
+    (if (>= w TY-WIDEN-MAX) (ty-widen-spent t)
+      (ty-with-iwide t (+ w 1)))))
+
+(defn ty-widen [(t i64)] (-> i64)
+  (let [w0 (ty-iwide t)
+        ; A negative counter only ever arises as the image of `dual`. Widening is there to bound a
+        ; FALLING sequence, so entering from the negative side jumps straight into the positive
+        ; range; otherwise the bound would be 2*TY-WIDEN-MAX+1 steps instead of TY-WIDEN-MAX.
+        w  (if (< w0 0) 0 w0)]
+    (if (>= w TY-WIDEN-MAX) (ty-widen-spent t)
+      (ty-with-iwide t (+ w 1)))))
+
+; ============================================================================
+; f64 <-> bits
+; ============================================================================
+;; A numeric `cast` between f64 and i64 converts the VALUE; a bit pattern needs a round
+;; trip through memory, which LLVM folds to a register move.
+(defn f64-bits [(x f64)] (-> i64)
+  (let [p (alloc-stack f64)] (store! p x) (load (cast (ptr i64) p))))
+(defn bits-f64 [(b i64)] (-> f64)
+  (let [p (alloc-stack i64)] (store! p b) (load (cast (ptr f64) p))))
+
+; ============================================================================
+; Printing
+; ============================================================================
+;; `print-str` and `fmt` return `(Result i64 IoError)`. A failed write to a debug stream is
+;; not worth infecting every printer's signature with, so it is discarded, but through a
+;; named helper so the discard is deliberate and greppable rather than accidental.
+(defn ps [(w (ptr Writer)) (s (slice u8))] (-> i64) (print-str w s) 0)
+
+;; A signed decimal over the WHOLE i64 range. `fmt`'s `{d}` renders INT64_MIN as "-0", which is
+;; cosmetic in a debug dump and a correctness bug in src/text.coil's exact form, where a bitset
+;; of exactly bit 63 (`t-fun-con 63`) would decode back as 0. One writer, so the two printers
+;; cannot disagree about a number.
+;;
+;; The magnitude of INT64_MIN has no signed form, so it is carried as the wrapped bit pattern and
+;; divided with the UNSIGNED ops, which is exactly the right answer for every other magnitude
+;; too.
+(defn dec-print [(w (ptr Writer)) (n i64)] (-> i64)
+  (let [buf (alloc-stack (array u8 24))
+        neg (< n 0)
+        (mut k) 24
+        (mut m) (if neg (- 0 n) n)]
+    (if (= n 0)
+        (do (store! k 23) (store! (index buf 23) (cast u8 48)) 0)   ; 48 = '0'
+      (do (loop
+            (if (= (load m) 0) (break)
+              (do (store! k (- (load k) 1))
+                  (store! (index buf (load k)) (cast u8 (+ 48 (urem (load m) 10))))
+                  (store! m (udiv (load m) 10))
+                  0)))
+          0))
+    (if neg (ps w "-") 0)
+    (print-str w (slice-new [u8] (cast (ptr u8) (index buf (load k))) (- 24 (load k))))
+    0))
+
+;; THIS PRINTER IS THE HUMAN AND DIAGRAM FORM, AND IT IS LOSSY. It consults a refinement's KIND
+;; BIT before printing it, so a float constant carried by a type whose `flt` bit is off, a
+;; pinned interval on a type whose `int` bit is off, and an unspent widening counter are all
+;; invisible here. Two distinct interned types can therefore print the same string, which is
+;; right for a label on a graph and wrong for anything that has to decode.
+;;
+;; The exact, round-trippable form is `ty-print-exact` in src/text.coil, which decides every
+;; axis by field value. Nothing that has to be read back should use this one.
+(defn ty-print [(w (ptr Writer)) (t i64)] (-> i64)
+  (match (ty-get t)
+    (TBot   [] (ps w "ALL"))
+    (TTop   [] (ps w "ANY"))
+    (TCtrl  [] (ps w "ctrl"))
+    (TXCtrl [] (ps w "~ctrl"))
+    (TVal [v] (val-print w v))
+    (TTuple [off len] (tuple-print w off len))
+    (TMem [a c] (mem-print w a c))))
+
+;; `mem#<alias-bits> <contents>`, with the bitset written as a SIGNED decimal exactly as the
+;; function-pointer axis writes `#-1` for the full set.
+;;
+;; THE FORM CONTAINS NEITHER `:` NOR `<`, and that is a hard constraint rather than a taste. A
+;; graph line in src/gtext.coil is split by scanning for the first `<` after the head and the
+;; first `:` after ` <- `, so a type whose text carried either would make every graph line
+;; carrying memory report GERR-NO-SEP or GERR-NO-ARROW. `mem@2` and `mem<2>` were both rejected
+;; for that reason; `#` is already the bitset sigil in this format. A gate asserts the constraint
+;; byte-wise, because a comment is one refactor away from being untrue.
+;;
+;; The space is safe in every context the form appears in: tuple members are comma-separated, a
+;; value's refinement labels are a closed set that `mem` is not in, and the graph line's type field
+;; runs to the end of the line.
+(defn mem-print [(w (ptr Writer)) (aliases i64) (contents i64)] (-> i64)
+  (ps w "mem#")
+  (dec-print w aliases)
+  (ps w " ")
+  (ty-print w contents))
+
+(defn tuple-print [(w (ptr Writer)) (off i64) (len i64)] (-> i64)
+  (ps w "[")
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (if (> (load i) 0) (ps w " ") 0)
+            (ty-print w (ty-kid off (load i)))
+            (store! i (+ (load i) 1))
+            0))))
+  (ps w "]"))
+
+;; A value prints as its kinds, then each pinned refinement.
+;;
+;; Two display conventions, both borrowed from how the lattice is normally drawn. A kind set
+;; with most kinds present is almost always the dual of a small one, so it shows as `~` plus
+;; the complement (`~int` rather than nine names). And when the set is a single kind, the
+;; refinement is written compactly against it (`int=0`, `flt=3.5`) instead of being labelled.
+(defn val-print [(w (ptr Writer)) (v Val)] (-> i64)
+  (let [k (val-kinds v)
+        n (popcount64 k)]
+    (if (= k VK-NONE) (ps w "~dyn")
+      (if (= k VK-MASK) (ps w "dyn")
+        (do (if (> n 5)
+                (do (ps w "~") (kinds-print w (bits-dual k VK-MASK)))
+              (kinds-print w k))
+            (refinements-print w v (= n 1))
+            0)))))
+
+;; `solo` means the kind set is a single kind, so the refinement needs no label.
+(defn refinements-print [(w (ptr Writer)) (v Val) (solo bool)] (-> i64)
+  (let [k (val-kinds v)]
+    ; bool constants ride on the int axis, so both kinds read it
+    (if (and (!= (& k (| VK-INT VK-BOOL)) 0) (!= (val-iwide v) TY-WIDEN-MAX))
+        (do (if solo 0 (ps w " int"))
+            (int-range-print w (val-ilo v) (val-ihi v)))
+      0)
+    (if (and (!= (& k VK-FLT) 0) (= (val-fsz v) FSZ-CON))
+        (do (if solo 0 (ps w " flt"))
+            (ps w "=")
+            (fmt w "{f}" (bits-f64 (val-fbits v)))
+            0)
+      0)
+    (if (and (!= (& k VK-FUN) 0) (!= (val-fidxs v) -1))
+        (do (if solo 0 (ps w " fun")) (fmt w "#{d}" (val-fidxs v)) 0)
+      0)
+    (if (and (!= (& k VK-OBJ) 0) (!= (val-shapes v) -1))
+        (do (if solo 0 (ps w " obj")) (fmt w "@{d}" (val-shapes v)) 0)
+      0)
+    0))
+
+;; The axis extremes print as names, not as their digits, because eighteen digits of INT64_MIN
+;; in every unrefined range is noise. Everything else goes through `dec-print`; `{d}` would be
+;; correct for every value that reaches it here (the extremes are already named) but relying on
+;; that is one edit away from being wrong.
+;;
+;; src/text.coil's exact form reuses this and `int-range-print`, so the int axis has ONE spelling
+;; in the project and the debug and exact printers cannot drift on it.
+(defn ibound-print [(w (ptr Writer)) (n i64)] (-> i64)
+  (if (= n TY-IMIN) (ps w "min")
+    (if (= n TY-IMAX) (ps w "max")
+      (dec-print w n))))
+
+(defn int-range-print [(w (ptr Writer)) (lo i64) (hi i64)] (-> i64)
+  (if (= lo hi) (do (ps w "=") (ibound-print w lo))
+    (do (ps w (if (> lo hi) "=~[" "=["))
+        (ibound-print w (if (> lo hi) hi lo))
+        (ps w "..")
+        (ibound-print w (if (> lo hi) lo hi))
+        (ps w "]"))))
+
+(defn kind-name [(bit i64)] (-> (slice u8))
+  (if (= bit VK-UNDEF) "undefined"
+    (if (= bit VK-NULL) "null"
+      (if (= bit VK-BOOL) "bool"
+        (if (= bit VK-INT) "int"
+          (if (= bit VK-FLT) "flt"
+            (if (= bit VK-STR) "str"
+              (if (= bit VK-SYM) "sym"
+                (if (= bit VK-BIG) "bigint"
+                  (if (= bit VK-OBJ) "obj"
+                    (if (= bit VK-FUN) "fun" "?")))))))))))
+
+(defn kinds-print [(w (ptr Writer)) (k i64)] (-> i64)
+  (if (= (& k VK-NUM) VK-NUM)
+      ; int|flt together is the source language's `number`; print it that way
+      (do (ps w "num")
+          (if (!= (& k (^ VK-NUM -1)) 0)
+              (do (ps w "|") (kinds-print-bits w (& k (^ VK-NUM -1)) 0))
+            0)
+          0)
+    (kinds-print-bits w k 0)))
+
+(defn kinds-print-bits [(w (ptr Writer)) (k i64) (first-done i64)] (-> i64)
+  (let [(mut bit) 1 (mut done) first-done]
+    (loop
+      (if (> (load bit) VK-FUN) (break)
+        (do (if (!= (& k (load bit)) 0)
+                (do (if (> (load done) 0) (ps w "|") 0)
+                    (ps w (kind-name (load bit)))
+                    (store! done (+ (load done) 1))
+                    0)
+              0)
+            (store! bit (<< (load bit) 1))
+            0)))
+    (load done)))
+
+; ============================================================================
+; A sample of the lattice, for property tests
+; ============================================================================
+;; Property tests need a set of types that exercises every axis at its top, centreline and
+;; bottom, plus duals and composites. `ty-sample-count` and `ty-sample` are that set. The
+;; laws are then checked over every pair and a spread of triples.
+(defn ty-sample-count [] (-> i64) 41)
+
+(defn ty-sample [(i i64)] (-> i64)
+  (case i
+    0  (t-bot)
+    1  (t-top)
+    2  (t-ctrl)
+    3  (t-xctrl)
+    4  (t-dyn)
+    5  (t-nodyn)
+    6  (t-num)
+    7  (t-int)
+    8  (t-flt)
+    9  (t-str)
+    10 (t-bool)
+    11 (t-undef)
+    12 (t-null)
+    13 (t-obj)
+    14 (t-fun)
+    15 (t-int-con 0)
+    16 (t-int-con 1)
+    17 (t-int-con -7)
+    18 (t-int-range 0 10)
+    19 (t-int-range -5 5)
+    20 (t-bool-con true)
+    21 (t-bool-con false)
+    22 (t-flt-con 0.0)
+    23 (t-flt-con 3.5)
+    24 (t-fun-con 3)
+    25 (t-obj-shape 2)
+    26 (t-tuple2 (t-ctrl) (t-int))
+    27 (t-tuple2 (t-ctrl) (t-dyn))
+    ; A TUPLE WHOSE MEMBER IS A TUPLE. 28 and 29 differ only in an INNER member, which is the exact
+    ; shape that broke `meet`: computing the inner member's meet INTERNS, and interning a tuple
+    ; appends to the same kid array the outer member window lives in, so a producer that pushed as
+    ; it went ended up describing the inner tuple. `meet` stopped being a lower bound and the whole
+    ; suite stayed green, because until now no tuple in the sample set had a tuple member.
+    28 (t-tuple2 (t-tuple2 (t-ctrl) (t-int)) (t-flt))
+    29 (t-tuple2 (t-tuple2 (t-ctrl) (t-dyn)) (t-flt))
+    ; the two arities `t-tuple-list` can mint and no hand-written builder produces
+    30 (t-tuple1 (t-ctrl))
+    31 (t-tuple0)
+    ;; MEMORY TYPES, AND THE SAMPLE ENTRIES ARE HALF OF THE ALIAS-BITSET DECISION. Adopting
+    ;; Simple's `alias == that._alias ? alias : 1` collapse and leaving memory out of this list is
+    ;; the exact shape of the M3 finding: `meet` stopped being a lower bound and every law stayed
+    ;; green because no tuple in the sample had a tuple member. 34/35 are the two single-alias
+    ;; slices whose meet the collapse rule gets wrong, 36 is that meet, and every one of them goes
+    ;; through all nine law tests and their duals.
+    32 (t-mem-none)                            ; the memory sublattice's top
+    33 (t-mem-all)                             ; and its bottom
+    34 (t-mem-alias 0 (t-dyn))                 ; one alias class
+    35 (t-mem-alias 1 (t-dyn))                 ; a DIFFERENT one alias class
+    36 (t-mem 3 (t-dyn))                       ; their meet: two alias classes
+    37 (t-mem -1 (t-dyn))                      ; all of memory, contents unrefined
+    38 (t-mem-alias 0 (t-int-con 7))           ; a slice whose contents is pinned to a constant
+    ; A TUPLE WITH A MEMORY MEMBER: 4b's `New` produces exactly this shape (control, then the
+    ; memory it initialised), so the composite has to be under the laws before the node exists.
+    39 (t-tuple2 (t-ctrl) (t-mem-alias 0 (t-dyn)))
+    ; A TWO-SHAPE OBJECT TYPE, which is what a shape-polymorphic site keeps instead of collapsing
+    ; to a dictionary lookup. Shapes 1 and 2 rather than 0 and 1, so it is not a prefix of entry 25.
+    40 (t-obj-shapes 6)
+    (t-bot)))
+
+;; Duals of the sample are themselves interesting inputs; this doubles the set without
+;; hand-listing high types, which are the easiest ones to get wrong.
+(defn ty-sample-dual [(i i64)] (-> i64) (ty-dual (ty-sample i)))

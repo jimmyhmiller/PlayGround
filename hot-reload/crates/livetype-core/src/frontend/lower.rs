@@ -5,8 +5,8 @@
 
 use super::ast::*;
 use crate::{
-    DefId, Field, FieldId, ForeignFnId, ForeignKind, Function, Instruction, Schema, Type, Value,
-    Variant, VariantId, Version, strings,
+    DefId, Field, FieldId, ForeignFnId, ForeignKind, Function, Instruction, Schema, Type, Value, Variant, VariantId,
+    Version, strings,
 };
 use std::collections::HashMap;
 
@@ -197,11 +197,19 @@ pub struct GlobalInit {
     pub init_fn: DefId,
 }
 
+pub struct MigrationRecipe {
+    pub type_id: DefId,
+    pub field_id: FieldId,
+    pub binding: String,
+    pub body: Vec<Stmt>,
+}
+
 /// The result of lowering one program (or one live edit).
 pub struct Lowered {
     pub schemas: Vec<Schema>,
     pub functions: Vec<Function>,
     pub global_inits: Vec<GlobalInit>,
+    pub migrations: Vec<MigrationRecipe>,
 }
 
 pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
@@ -234,6 +242,14 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
         .iter()
         .filter_map(|i| match i {
             Item::Global(g) => Some(g),
+            _ => None,
+        })
+        .collect();
+    let migration_defs: Vec<&MigrationDef> = program
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Migration(m) => Some(m),
             _ => None,
         })
         .collect();
@@ -342,11 +358,7 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
     // Register function signatures (so calls — including recursion — resolve).
     for f in &fns {
         let id = ids.fn_id(&f.name);
-        let params: Vec<Type> = f
-            .params
-            .iter()
-            .map(|p| resolve(&p.ty, ids))
-            .collect::<Result<_, _>>()?;
+        let params: Vec<Type> = f.params.iter().map(|p| resolve(&p.ty, ids)).collect::<Result<_, _>>()?;
         let result = resolve(&f.ret, ids)?;
         ids.fn_sigs.insert(id, (params, result));
     }
@@ -375,10 +387,59 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
         functions.push(lower_fn(f, ids)?);
     }
 
+    let mut migrations = Vec::new();
+    for m in migration_defs {
+        let type_id = ids
+            .struct_of(&m.struct_name)
+            .ok_or_else(|| format!("unknown type `{}` in migration", m.struct_name))?;
+        let field_id = ids
+            .field_ids
+            .get(&(type_id, m.field_name.clone()))
+            .copied()
+            .ok_or_else(|| format!("unknown field `{}.{}` in migration", m.struct_name, m.field_name))?;
+        migrations.push(MigrationRecipe {
+            type_id,
+            field_id,
+            binding: m.binding.clone(),
+            body: m.body.clone(),
+        });
+    }
+
     Ok(Lowered {
         schemas,
         functions,
         global_inits,
+        migrations,
+    })
+}
+
+pub fn lower_migration(
+    recipe: &MigrationRecipe,
+    input: Type,
+    result: Type,
+    ids: &IdEnv,
+) -> Result<Function, String> {
+    let mut lo = Lower {
+        ids,
+        code: Vec::new(),
+        labels: Vec::new(),
+        next_reg: 0,
+        scopes: vec![HashMap::new()],
+    };
+    let input_reg = lo.fresh_reg();
+    lo.bind(&recipe.binding, input_reg, input.clone());
+    for statement in &recipe.body {
+        lo.stmt(statement)?;
+    }
+    lo.patch_labels()?;
+    Ok(Function {
+        id: u64::MAX - recipe.field_id,
+        version: Version(1),
+        name: format!("<migration:{}>", recipe.field_id),
+        params: vec![input],
+        result,
+        registers: lo.next_reg,
+        code: lo.code,
     })
 }
 
@@ -464,7 +525,10 @@ fn lower_fn(f: &FnDef, ids: &IdEnv) -> Result<Function, String> {
     // verifier reports against the offending instruction.
     if result == Type::Unit && !matches!(lo.code.last(), Some(Instruction::Return { .. })) {
         let r = lo.fresh_reg();
-        lo.code.push(Instruction::Const { dst: r, value: Value::Unit });
+        lo.code.push(Instruction::Const {
+            dst: r,
+            value: Value::Unit,
+        });
         lo.code.push(Instruction::Return { value: r });
     }
     lo.patch_labels()?;
@@ -533,8 +597,7 @@ impl<'a> Lower<'a> {
                 };
                 // An empty array literal is the one expression whose type only
                 // an annotation can pin.
-                let inferred = if let (Expr::ArrayLit(items), Some(Type::Array(elem))) =
-                    (value, &annotated)
+                let inferred = if let (Expr::ArrayLit(items), Some(Type::Array(elem))) = (value, &annotated)
                     && items.is_empty()
                 {
                     self.code.push(Instruction::NewArray {
@@ -596,7 +659,11 @@ impl<'a> Lower<'a> {
                 };
                 let (i, _) = self.expr(index)?;
                 let (v, _) = self.expr(value)?;
-                self.code.push(Instruction::IndexSet { array: a, index: i, value: v });
+                self.code.push(Instruction::IndexSet {
+                    array: a,
+                    index: i,
+                    value: v,
+                });
             }
             Stmt::Match { scrutinee, arms } => {
                 let (obj, ty) = self.expr(scrutinee)?;
@@ -616,9 +683,7 @@ impl<'a> Lower<'a> {
                     let (_, vid, vfields) = layout
                         .iter()
                         .find(|(n, _, _)| *n == arm.variant)
-                        .ok_or_else(|| {
-                            format!("enum has no variant `{}`", arm.variant)
-                        })?;
+                        .ok_or_else(|| format!("enum has no variant `{}`", arm.variant))?;
                     let label = self.new_label();
                     case_arms.push((*vid, label));
                     labelled.push((arm, label, vfields.clone()));
@@ -634,12 +699,7 @@ impl<'a> Lower<'a> {
                             let (_, fid, fty) = vfields
                                 .iter()
                                 .find(|(n, _, _)| n == binding)
-                                .ok_or_else(|| {
-                                    format!(
-                                        "variant `{}` has no field `{binding}`",
-                                        arm.variant
-                                    )
-                                })?;
+                                .ok_or_else(|| format!("variant `{}` has no field `{binding}`", arm.variant))?;
                             let dst = lo.fresh_reg();
                             lo.code.push(Instruction::GetField {
                                 dst,
@@ -707,7 +767,10 @@ impl<'a> Lower<'a> {
                 // name itself, so it late-binds to the current version.
                 let (params, result) = self.ids.fn_sigs[&fid].clone();
                 let dst = self.fresh_reg();
-                self.code.push(Instruction::Const { dst, value: Value::FnRef(fid) });
+                self.code.push(Instruction::Const {
+                    dst,
+                    value: Value::FnRef(fid),
+                });
                 return Ok((dst, Type::Fn(params, Box::new(result))));
             }
             return Err(format!("unknown variable `{name}`"));
@@ -720,11 +783,17 @@ impl<'a> Lower<'a> {
     fn expr_into(&mut self, e: &Expr, dst: usize) -> Result<Type, String> {
         Ok(match e {
             Expr::Int(n) => {
-                self.code.push(Instruction::Const { dst, value: Value::I64(*n) });
+                self.code.push(Instruction::Const {
+                    dst,
+                    value: Value::I64(*n),
+                });
                 Type::I64
             }
             Expr::Float(x) => {
-                self.code.push(Instruction::Const { dst, value: Value::F64(*x) });
+                self.code.push(Instruction::Const {
+                    dst,
+                    value: Value::F64(*x),
+                });
                 Type::F64
             }
             Expr::Str(text) => {
@@ -740,13 +809,27 @@ impl<'a> Lower<'a> {
                 let zero = self.fresh_reg();
                 match ty {
                     Type::F64 => {
-                        self.code.push(Instruction::Const { dst: zero, value: Value::F64(0.0) });
-                        self.code.push(Instruction::SubF64 { dst, left: zero, right: r });
+                        self.code.push(Instruction::Const {
+                            dst: zero,
+                            value: Value::F64(0.0),
+                        });
+                        self.code.push(Instruction::SubF64 {
+                            dst,
+                            left: zero,
+                            right: r,
+                        });
                         Type::F64
                     }
                     _ => {
-                        self.code.push(Instruction::Const { dst: zero, value: Value::I64(0) });
-                        self.code.push(Instruction::SubI64 { dst, left: zero, right: r });
+                        self.code.push(Instruction::Const {
+                            dst: zero,
+                            value: Value::I64(0),
+                        });
+                        self.code.push(Instruction::SubI64 {
+                            dst,
+                            left: zero,
+                            right: r,
+                        });
                         Type::I64
                     }
                 }
@@ -754,8 +837,7 @@ impl<'a> Lower<'a> {
             Expr::ArrayLit(items) => {
                 if items.is_empty() {
                     return Err(
-                        "cannot infer the element type of `[]` — annotate the let (`let xs: [T] = [];`)"
-                            .into(),
+                        "cannot infer the element type of `[]` — annotate the let (`let xs: [T] = [];`)".into(),
                     );
                 }
                 let mut regs = Vec::new();
@@ -765,9 +847,7 @@ impl<'a> Lower<'a> {
                     if let Some(elem) = &elem
                         && *elem != ty
                     {
-                        return Err(format!(
-                            "array items disagree: {elem:?} vs {ty:?}"
-                        ));
+                        return Err(format!("array items disagree: {elem:?} vs {ty:?}"));
                     }
                     elem.get_or_insert(ty);
                     regs.push(r);
@@ -786,7 +866,11 @@ impl<'a> Lower<'a> {
                     return Err("indexing needs an array".into());
                 };
                 let (i, _) = self.expr(index)?;
-                self.code.push(Instruction::IndexGet { dst, array: a, index: i });
+                self.code.push(Instruction::IndexGet {
+                    dst,
+                    array: a,
+                    index: i,
+                });
                 *elem
             }
             Expr::Match { scrutinee, arms } => {
@@ -812,7 +896,10 @@ impl<'a> Lower<'a> {
                     case_arms.push((*vid, label));
                     labelled.push((arm, label, vfields.clone()));
                 }
-                self.code.push(Instruction::CaseVariant { object: obj, arms: case_arms });
+                self.code.push(Instruction::CaseVariant {
+                    object: obj,
+                    arms: case_arms,
+                });
                 let mut result: Option<Type> = None;
                 for (arm, label, vfields) in labelled {
                     self.place(label);
@@ -821,9 +908,7 @@ impl<'a> Lower<'a> {
                             let (_, fid, fty) = vfields
                                 .iter()
                                 .find(|(n, _, _)| n == binding)
-                                .ok_or_else(|| {
-                                    format!("variant `{}` has no field `{binding}`", arm.variant)
-                                })?;
+                                .ok_or_else(|| format!("variant `{}` has no field `{binding}`", arm.variant))?;
                             let breg = lo.fresh_reg();
                             lo.code.push(Instruction::GetField {
                                 dst: breg,
@@ -837,9 +922,7 @@ impl<'a> Lower<'a> {
                     if let Some(result) = &result
                         && *result != arm_ty
                     {
-                        return Err(format!(
-                            "match arms disagree: {result:?} vs {arm_ty:?}"
-                        ));
+                        return Err(format!("match arms disagree: {result:?} vs {arm_ty:?}"));
                     }
                     result.get_or_insert(arm_ty);
                     self.code.push(Instruction::Jump { target: end_l });
@@ -848,11 +931,17 @@ impl<'a> Lower<'a> {
                 result.ok_or("a match expression needs at least one arm")?
             }
             Expr::Bool(b) => {
-                self.code.push(Instruction::Const { dst, value: Value::Bool(*b) });
+                self.code.push(Instruction::Const {
+                    dst,
+                    value: Value::Bool(*b),
+                });
                 Type::Bool
             }
             Expr::Unit => {
-                self.code.push(Instruction::Const { dst, value: Value::Unit });
+                self.code.push(Instruction::Const {
+                    dst,
+                    value: Value::Unit,
+                });
                 Type::Unit
             }
             Expr::Var(name) => {
@@ -864,7 +953,10 @@ impl<'a> Lower<'a> {
                     ty
                 } else if let Some(fid) = self.ids.fn_of(name) {
                     let (params, result) = self.ids.fn_sigs[&fid].clone();
-                    self.code.push(Instruction::Const { dst, value: Value::FnRef(fid) });
+                    self.code.push(Instruction::Const {
+                        dst,
+                        value: Value::FnRef(fid),
+                    });
                     Type::Fn(params, Box::new(result))
                 } else {
                     return Err(format!("unknown variable `{name}`"));
@@ -880,108 +972,200 @@ impl<'a> Lower<'a> {
                 let floats = lty == Type::F64;
                 match op {
                     BinOp::Add if floats => {
-                        self.code.push(Instruction::AddF64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::AddF64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::F64
                     }
                     BinOp::Sub if floats => {
-                        self.code.push(Instruction::SubF64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::SubF64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::F64
                     }
                     BinOp::Mul if floats => {
-                        self.code.push(Instruction::MulF64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::MulF64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::F64
                     }
                     BinOp::Div if floats => {
-                        self.code.push(Instruction::DivF64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::DivF64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::F64
                     }
                     BinOp::Div => {
-                        self.code.push(Instruction::DivI64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::DivI64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::I64
                     }
                     BinOp::Lt if floats => {
-                        self.code.push(Instruction::LtF64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::LtF64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::Bool
                     }
                     BinOp::Gt if floats => {
-                        self.code.push(Instruction::LtF64 { dst, left: rr, right: lr });
+                        self.code.push(Instruction::LtF64 {
+                            dst,
+                            left: rr,
+                            right: lr,
+                        });
                         Type::Bool
                     }
                     BinOp::Le if floats => {
-                        self.code.push(Instruction::LeF64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::LeF64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::Bool
                     }
                     BinOp::Ge if floats => {
-                        self.code.push(Instruction::LeF64 { dst, left: rr, right: lr });
+                        self.code.push(Instruction::LeF64 {
+                            dst,
+                            left: rr,
+                            right: lr,
+                        });
                         Type::Bool
                     }
                     BinOp::Eq if floats => {
-                        self.code.push(Instruction::EqF64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::EqF64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::Bool
                     }
                     BinOp::Ne if floats => {
                         let t = self.fresh_reg();
-                        self.code.push(Instruction::EqF64 { dst: t, left: lr, right: rr });
+                        self.code.push(Instruction::EqF64 {
+                            dst: t,
+                            left: lr,
+                            right: rr,
+                        });
                         self.code.push(Instruction::Not { dst, src: t });
                         Type::Bool
                     }
                     BinOp::Add if strings => {
-                        self.code.push(Instruction::ConcatStr { dst, left: lr, right: rr });
+                        self.code.push(Instruction::ConcatStr {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::Str
                     }
                     BinOp::Eq if strings => {
-                        self.code.push(Instruction::EqStr { dst, left: lr, right: rr });
+                        self.code.push(Instruction::EqStr {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::Bool
                     }
                     BinOp::Ne if strings => {
                         let t = self.fresh_reg();
-                        self.code.push(Instruction::EqStr { dst: t, left: lr, right: rr });
+                        self.code.push(Instruction::EqStr {
+                            dst: t,
+                            left: lr,
+                            right: rr,
+                        });
                         self.code.push(Instruction::Not { dst, src: t });
                         Type::Bool
                     }
                     BinOp::Add => {
-                        self.code.push(Instruction::AddI64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::AddI64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::I64
                     }
                     BinOp::Sub => {
-                        self.code.push(Instruction::SubI64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::SubI64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::I64
                     }
                     BinOp::Mul => {
-                        self.code.push(Instruction::MulI64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::MulI64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::I64
                     }
                     BinOp::Lt => {
-                        self.code.push(Instruction::LtI64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::LtI64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::Bool
                     }
                     BinOp::Gt => {
                         // `a > b` is `b < a`.
-                        self.code.push(Instruction::LtI64 { dst, left: rr, right: lr });
+                        self.code.push(Instruction::LtI64 {
+                            dst,
+                            left: rr,
+                            right: lr,
+                        });
                         Type::Bool
                     }
                     BinOp::Eq => {
-                        self.code.push(Instruction::EqI64 { dst, left: lr, right: rr });
+                        self.code.push(Instruction::EqI64 {
+                            dst,
+                            left: lr,
+                            right: rr,
+                        });
                         Type::Bool
                     }
                     // The rest compose from `<`/`==` and `!`.
                     BinOp::Ne => {
                         let t = self.fresh_reg();
-                        self.code.push(Instruction::EqI64 { dst: t, left: lr, right: rr });
+                        self.code.push(Instruction::EqI64 {
+                            dst: t,
+                            left: lr,
+                            right: rr,
+                        });
                         self.code.push(Instruction::Not { dst, src: t });
                         Type::Bool
                     }
                     BinOp::Le => {
                         // `a <= b` is `!(b < a)`.
                         let t = self.fresh_reg();
-                        self.code.push(Instruction::LtI64 { dst: t, left: rr, right: lr });
+                        self.code.push(Instruction::LtI64 {
+                            dst: t,
+                            left: rr,
+                            right: lr,
+                        });
                         self.code.push(Instruction::Not { dst, src: t });
                         Type::Bool
                     }
                     BinOp::Ge => {
                         // `a >= b` is `!(a < b)`.
                         let t = self.fresh_reg();
-                        self.code.push(Instruction::LtI64 { dst: t, left: lr, right: rr });
+                        self.code.push(Instruction::LtI64 {
+                            dst: t,
+                            left: lr,
+                            right: rr,
+                        });
                         self.code.push(Instruction::Not { dst, src: t });
                         Type::Bool
                     }
@@ -1023,8 +1207,7 @@ impl<'a> Lower<'a> {
                     .struct_fields
                     .get(&type_id)
                     .ok_or_else(|| format!("unknown struct `{name}`"))?;
-                let field_ids: HashMap<&str, FieldId> =
-                    layout.iter().map(|(n, id, _)| (n.as_str(), *id)).collect();
+                let field_ids: HashMap<&str, FieldId> = layout.iter().map(|(n, id, _)| (n.as_str(), *id)).collect();
                 let mut supplied = Vec::new();
                 for (fname, fexpr) in fields {
                     let fid = *field_ids
@@ -1040,7 +1223,11 @@ impl<'a> Lower<'a> {
                 });
                 Type::Ref(type_id)
             }
-            Expr::VariantLit { enum_name, variant, fields } => {
+            Expr::VariantLit {
+                enum_name,
+                variant,
+                fields,
+            } => {
                 let enum_id = self
                     .ids
                     .struct_of(enum_name)
@@ -1054,14 +1241,13 @@ impl<'a> Lower<'a> {
                     .iter()
                     .find(|(n, _, _)| n == variant)
                     .ok_or_else(|| format!("`{enum_name}` has no variant `{variant}`"))?;
-                let field_ids: HashMap<&str, FieldId> =
-                    vfields.iter().map(|(n, id, _)| (n.as_str(), *id)).collect();
+                let field_ids: HashMap<&str, FieldId> = vfields.iter().map(|(n, id, _)| (n.as_str(), *id)).collect();
                 let (vid, variant_name) = (*vid, variant.clone());
                 let mut supplied = Vec::new();
                 for (fname, fexpr) in fields {
-                    let fid = *field_ids.get(fname.as_str()).ok_or_else(|| {
-                        format!("variant `{variant_name}` has no field `{fname}`")
-                    })?;
+                    let fid = *field_ids
+                        .get(fname.as_str())
+                        .ok_or_else(|| format!("variant `{variant_name}` has no field `{fname}`"))?;
                     let (r, _) = self.expr(fexpr)?;
                     supplied.push((fid, r));
                 }
@@ -1090,8 +1276,7 @@ impl<'a> Lower<'a> {
                     });
                     return Ok(*result);
                 }
-                let user_defined = self.ids.fn_of(name).is_some()
-                    || self.ids.foreign_fn_of(name).is_some();
+                let user_defined = self.ids.fn_of(name).is_some() || self.ids.foreign_fn_of(name).is_some();
                 if name == "len" && !user_defined {
                     let [array] = args.as_slice() else {
                         return Err("len takes exactly one argument".into());
@@ -1107,7 +1292,10 @@ impl<'a> Lower<'a> {
                     let (a, _) = self.expr(array)?;
                     let (v, _) = self.expr(value)?;
                     self.code.push(Instruction::ArrayPush { array: a, value: v });
-                    self.code.push(Instruction::Const { dst, value: Value::Unit });
+                    self.code.push(Instruction::Const {
+                        dst,
+                        value: Value::Unit,
+                    });
                     return Ok(Type::Unit);
                 }
                 // A foreign fn lowers to a native call; anything else is a

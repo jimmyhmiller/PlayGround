@@ -215,10 +215,11 @@ fn resolve_and_write(
     t0: std::time::Instant,
 ) -> io::Result<HprofStats> {
     // Build the DWARF oracle. When the Rust code lives in a dynamically-loaded
-    // module (a node/.node addon, a Python extension, etc.) rather than the host
-    // exe, point at it via MEMSCOPE_BINARY so we resolve the addon's DWARF
-    // instead of the host's (`current_exe()` would be `node`, which has no Rust
-    // DWARF and makes dsymutil fail).
+    // module (a node/.node addon, a Python extension), `for_current_process`
+    // already resolves the *module's* DWARF rather than the host exe's — it finds
+    // the image memscope is compiled into via `dladdr`, because `node` has no
+    // Rust DWARF and `dsymutil` on it fails. MEMSCOPE_BINARY remains an override
+    // for the cases we can't infer (debug info shipped at another path).
     eprintln!(
         "[memscope] heap dump: recovering types (pid {})…",
         std::process::id()

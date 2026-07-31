@@ -73,6 +73,158 @@ final class TrendFilterTests: XCTestCase {
     }
 }
 
+final class GoalPaceTests: XCTestCase {
+
+    private func series(ratePerWeek: Double, target: Double) -> [WeightPoint] {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let cal = Calendar.current
+        let records = (0...28).map { i in
+            DailyRecord(date: cal.startOfDay(for: base.addingTimeInterval(Double(i) * 86400)),
+                        weightLb: i % 2 == 0 ? 200 - Double(i) * 0.1 : nil)
+        }
+        return Analyzer.analyze(records: records,
+                               goal: Goal(targetWeightLb: target, ratePerWeek: ratePerWeek)).trendSeries
+    }
+
+    func testGoalPaceStartsAtTheAnchorAndDescendsAtThePlannedRate() {
+        let s = series(ratePerWeek: 1.4, target: 150)
+        XCTAssertEqual(s[0].goalPace!, 200, accuracy: 0.001, "pace must share the trend's anchor")
+        // 14 days = 2 weeks at 1.4 lb/wk = 2.8 lb below the anchor.
+        XCTAssertEqual(s[14].goalPace!, 200 - 2.8, accuracy: 0.001)
+        XCTAssertEqual(s[28].goalPace!, 200 - 5.6, accuracy: 0.001)
+    }
+
+    /// The plan after reaching the target is to hold, so the line must not sail past it.
+    func testGoalPaceFlattensAtTheTarget() {
+        let s = series(ratePerWeek: 7.0, target: 198)   // 1 lb/day: hits 198 on day 2
+        XCTAssertEqual(s[2].goalPace!, 198, accuracy: 0.001)
+        XCTAssertEqual(s[28].goalPace!, 198, accuracy: 0.001, "must hold at the target, not overshoot")
+    }
+
+    /// A gaining goal (negative rate) walks up and clamps from below.
+    func testGoalPaceHandlesAGainingGoal() {
+        let s = series(ratePerWeek: -1.4, target: 210)
+        XCTAssertEqual(s[14].goalPace!, 202.8, accuracy: 0.001)
+        XCTAssertEqual(s[28].goalPace!, 205.6, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(s.compactMap(\.goalPace).max()!, 210.001)
+    }
+}
+
+/// Regression tests for the scale floor: the trend must never claim a weight lower than every
+/// reading the scale has produced so far.
+///
+/// The bug (reported 2026-07-28 from real device data): a fast first week followed by a plateau
+/// and then a 10-day weigh-in gap left the local-linear-trend filter extending the early rate in
+/// a straight line, so it reported 209.5 lb when the lowest number the scale had ever shown was
+/// 210.3 lb — and the fresh 210.8 lb reading barely moved it.
+final class ScaleFloorTests: XCTestCase {
+
+    /// Jimmy's actual weigh-ins from the device container, 2026-06-26 .. 2026-07-28.
+    /// Day index (from the first weigh-in) → lb. Note the 9-day hole before the last reading.
+    private static let realSeries: [(day: Int, lb: Double)] = [
+        (0, 216.3), (1, 215.6), (2, 214.7), (3, 213.9), (4, 212.5), (5, 212.3), (6, 213.0),
+        (7, 211.7), (8, 213.6), (9, 213.2), (10, 213.1), (11, 212.4), (12, 212.9), (13, 213.1),
+        (14, 211.9), (15, 211.8), (17, 211.2), (18, 210.9), (19, 211.0), (20, 211.7),
+        (21, 210.9), (22, 210.3), (32, 210.8),
+    ]
+
+    private func realRecords() -> [DailyRecord] {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let cal = Calendar.current
+        let day: (Int) -> Date = { cal.startOfDay(for: base.addingTimeInterval(Double($0) * 86400)) }
+        let byDay = Dictionary(uniqueKeysWithValues: Self.realSeries.map { ($0.day, $0.lb) })
+        return (0...32).map { DailyRecord(date: day($0), weightLb: byDay[$0]) }
+    }
+
+    func testRealSeriesTrendIsNeverBelowEveryReading() {
+        let records = realRecords()
+        let pts = TrendFilter().run(records)
+        let minReading = records.compactMap(\.weightLb).min()!
+        let trend = pts.compactMap(\.trend).last!
+        XCTAssertGreaterThanOrEqual(
+            trend, minReading - 1e-9,
+            "Trend weight \(trend) must not be below the lowest scale reading \(minReading)")
+    }
+
+    /// The floor is the *running* minimum, so it must hold at every point in the series, not just
+    /// at the end — the chart line must never dip under the readings drawn beside it either.
+    func testRealSeriesTrendIsNeverBelowRunningMinimum() {
+        let records = realRecords()
+        let pts = TrendFilter().run(records)
+        var runningMin = Double.infinity
+        for (i, p) in pts.enumerated() {
+            if let z = p.observed { runningMin = min(runningMin, z) }
+            guard let t = p.trend, runningMin.isFinite else { continue }
+            XCTAssertGreaterThanOrEqual(t, runningMin - 1e-9,
+                                        "day \(i): trend \(t) dipped below running min \(runningMin)")
+        }
+    }
+
+    /// Without the fix this series produced 209.52 lb. Pin the corrected value so a future
+    /// retune cannot silently walk it back under the readings.
+    func testRealSeriesTrendMatchesTheFloor() {
+        let pts = TrendFilter().run(realRecords())
+        XCTAssertEqual(pts.compactMap(\.trend).last!, 210.3, accuracy: 0.01)
+    }
+
+    /// How much of the trend is the floor actually responsible for?
+    ///
+    /// Not a no-op, and it is worth being precise about that: even for the easiest possible user
+    /// — weighing in every single day, losing at a constant rate — the raw filter dips under the
+    /// running minimum on ~7% of days (measured over 200 seeds: p95 20%, worst 29%), lifting the
+    /// trend by up to ~2.1 lb. That is the filter's own over-extrapolation showing through, most
+    /// often in the first few days and during any run of readings the smoother cuts under.
+    ///
+    /// So this test does NOT claim the floor is rare. It pins the scale of its involvement, so a
+    /// future retune that makes the floor take over the trend entirely fails loudly.
+    func testFloorInvolvementStaysBounded() {
+        var fractions: [Double] = []
+        var lifts: [Double] = []
+        for seed in UInt64(1)...200 {
+            var p = ScenarioParams(); p.days = 45; p.pMissWeigh = 0
+            p.whooshLb = 0; p.rateDriftLbPerWeek = 0; p.pDietBreak = 0
+            let s = Simulator.generate(p, seed: seed)
+            let a = Analyzer.analyze(records: s.records, goal: s.goal)
+            fractions.append(Double(a.trendFlooredDays) / Double(p.days))
+            lifts.append(a.trendFlooredMaxLb)
+        }
+        let meanFraction = fractions.reduce(0, +) / Double(fractions.count)
+        XCTAssertLessThan(meanFraction, 0.15,
+                          "the floor should be correcting the trend, not defining it")
+        XCTAssertLessThan(fractions.max()!, 0.40,
+                          "no single steady dieter should have the floor own most of their trend")
+        XCTAssertLessThan(lifts.max()!, 3.0,
+                          "a lift this large means the filter is badly out, not being nudged")
+    }
+
+    /// A gainer must not be pinned up to an old low: the floor uses the running minimum, so a
+    /// weight the user has since regained past cannot drag the trend with it.
+    func testFloorDoesNotPinAGainerToAnOldLow() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let cal = Calendar.current
+        // Dip to 180, then climb steadily to 195.
+        let weights: [Double] = [190, 186, 183, 180, 182, 185, 187, 189, 191, 193, 195]
+        let records = weights.enumerated().map { i, w in
+            DailyRecord(date: cal.startOfDay(for: base.addingTimeInterval(Double(i) * 86400)),
+                        weightLb: w)
+        }
+        let pts = TrendFilter().run(records)
+        let last = pts.compactMap(\.trend).last!
+        XCTAssertGreaterThan(last, 185, "trend should follow the regain, not sit at the old low of 180")
+    }
+
+    /// The reported cumulative loss must not exceed what the scale can support: with the floor
+    /// engaged, start − trend can be no larger than start − (lowest reading).
+    func testCumulativeLossIsCappedByTheScale() {
+        let records = realRecords()
+        let a = Analyzer.analyze(records: records, goal: Goal(targetWeightLb: 178, ratePerWeek: 1.25))
+        let minReading = records.compactMap(\.weightLb).min()!
+        let start = a.startWeightLb!
+        XCTAssertLessThanOrEqual(-a.totalChangeLb!, start - minReading + 1e-9,
+                                 "reported loss must not exceed start minus the lowest reading")
+    }
+}
+
 final class EstimatorTests: XCTestCase {
 
     func testColdStartDoesNotOverclaim() {

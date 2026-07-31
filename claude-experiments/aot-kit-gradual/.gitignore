@@ -1,0 +1,12 @@
+# Cloned upstream reference (SeaOfNodes/Simple, ~45MB). Not vendored, not ours.
+# Re-create with: git clone --depth 1 https://github.com/SeaOfNodes/Simple reference/Simple
+reference/
+
+# Build output
+/out/
+*.o
+*.dylib
+*.a
+
+# Throwaway repro/probe scripts from debugging sessions. Never part of the gate.
+/scratchpad/

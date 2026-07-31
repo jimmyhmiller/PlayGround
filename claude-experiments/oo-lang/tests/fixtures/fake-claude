@@ -1,0 +1,4 @@
+#!/bin/sh
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"fake-"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"subscription-ok"}}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"fake-subscription-ok"}'

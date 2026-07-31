@@ -65,14 +65,20 @@ struct WeightView: View {
                 Text("SCALE")
             }.font(.mono(10)).foregroundStyle(Theme.textDim(0.5))
             legendItem(color: Theme.amber.opacity(0.85), dashed: true, label: "LOGS-ONLY")
+            legendItem(color: Theme.textDim(0.45), dashed: true, label: "GOAL PACE")
         }
     }
 
     private func legendItem(color: Color, dashed: Bool, label: String) -> some View {
         HStack(spacing: 6) {
-            Rectangle().fill(dashed ? .clear : color)
-                .frame(width: 14, height: 2)
-                .overlay(dashed ? Rectangle().stroke(color, style: StrokeStyle(lineWidth: 1.5, dash: [3, 2])).frame(height: 0) : nil)
+            // Stroke an actual line: a dashed border on a zero-height Rectangle draws nothing,
+            // which left every dashed entry with a blank swatch.
+            Path { p in
+                p.move(to: CGPoint(x: 0, y: 1))
+                p.addLine(to: CGPoint(x: 14, y: 1))
+            }
+            .stroke(color, style: StrokeStyle(lineWidth: 2, dash: dashed ? [3, 2] : []))
+            .frame(width: 14, height: 2)
             Text(label)
         }
         .font(.mono(10)).foregroundStyle(Theme.textDim(0.5))

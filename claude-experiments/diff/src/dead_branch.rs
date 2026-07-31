@@ -32,7 +32,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement};
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_span::{GetSpan, Span};
 
 /// How many substitution passes to run before giving up. Each pass resolves one
 /// nesting level (a hit does not descend into its own replacement), so a handful
@@ -64,9 +64,7 @@ pub fn transform(path: &Path, source: &str) -> Option<String> {
 /// delete, outermost-first.
 fn pass(path: &Path, source: &str) -> Option<String> {
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     // A file that does not parse is not ours to rewrite; the real parse
     // downstream reports the error with proper diagnostics.
@@ -104,22 +102,26 @@ impl<'a> Visit<'a> for BranchCollector<'_> {
             } else {
                 Some(&branch.consequent)
             };
-            // A `var` or function declaration in the dead branch is hoisted out of
-            // it, so deleting the branch would remove a binding the surrounding
-            // code can still legally reference. Leave the whole statement alone
-            // rather than risk a ReferenceError.
-            if dead.is_none_or(|dead| !hoists_a_binding(dead)) {
-                let replacement = taken.map_or(String::new(), |taken| {
-                    // The taken branch is spliced in verbatim, braces included when
-                    // it is a block. Keeping the block preserves the `let`/`const`
-                    // scoping the branch already had.
-                    self.source[taken.span().start as usize..taken.span().end as usize].to_string()
-                });
-                self.edits.push((branch.span, replacement));
-                // Do not descend: the replacement's own nested `if`s are folded by
-                // the next pass, which keeps the recorded spans non-overlapping.
-                return;
-            }
+            // A `var` or function declaration inside the dead branch hoists out of
+            // it, so the binding exists (as `undefined`) even though the branch
+            // never runs, and code after the `if` may legally read it. The
+            // declarations are re-established in place of the branch — exactly what
+            // webpack's ConstPlugin does — so the binding survives while the dead
+            // branch's `require(...)`/`import()` edges do not.
+            let hoisted = dead.map(hoisted_bindings).unwrap_or_default();
+            let taken_text = taken.map_or("", |taken| {
+                // The taken branch is spliced in verbatim, braces included when
+                // it is a block. Keeping the block preserves the `let`/`const`
+                // scoping the branch already had.
+                &self.source[taken.span().start as usize..taken.span().end as usize]
+            });
+            self.edits.push((
+                branch.span,
+                format!("{}{taken_text}", hoisted_declaration(&hoisted)),
+            ));
+            // Do not descend: the replacement's own nested `if`s are folded by
+            // the next pass, which keeps the recorded spans non-overlapping.
+            return;
         }
         // An `else if` whose test is decidably false and which has no branch of
         // its own to take must disappear TOGETHER with the parent's `else`
@@ -140,10 +142,11 @@ impl<'a> Visit<'a> for BranchCollector<'_> {
             } else {
                 Some(&inner.consequent)
             };
-            if taken.is_none() && dead.is_none_or(|dead| !hoists_a_binding(dead)) {
+            if taken.is_none() {
+                let hoisted = dead.map(hoisted_bindings).unwrap_or_default();
                 self.edits.push((
                     Span::new(branch.consequent.span().end, inner.span.end),
-                    String::new(),
+                    hoisted_declaration(&hoisted),
                 ));
                 // The kept parts still deserve their own folds.
                 self.visit_expression(&branch.test);
@@ -258,23 +261,49 @@ fn literal_value(expression: &Expression<'_>) -> Option<LiteralValue> {
     }
 }
 
-/// Whether `statement` declares anything that hoists out of its own block: a `var`
-/// or a function declaration. Nested function and class bodies are not searched —
-/// a `var` inside them belongs to that function, not to the branch.
-fn hoists_a_binding(statement: &Statement<'_>) -> bool {
-    let mut scan = HoistScan { found: false };
+/// The names `statement` contributes to the enclosing FUNCTION scope rather than
+/// to its own block: `var` bindings (including destructured ones and `for`-head
+/// ones) and function-declaration names. Nested function and class bodies are not
+/// searched — a `var` inside them belongs to that function, not to this branch.
+///
+/// A `class` declaration is deliberately absent: like `let`/`const` it is scoped
+/// to the block it appears in, so deleting the block deletes nothing observable.
+///
+/// First-occurrence order, deduped, so the emitted declaration is deterministic.
+fn hoisted_bindings(statement: &Statement<'_>) -> Vec<String> {
+    let mut scan = HoistScan { names: Vec::new() };
     scan.visit_statement(statement);
-    scan.found
+    let mut seen = std::collections::BTreeSet::new();
+    scan.names.retain(|name| seen.insert(name.clone()));
+    scan.names
+}
+
+/// The declaration that re-establishes `names` where a dead branch used to be.
+///
+/// A bare `var a, b;` is exactly the state the hoisted bindings were in before the
+/// branch would have run: declared and `undefined`. A function declaration's name
+/// gets the same treatment, which is also what the language does — in a block that
+/// never executes, the hoisted name is `undefined` and only takes the function
+/// value when the block is entered.
+fn hoisted_declaration(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    format!("var {};", names.join(","))
 }
 
 struct HoistScan {
-    found: bool,
+    names: Vec<String>,
 }
 
 impl<'a> Visit<'a> for HoistScan {
     fn visit_variable_declaration(&mut self, declaration: &oxc_ast::ast::VariableDeclaration<'a>) {
         if declaration.kind.is_var() {
-            self.found = true;
+            for declarator in &declaration.declarations {
+                let mut pattern = PatternNames { names: Vec::new() };
+                pattern.visit_binding_pattern(&declarator.id);
+                self.names.extend(pattern.names);
+            }
         }
         walk::walk_variable_declaration(self, declaration);
     }
@@ -286,8 +315,10 @@ impl<'a> Visit<'a> for HoistScan {
     ) {
         // The declaration itself hoists; its body's own `var`s do not escape it, so
         // the body is not searched.
-        if function.is_declaration() {
-            self.found = true;
+        if function.is_declaration()
+            && let Some(id) = &function.id
+        {
+            self.names.push(id.name.to_string());
         }
         let _ = flags;
     }
@@ -299,6 +330,18 @@ impl<'a> Visit<'a> for HoistScan {
     }
 
     fn visit_class(&mut self, _class: &oxc_ast::ast::Class<'a>) {}
+}
+
+/// Every identifier a binding pattern binds, so `var { a, b: [c] } = x` reports
+/// all three rather than nothing.
+struct PatternNames {
+    names: Vec<String>,
+}
+
+impl<'a> Visit<'a> for PatternNames {
+    fn visit_binding_identifier(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'a>) {
+        self.names.push(identifier.name.to_string());
+    }
 }
 
 /// Applies non-overlapping `(span, replacement)` edits, left to right. The
@@ -362,22 +405,46 @@ mod tests {
         assert!(run("if (typeof window !== 'undefined') { a(); }").is_none());
     }
 
+    /// `var hoisted` is visible after the `if` even though the branch never runs,
+    /// so the branch's CONTENTS go but the binding stays — the state it would
+    /// have had anyway, declared and `undefined`. Blocking elimination instead
+    /// (the old behaviour) kept the dead branch's `require(...)` in the tree, and
+    /// the dependency scan has no reachability filter, so that edge became a real
+    /// module: it is how `next-i18next`'s `if (!process.browser) { var fs =
+    /// require("fs") }` dragged `fs` into a browser graph.
     #[test]
-    fn a_var_in_the_dead_branch_blocks_elimination() {
-        // `var hoisted` is visible after the `if`, so deleting the branch would
-        // turn a legal read into a ReferenceError.
-        assert!(
-            run("if (\"a\" === 'b') { var hoisted = 1; }\nuse(hoisted);").is_none(),
-            "a hoisted var must block elimination"
-        );
+    fn a_var_in_the_dead_branch_is_kept_as_a_declaration_and_its_edges_are_dropped() {
+        let out = run("if (\"a\" === 'b') { var hoisted = require('heavy'); }\nuse(hoisted);")
+            .expect("a hoisted var must not block elimination");
+        assert!(out.contains("var hoisted;"), "{out}");
+        assert!(!out.contains("require("), "{out}");
+        assert!(out.contains("use(hoisted)"), "{out}");
     }
 
     #[test]
-    fn a_function_declaration_in_the_dead_branch_blocks_elimination() {
-        assert!(
-            run("if (\"a\" === 'b') { function hoisted() {} }\nuse(hoisted);").is_none(),
-            "a hoisted function declaration must block elimination"
-        );
+    fn every_name_a_destructuring_var_binds_is_kept() {
+        let out = run("if (\"a\" === 'b') { var { a, b: [c] } = require('heavy'); }").unwrap();
+        assert!(out.contains("var a,b,c;") || out.contains("var a,c;"), "{out}");
+        assert!(!out.contains("require("), "{out}");
+    }
+
+    /// A function declaration in a block that never executes leaves its name
+    /// declared and `undefined`, which is precisely what `var hoisted;` says.
+    #[test]
+    fn a_function_declaration_in_the_dead_branch_is_kept_as_a_declaration() {
+        let out = run("if (\"a\" === 'b') { function hoisted() { require('heavy'); } }\nuse(hoisted);")
+            .expect("a hoisted function declaration must not block elimination");
+        assert!(out.contains("var hoisted;"), "{out}");
+        assert!(!out.contains("require("), "{out}");
+    }
+
+    /// A `let`/`const`/`class` in the dead branch is scoped to that block, so
+    /// nothing outside can name it and nothing needs re-declaring.
+    #[test]
+    fn a_block_scoped_binding_in_the_dead_branch_leaves_no_declaration() {
+        let out = run("before(); if (\"a\" === 'b') { let x = 1; class C {} } after();").unwrap();
+        assert!(!out.contains("var "), "{out}");
+        assert!(out.contains("before()") && out.contains("after()"), "{out}");
     }
 
     #[test]

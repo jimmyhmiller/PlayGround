@@ -207,6 +207,16 @@ const primordials = (function makePrimordials() {
   };
 })();
 
+// The whole Reflect namespace, named the way Node's primordials name it
+// (Reflect.defineProperty -> ReflectDefineProperty). Listing these one at a
+// time is how internal/console/global ended up destructuring `undefined`.
+for (const k of Object.getOwnPropertyNames(Reflect)) {
+  const name = 'Reflect' + k[0].toUpperCase() + k.slice(1);
+  if (primordials[name] === undefined && typeof Reflect[k] === 'function') {
+    primordials[name] = Reflect[k];
+  }
+}
+
 globalThis.primordials = primordials;
 globalThis.internalBinding = __internalBinding;
 
@@ -532,6 +542,8 @@ const errorSpecs = {
     'Access denied' + (op ? ' for ' + op : '') },
   ERR_STREAM_DESTROYED:    { base: Error,     message: (method) =>
     'Cannot call ' + method + ' after a stream was destroyed' },
+  ERR_MULTIPLE_CALLBACK:   { base: Error,     message: () =>
+    'Callback called multiple times' },
 };
 
 function makeCode(code) {
@@ -548,6 +560,30 @@ function makeCode(code) {
 
 const codes = {};
 for (const k of Object.keys(errorSpecs)) codes[k] = makeCode(k);
+
+// A code we haven't written a spec for must still be a constructor. Node's
+// internals do "throw new ERR_WHATEVER(...)" on their failure paths; if the
+// lookup yields undefined, the real failure is replaced by an unattributable
+// "not a function" TypeError. Manufacture a generic class instead, so the
+// code name and the original arguments survive.
+const _codesProxy = new Proxy(codes, {
+  get(target, prop) {
+    if (prop in target) return target[prop];
+    if (typeof prop !== 'string' || !/^ERR_[A-Z0-9_]+$/.test(prop)) return target[prop];
+    const E = function (...args) {
+      const err = new Error(prop + (args.length ? ': ' + args.map(String).join(' ') : ''));
+      err.code = prop;
+      return err;
+    };
+    E.HideStackFramesError = E;
+    target[prop] = E;
+    return E;
+  },
+  has(target, prop) {
+    return prop in target ||
+      (typeof prop === 'string' && /^ERR_[A-Z0-9_]+$/.test(prop));
+  },
+});
 
 function genericNodeError(message, opts = {}) {
   const err = new Error(message);
@@ -603,6 +639,32 @@ function UVException(opts) {
   return err;
 }
 
+// ExceptionWithHostPort / UVExceptionWithHostPort — net.js wraps every errno
+// a socket syscall returns in one of these. They must exist even on the happy
+// path: if they're missing, a bind/listen/connect failure turns into
+// "not a function" and the real errno is lost.
+function makeHostPortException(err, syscall, address, port, additional) {
+  const { errname } = require('__binding/uv');
+  const code = errname(err);
+  let details = '';
+  if (port && port > 0) details = ' ' + address + ':' + port;
+  else if (address) details = ' ' + address;
+  if (additional) details += ' - Local (' + additional + ')';
+  const ex = new Error(syscall + ' ' + code + details);
+  ex.errno = err;
+  ex.code = code;
+  ex.syscall = syscall;
+  ex.address = address;
+  if (port) ex.port = port;
+  return ex;
+}
+function ExceptionWithHostPort(err, syscall, address, port, additional) {
+  return makeHostPortException(err, syscall, address, port, additional);
+}
+function UVExceptionWithHostPort(err, syscall, address, port) {
+  return makeHostPortException(err, syscall, address, port);
+}
+
 // aggregateTwoErrors — combine two Errors into an AggregateError. Used in fs.js
 // to surface both the immediate failure and a follow-up cleanup error.
 function aggregateTwoErrors(innerError, outerError) {
@@ -617,9 +679,10 @@ function aggregateTwoErrors(innerError, outerError) {
   return innerError || outerError;
 }
 
-module.exports = { codes, genericNodeError, hideStackFrames, AbortError,
+module.exports = { codes: _codesProxy, genericNodeError, hideStackFrames, AbortError,
                    kEnhanceStackBeforeInspector, isErrorStackTraceLimitWritable,
-                   UVException, aggregateTwoErrors };
+                   UVException, ExceptionWithHostPort, UVExceptionWithHostPort,
+                   aggregateTwoErrors };
 `;
 
 shimSources['internal/validators'] = `
@@ -2210,6 +2273,13 @@ class TCP {
     const bytes = ArrayBuffer.isView(buf) ? buf : Buffer.from(buf);
     const off = bytes.byteOffset || 0;
     const len = bytes.byteLength || bytes.length;
+    // Every write on this host completes through the io loop, never inline.
+    // stream_base_commons reads kLastWriteWasAsync the instant this returns:
+    // leaving it 0 makes Node fire the write callback here AND again from our
+    // completion, which trips ERR_MULTIPLE_CALLBACK on every response.
+    const STREAM_STATE = require('__binding/stream_wrap').streamBaseState;
+    STREAM_STATE[2] = len;  // kBytesWritten
+    STREAM_STATE[3] = 1;    // kLastWriteWasAsync
     const opId = tcpWrite(this.handle, bytes, 0, len, (c) => {
       this.bytesWritten += (c.n || 0);
       if (req.oncomplete) {
@@ -2908,6 +2978,8 @@ const codes = {
   UV_EADDRINUSE: -48, UV_EADDRNOTAVAIL: -49,
   UV_ENETUNREACH: -51, UV_ENOTCONN: -57,
   UV_E_2BIG: -7, UV_EAI_BADFLAGS: -3000,
+  UV_EINVAL: -22, UV_EPERM: -1, UV_EMFILE: -24, UV_ENOTSOCK: -38,
+  UV_EAFNOSUPPORT: -47, UV_EHOSTUNREACH: -65,
 };
 function errname(code) {
   for (const k of Object.keys(codes)) if (codes[k] === code) return k.replace(/^UV_/, '');
@@ -4308,7 +4380,14 @@ globalThis.__ioDrain = function (timeoutMs) {
     if (cb) {
       _ioOps.delete(c.op_id);
       try { cb(c); } catch (e) {
-        try { (globalThis.console || { error: () => {} }).error(e); } catch (_) {}
+        // An I/O callback that throws must not be reported as a bare
+        // "TypeError: not a function" — without the stack there is no way to
+        // tell which handler died.
+        try {
+          const where = (e && e.stack) ? '\n' + e.stack : '';
+          (globalThis.console || { error: () => {} })
+            .error('io callback threw (' + c.kind + '): ' + ((e && e.message) || e) + where);
+        } catch (_) {}
       }
     }
   }

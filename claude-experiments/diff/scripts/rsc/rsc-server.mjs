@@ -26,6 +26,11 @@ import { spawn } from "node:child_process";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
+import { MANIFEST_FILES, loadServerConsumerManifest } from "./ssr-module-map.mjs";
+
+// The emitted server chunks carry a `.map` each; Node only consumes them with
+// source-map support on. See `next-server.mjs` for why this is unconditional.
+process.setSourceMapsEnabled(true);
 
 function fail(message) {
   console.error(`rsc-server: ${message}`);
@@ -39,41 +44,27 @@ if (!outputDir) fail("usage: node rsc-server.mjs <.diffpack-output dir> [port]")
 const publicDir = join(outputDir, "public");
 const rscRenderEntry = join(outputDir, "rsc-render", "server.mjs");
 const ssrEntry = join(outputDir, "server", "server.mjs");
-const clientManifestPath = join(outputDir, "client-references-manifest.json");
-const ssrManifestPath = join(outputDir, "server-references-manifest.json");
 
 for (const [label, p] of [
   ["client public/", publicDir],
   ["react-server render bundle", rscRenderEntry],
   ["SSR bundle", ssrEntry],
-  ["client-references manifest", clientManifestPath],
-  ["ssr-references manifest", ssrManifestPath],
+  ...MANIFEST_FILES.map(([label, file]) => [label, join(outputDir, file)]),
 ]) {
   if (!existsSync(p)) fail(`${label} not found at ${p} — build all three graphs first`);
 }
 
 // --- Manifest #2: the divergent-id ssrModuleMapping ------------------------------
 // moduleMap is keyed by the id the FLIGHT carries (client id) and resolves to the
-// id the SSR graph requires (this build's id) for the same canonical module.
-const clientRefs = JSON.parse(readFileSync(clientManifestPath, "utf8"));
-const ssrRefs = JSON.parse(readFileSync(ssrManifestPath, "utf8"));
-const moduleMap = {};
-for (const [moduleId, clientEntry] of Object.entries(clientRefs)) {
-  const ssrEntryRef = ssrRefs[moduleId];
-  if (!ssrEntryRef) {
-    fail(
-      `no SSR reference for ${moduleId}; the SSR graph did not bundle this "use client" module`,
-    );
-  }
-  moduleMap[String(clientEntry.id)] = {
-    "*": { id: ssrEntryRef.id, chunks: ssrEntryRef.chunks, name: "*" },
-  };
+// id the SSR graph requires (this build's id) for the same canonical module. The
+// join and its checks live in ./ssr-module-map.mjs (see its header).
+let clientManifestPath;
+let serverConsumerManifest;
+try {
+  ({ clientManifestPath, serverConsumerManifest } = loadServerConsumerManifest(outputDir));
+} catch (error) {
+  fail(error.message);
 }
-const serverConsumerManifest = {
-  moduleMap,
-  serverModuleMap: null,
-  moduleLoading: { prefix: "", crossOrigin: null },
-};
 
 // --- The SSR bundle (in-process; its own inlined React) --------------------------
 const ssrModule = await import(pathToFileURL(ssrEntry).href);
@@ -86,7 +77,8 @@ if (typeof renderFlightToHTML !== "function") {
 // --- Spawn the react-server child for a flight (render or action) ----------------
 function runReactServer(args, stdinBody) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [rscRenderEntry, ...args], {
+    // See `next-render-core.mjs`: an emitted-chunk entry takes the flag.
+    const child = spawn(process.execPath, ["--enable-source-maps", rscRenderEntry, ...args], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     const out = [];

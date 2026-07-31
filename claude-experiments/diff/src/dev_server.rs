@@ -58,8 +58,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use notify::{RecursiveMode, Watcher};
@@ -78,6 +79,246 @@ pub struct DevOptions {
     pub minify: bool,
     /// Whether emitted chunks carry composed source maps.
     pub source_map: bool,
+}
+
+/// Lazy route compilation for the Next dev server: what is compiled right now, what has
+/// been asked for, and where the orchestrator serving it is listening.
+///
+/// A cold start used to compile every route of the app into three whole-app graphs before
+/// answering anything — 7.7 s on cal.com, for a browser that then asks for one route.
+/// This is the state that lets it compile on demand instead: the proxy thread matches an
+/// incoming request against the app's full pattern table (a directory walk, free) and
+/// BLOCKS it until the graphs contain that route, while the build thread widens the scope
+/// and rebuilds. A request is never answered 404 because its route has not been compiled
+/// yet — it waits, which is the one behaviour that makes laziness invisible.
+struct LazyRoutes {
+    /// Every matchable pattern of the app, endpoints before pages (the orchestrator's
+    /// precedence). Fixed for the process; a route file added later is a structural
+    /// change, which rebuilds everything and re-derives the scope.
+    patterns: Vec<crate::next_adapter::RoutePattern>,
+    state: Mutex<LazyState>,
+    /// Signalled when a build lands, when a want is registered, or on failure.
+    changed: std::sync::Condvar,
+}
+
+/// The mutable half of [`LazyRoutes`].
+#[derive(Default)]
+struct LazyState {
+    /// The scope the live graphs were built from, or `None` before the first build has
+    /// landed (there is no orchestrator yet, so even a request matching no route waits).
+    /// This is the ONE source of truth for "can this request be served now": asking the
+    /// scope itself, rather than tracking a parallel set of compiled paths, is what keeps
+    /// the answer right for endpoints, which a scope can compile wholesale.
+    scope: Option<crate::next_adapter::RouteScope>,
+    /// Paths asked for and not yet compiled, drained by the build thread.
+    wanted: BTreeSet<String>,
+    /// Requests currently being served, and when the last one finished. The fill waits for
+    /// both to say "nothing is happening": a 6-second whole-app compile running alongside
+    /// the very first render steals the cores that render needs, and measurably did —
+    /// cal.com's first document went from 1.4s to 2.5s when the two overlapped.
+    in_flight: usize,
+    last_activity: Option<Instant>,
+    /// Set when a request arrived that no pattern matched: there is nothing specific to
+    /// compile, so the only correct answer is "compile everything and let the app 404 it
+    /// properly".
+    wanted_everything: bool,
+    /// The orchestrator's loopback port, 0 until the first build boots it.
+    node_port: u16,
+    /// Set while the emitted output is being swapped under the orchestrator: for those few
+    /// milliseconds there is no server to forward to, so requests wait rather than see a
+    /// half-swapped tree.
+    swapping: bool,
+    /// The last build failure, so a waiter fails loudly instead of hanging forever.
+    failure: Option<String>,
+}
+
+/// How long a request waits for its route to compile before giving up. Generous: it
+/// covers a cold cal.com build of the whole app, and the alternative to waiting is a
+/// wrong answer.
+const LAZY_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+impl LazyRoutes {
+    fn new(patterns: Vec<crate::next_adapter::RoutePattern>) -> Self {
+        LazyRoutes {
+            patterns,
+            state: Mutex::new(LazyState::default()),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// The pattern that will serve `request_path`, if any.
+    fn match_path(&self, request_path: &str) -> Option<&crate::next_adapter::RoutePattern> {
+        self.patterns
+            .iter()
+            .find(|pattern| pattern.matches(request_path))
+    }
+
+    /// Block until `request_path` can be served, and return the orchestrator's port.
+    ///
+    /// Returns `Ok(None)` when this dev server is not compiling lazily at all (every
+    /// route is already built), so the caller uses its own port and pays nothing.
+    fn ensure(&self, request_path: &str) -> Result<Option<u16>, String> {
+        let matched = self
+            .match_path(request_path)
+            .map(|pattern| (pattern.url_path.clone(), pattern.kind));
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        loop {
+            if let Some(failure) = &state.failure {
+                return Err(failure.clone());
+            }
+            let ready = match (&state.scope, &matched) {
+                (Some(scope), Some((url_path, kind))) => scope.includes(url_path, *kind),
+                // Nothing matched: the app itself owns the answer (a 404, a rewrite, a
+                // static file), so a running orchestrator is all that is needed.
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if ready && !state.swapping {
+                // Count this as activity BEFORE the caller takes its in-flight guard. The
+                // fill starts as soon as the server looks idle, and the instant after a
+                // build lands is exactly when a released request is about to render but has
+                // not registered itself yet — without this the fill starts underneath it.
+                state.last_activity = Some(Instant::now());
+                return Ok(Some(state.node_port));
+            }
+            // Register the want and wake the build thread. Re-registered on every loop
+            // turn, which is harmless (a set) and covers a build that landed without
+            // covering this route.
+            match &matched {
+                Some((url_path, _)) => {
+                    state.wanted.insert(url_path.clone());
+                }
+                None => state.wanted_everything = true,
+            }
+            self.changed.notify_all();
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(state, LAZY_WAIT_TIMEOUT)
+                .expect("lazy routes condvar");
+            state = next;
+            if timeout.timed_out() {
+                return Err(format!(
+                    "timed out after {}s waiting for {request_path} to compile",
+                    LAZY_WAIT_TIMEOUT.as_secs(),
+                ));
+            }
+        }
+    }
+
+    /// Wait until there is something to build, and return the paths asked for. `None`
+    /// means "build everything" (an unmatched request, or an explicit fill).
+    fn take_wanted(&self) -> Option<BTreeSet<String>> {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        while state.wanted.is_empty() && !state.wanted_everything {
+            state = self.changed.wait(state).expect("lazy routes condvar");
+        }
+        if state.wanted_everything {
+            state.wanted_everything = false;
+            state.wanted.clear();
+            return None;
+        }
+        Some(std::mem::take(&mut state.wanted))
+    }
+
+    /// Mark a request as being served, so the fill knows the server is busy. The returned
+    /// guard decrements on drop, including when the connection handler bails out early.
+    fn serving_request(&self) -> InFlightGuard<'_> {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        state.in_flight += 1;
+        state.last_activity = Some(Instant::now());
+        InFlightGuard { lazy: self }
+    }
+
+    /// Block until nothing has been served for `quiet`, so a background build does not
+    /// compete with a render the visitor is waiting on. Gives up after `budget` so a page
+    /// that polls forever cannot postpone the fill indefinitely.
+    ///
+    /// Returns AT ONCE if anything is already waiting for a wider build, and that is not an
+    /// optimization — it is what stops a deadlock. An in-flight render can itself depend on
+    /// a route this build does not have: cal.com's server components call the app's own API
+    /// over HTTP, so the document render sits in flight waiting for an endpoint, while a
+    /// fill that waits for the server to go idle waits for that same render. Demand that is
+    /// already blocked outranks idleness.
+    fn wait_for_quiet(&self, quiet: Duration, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        loop {
+            if !state.wanted.is_empty() || state.wanted_everything {
+                return;
+            }
+            let idle_for = match (state.in_flight, state.last_activity) {
+                (0, Some(last)) => last.elapsed(),
+                (0, None) => quiet,
+                _ => Duration::ZERO,
+            };
+            if idle_for >= quiet || Instant::now() >= deadline {
+                return;
+            }
+            // Poll rather than wait on the condvar: the interesting event is a request
+            // FINISHING, which the guard signals, plus the passage of time.
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, (quiet - idle_for).min(Duration::from_millis(50)))
+                .expect("lazy routes condvar");
+            state = next;
+        }
+    }
+
+    /// Hold every request: the emitted output is about to be replaced under the running
+    /// orchestrator. Released by the next [`landed`](LazyRoutes::landed).
+    fn begin_swap(&self) {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        state.swapping = true;
+    }
+
+    /// Publish a landed build: the scope it compiled and the orchestrator port serving it.
+    fn landed(&self, scope: &crate::next_adapter::RouteScope, node_port: u16) {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        state.swapping = false;
+        let complete = *scope == crate::next_adapter::RouteScope::All;
+        state.scope = Some(scope.clone());
+        state.node_port = node_port;
+        // A landing releases whoever was waiting, and they are about to render. Counting
+        // the landing itself as activity is what makes the idle wait race-free: the
+        // released request does not have to win a lock against the thread that is deciding
+        // whether the server is idle.
+        state.last_activity = Some(Instant::now());
+        state.failure = None;
+        if complete {
+            state.wanted.clear();
+            state.wanted_everything = false;
+        }
+        self.changed.notify_all();
+    }
+
+    /// Publish a build failure, releasing every waiter with the error rather than
+    /// letting them hang on a build that will never land.
+    fn failed(&self, error: &str) {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        state.swapping = false;
+        state.failure = Some(error.to_string());
+        self.changed.notify_all();
+    }
+
+    /// Whether anything is still uncompiled (so the proxy keeps consulting this).
+    fn incomplete(&self) -> bool {
+        self.state.lock().expect("lazy routes mutex").scope
+            != Some(crate::next_adapter::RouteScope::All)
+    }
+}
+
+/// Decrements [`LazyState::in_flight`] when a request handler returns, however it returns.
+struct InFlightGuard<'a> {
+    lazy: &'a LazyRoutes,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.lazy.state.lock().expect("lazy routes mutex");
+        state.in_flight = state.in_flight.saturating_sub(1);
+        state.last_activity = Some(Instant::now());
+        self.lazy.changed.notify_all();
+    }
 }
 
 /// One long-lived environment build (client or server): the bundler, its
@@ -110,8 +351,11 @@ impl EnvBuild {
             self.reachable.remove(&module);
         }
         self.reachable.extend(result.added);
-        for diagnostic in &update.diagnostics {
-            eprintln!("[dev] diagnostic: {diagnostic}");
+        // An edit that introduces an unresolved import would hot-patch a chunk that
+        // throws on load. Fail the rebuild instead; the caller catches this and
+        // shows the browser overlay, keeping the last good bundle served.
+        for warning in crate::bundler::partition_diagnostics(&update.diagnostics, "rebuild")? {
+            eprintln!("[dev] warning: {warning}");
         }
         Ok(Rebuilt {
             transformed,
@@ -399,7 +643,9 @@ pub fn run(options: DevOptions) -> Result<(), String> {
         let refresh_runtime = Arc::clone(&refresh_runtime);
         std::thread::Builder::new()
             .name("diffpack-dev-proxy".into())
-            .spawn(move || serve_proxy(proxy_listener, node_port, hub, refresh_runtime, None))
+            .spawn(move || {
+                serve_proxy(proxy_listener, node_port, hub, refresh_runtime, None, None)
+            })
             .map_err(|error| format!("cannot start proxy thread: {error}"))?;
     }
     println!(
@@ -743,24 +989,26 @@ fn hmr_push_client(
 
     // The chunk(s) the browser re-imports to pick up the new factories.
     let chunks: BTreeSet<String> = if let Some(output_root) = micro_chunk {
-        match client_env
-            .bundler
-            .render_hmr_chunk(&reachable, changed_ids, "client.js", client_env.options)
-        {
-            Ok(Some(code)) => {
-                let path = output_root.join("public/client.hmr.js");
-                if let Err(error) = std::fs::write(&path, code) {
-                    hub.broadcast_reload();
-                    return format!("client: micro-chunk write failed ({error}); reloaded");
-                }
-                std::iter::once("/client.hmr.js".to_string()).collect()
-            }
+        // The micro-chunk is written WITH its source map (see `write_hmr_chunk`) —
+        // the edited module's stack traces are the whole point of a hot update.
+        match client_env.bundler.write_hmr_chunk(
+            &reachable,
+            changed_ids,
+            "client.js",
+            client_env.options,
+            // The client graph emits browser ESM; the micro-chunk must match it or a
+            // hot-updated module's `__dirname`/`__filename` would not be the browser
+            // stubs the rest of the chunk uses.
+            crate::bundler::ModuleFormat::BrowserEsm,
+            &output_root.join("public/client.hmr.js"),
+        ) {
+            Ok(true) => std::iter::once("/client.hmr.js".to_string()).collect(),
             // No live changed module rendered — nothing to push (defensive; located
             // was non-empty, so this is unexpected but not a crash).
-            Ok(None) => return "client: no live changed module for micro-chunk".to_string(),
+            Ok(false) => return "client: no live changed module for micro-chunk".to_string(),
             Err(error) => {
                 hub.broadcast_reload();
-                return format!("client: micro-chunk render failed ({error}); reloaded");
+                return format!("client: micro-chunk render/write failed ({error}); reloaded");
             }
         }
     } else {
@@ -792,13 +1040,20 @@ fn json_string(value: &str) -> String {
 
 /// Minimal HTTP POST to the emitted server's loopback control endpoint.
 fn post_control(control_port: u16, json: &str) -> Result<(), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", control_port))
-        .map_err(|error| format!("cannot reach hmr control on :{control_port}: {error}"))?;
+    post_json(control_port, "/__diffpack_hmr", json)
+}
+
+/// Minimal loopback HTTP POST of a JSON body. Non-200 (and any transport failure) is
+/// an error carrying the server's reason — a dev control channel that silently no-ops
+/// is exactly how stale output ships.
+fn post_json(port: u16, path: &str, json: &str) -> Result<(), String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|error| format!("cannot reach 127.0.0.1:{port}{path}: {error}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .ok();
     let request = format!(
-        "POST /__diffpack_hmr HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
         json.len()
     );
     stream
@@ -813,10 +1068,15 @@ fn post_control(control_port: u16, json: &str) -> Result<(), String> {
     if head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200") {
         Ok(())
     } else {
-        Err(format!(
-            "control endpoint returned: {}",
-            head.lines().next().unwrap_or("<no status>")
-        ))
+        // Carry the BODY, not just the status line: the endpoint answers a failure with
+        // the reason (usually a stack from the module it could not apply), and dropping
+        // it turns a diagnosable error into "something went wrong".
+        let (status, body) = head
+            .split_once("\r\n\r\n")
+            .map_or((head.as_ref(), ""), |(head, body)| {
+                (head.lines().next().unwrap_or("<no status>"), body)
+            });
+        Err(format!("control endpoint returned {status}: {body}"))
     }
 }
 
@@ -884,13 +1144,16 @@ fn build_client(
     // DEV-ONLY: instrument the client graph for HMR / React Fast Refresh, and
     // select the dependencies' development builds.
     config::set_development_mode(&mut config);
+    // Dev serves source maps by default (`--no-sourcemap` opts out), so the real
+    // per-module map is produced exactly when the emit will write one.
+    config.build.source_maps = options.source_map;
     let entry = config
         .entry
         .clone()
         .ok_or_else(|| "no client entry found for the app".to_string())?;
     let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
-    for diagnostic in &update.diagnostics {
-        println!("[dev] client known gap: {diagnostic}");
+    for warning in crate::bundler::partition_diagnostics(&update.diagnostics, "dev client build")? {
+        println!("[dev] warning: {warning}");
     }
     let session = bundler.direct_reachability();
     let reachable = session.reachable_modules();
@@ -937,13 +1200,14 @@ fn build_server(
     // so a server edit hot-reloads without restarting Node.
     config::set_development_mode(&mut config);
     register_server_virtual_modules(&mut config, project_root, output_root)?;
+    config.build.source_maps = options.source_map;
     let entry = config
         .entry
         .clone()
         .ok_or_else(|| "no ssr entry found for the app".to_string())?;
     let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
-    for diagnostic in &update.diagnostics {
-        println!("[dev] server known gap: {diagnostic}");
+    for warning in crate::bundler::partition_diagnostics(&update.diagnostics, "dev server build")? {
+        println!("[dev] warning: {warning}");
     }
     let session = bundler.direct_reachability();
     let reachable = session.reachable_modules();
@@ -967,13 +1231,28 @@ fn register_server_virtual_modules(
     project_root: &Path,
     output_root: &Path,
 ) -> Result<(), String> {
+    // TanStack Start's dev-time head-script manifest, derived from the CLIENT build's
+    // output — which is what makes the client build have to run first. Only a
+    // `@tanstack/start-server-core` graph can import it, so the Next server graphs
+    // register the rest of these modules without it (see
+    // `register_next_server_virtual_modules`) and are free to build before the client.
     let client_manifest_path = output_root.join(manifest::CLIENT_MANIFEST_FILE);
     let client_manifest = ClientRouteManifest::read(&client_manifest_path)?;
     config.build.virtual_modules.push((
         manifest::START_MANIFEST_SPECIFIER.to_string(),
         client_manifest.to_start_manifest_source(),
     ));
+    register_next_server_virtual_modules(config, project_root)
+}
 
+/// The server-graph virtual modules a NEXT app-router graph needs: the native server-fn
+/// resolver plus the RSC action resolver / endpoint / client transport. Deliberately
+/// excludes TanStack Start's client-derived manifest (unimportable from a Next graph), so
+/// nothing here depends on the client build having already emitted.
+fn register_next_server_virtual_modules(
+    config: &mut AppConfig,
+    project_root: &Path,
+) -> Result<(), String> {
     let server_fns = server_fn::scan_project_server_fns(project_root)?;
     config.build.virtual_modules.push((
         server_fn::RESOLVER_SPECIFIER.to_string(),
@@ -1004,10 +1283,17 @@ fn reachable_ids(build: &EnvBuild) -> BTreeSet<String> {
     build.reachable.clone()
 }
 
-/// Reserve an ephemeral loopback port for the Node child by binding and
-/// immediately dropping a listener, returning its number.
+/// Reserve an ephemeral port for the Node child by binding and immediately dropping a
+/// listener, returning its number.
+///
+/// Bound on the WILDCARD address, not on `127.0.0.1`, because the Node child listens on
+/// the wildcard (dual-stack) too. A loopback-only probe considers a port free while
+/// another process holds the same number on the wildcard, so it hands out a port the child
+/// then fails to bind with `EADDRINUSE` — which surfaces 15 seconds later as "node did not
+/// listen", with nothing pointing at the real cause. Seen for real, from a leaked
+/// orchestrator of a previous run.
 fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
+    let listener = TcpListener::bind("0.0.0.0:0")
         .map_err(|error| format!("cannot reserve a port for the node runtime: {error}"))?;
     listener
         .local_addr()
@@ -1064,12 +1350,18 @@ fn serve_proxy(
     // browser's HMR chunk fetch (`/client.js?__diffpack_hmr=1`) off the critical path
     // of a Node round-trip; route documents (no matching file) still forward to Node.
     static_dir: Option<Arc<PathBuf>>,
+    // Set when the Next dev server is compiling routes on demand: a request whose route
+    // is not compiled yet waits here (and learns the orchestrator's port from it) instead
+    // of being forwarded to a server that cannot answer it. `None` is the eager topology,
+    // where `node_port` is already correct and nothing blocks.
+    lazy: Option<Arc<LazyRoutes>>,
 ) {
     for connection in listener.incoming() {
         let Ok(stream) = connection else { continue };
         let hub = hub.clone();
         let refresh_runtime = Arc::clone(&refresh_runtime);
         let static_dir = static_dir.clone();
+        let lazy = lazy.clone();
         let _ = std::thread::Builder::new()
             .name("diffpack-dev-conn".into())
             .spawn(move || {
@@ -1079,6 +1371,7 @@ fn serve_proxy(
                     &hub,
                     &refresh_runtime,
                     static_dir.as_deref().map(|p| p.as_path()),
+                    lazy.as_deref(),
                 ) {
                     // A dropped browser connection is normal; log at a low volume.
                     let _ = error;
@@ -1098,6 +1391,7 @@ fn handle_connection(
     hub: &HmrHub,
     refresh_runtime: &str,
     static_dir: Option<&Path>,
+    lazy: Option<&LazyRoutes>,
 ) -> Result<(), String> {
     let mut reader = BufReader::new(
         stream
@@ -1145,12 +1439,48 @@ fn handle_connection(
         .filter(|_| method == "GET")
         .and_then(|dir| resolve_static_file(dir, path))
     {
-        write_file(&mut stream, &file)?;
+        write_file(
+            &mut stream,
+            &file,
+            if_none_match(&headers),
+            accepts_gzip(&headers),
+        )?;
         return Ok(());
     }
 
     // Read the request body (for server-fn POSTs) so it forwards intact.
     let body = read_body(&mut reader, &headers)?;
+    // LAZY COMPILATION. Block here until the route behind this path exists in the live
+    // graphs. Deliberately AFTER the static fast path (an emitted chunk needs no route)
+    // and before anything is forwarded, so an uncompiled route is a slow request rather
+    // than a wrong answer. A build failure becomes the same 500 overlay any other build
+    // error gets, instead of a hung connection.
+    let node_port = match lazy.filter(|lazy| lazy.incomplete()) {
+        Some(lazy) => match lazy.ensure(path) {
+            Ok(Some(port)) => port,
+            Ok(None) => node_port,
+            Err(error) => {
+                let error = format!("diffpack dev: {error}");
+                eprintln!("[dev] {error}");
+                let document = synthesize_ssr_error_document(&error);
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{document}",
+                    document.len(),
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .map_err(|error| format!("cannot write build-error response: {error}"))?;
+                stream.flush().ok();
+                return Ok(());
+            }
+        },
+        None => node_port,
+    };
+    // Counted as in-flight only from HERE — after any wait for a build. The background fill
+    // holds off while requests are in flight, and a request that is itself waiting for that
+    // fill would otherwise keep the server permanently "busy" and stall the very build it
+    // is waiting for.
+    let _in_flight = lazy.map(|lazy| lazy.serving_request());
     let upstream = forward_to_node(node_port, &method, &target, &headers, &body)?;
     let response = maybe_inject_hmr(upstream);
     stream
@@ -1160,7 +1490,7 @@ fn handle_connection(
     Ok(())
 }
 
-/// Write a JavaScript module response (dev; no caching).
+/// Write a JavaScript module response (dev; revalidated, never blindly reused).
 fn write_js(stream: &mut TcpStream, body: &str) -> Result<(), String> {
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/javascript; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1171,6 +1501,157 @@ fn write_js(stream: &mut TcpStream, body: &str) -> Result<(), String> {
         .and_then(|()| stream.write_all(body.as_bytes()))
         .and_then(|()| stream.flush())
         .map_err(|error| format!("cannot write js response: {error}"))
+}
+
+/// The `If-None-Match` a request carries, if any.
+fn if_none_match(headers: &[(String, String)]) -> Option<&str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
+        .map(|(_, value)| value.as_str())
+}
+
+/// A validator for an emitted file: its length and modification time.
+///
+/// Every dev emit rewrites these files, so mtime moving is exactly the signal a
+/// browser needs, and unlike hashing the bytes it costs nothing on the multi-megabyte
+/// dev chunk. It is a weak tag because mtime is not a content digest — which is the
+/// comparison `If-None-Match` is defined to use anyway.
+fn file_validator(meta: &std::fs::Metadata) -> Option<String> {
+    let nanos = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("W/\"{:x}-{nanos:x}\"", meta.len()))
+}
+
+/// Whether an `If-None-Match` list matches this entity tag. Weak comparison: the
+/// `W/` prefix is ignored on both sides, and `*` matches any existing entity.
+fn etag_matches(if_none_match: &str, etag: &str) -> bool {
+    let strip = |tag: &str| tag.trim().trim_start_matches("W/").trim().to_string();
+    let want = strip(etag);
+    if_none_match
+        .split(',')
+        .any(|candidate| candidate.trim() == "*" || strip(candidate) == want)
+}
+
+/// Whether a request will accept a gzip-encoded response.
+fn accepts_gzip(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
+        .is_some_and(|(_, value)| {
+            value.split(',').any(|token| {
+                let token = token.trim();
+                let name = token.split(';').next().unwrap_or("").trim();
+                // `gzip;q=0` is a refusal, not an offer.
+                name.eq_ignore_ascii_case("gzip")
+                    && !token
+                        .split(';')
+                        .any(|part| part.trim().replace(' ', "") == "q=0")
+            })
+        })
+}
+
+/// Whether a content type is worth compressing. Text compresses 5-8x; the image,
+/// font and wasm formats served here are already compressed, and running deflate
+/// over them costs time and saves nothing.
+fn compressible(content_type: &str) -> bool {
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    base.starts_with("text/")
+        || matches!(
+            base,
+            "application/javascript"
+                | "application/json"
+                | "application/manifest+json"
+                | "image/svg+xml"
+        )
+}
+
+/// gzip bytes at the fastest level.
+///
+/// Dev serves a multi-megabyte client bundle, so this runs on the hot path of every
+/// full page load: level 1 gets most of the ratio (the cal.com dev bundle goes 17.8 MB
+/// -> under 3 MB) for a fraction of the CPU of the default level, and the result is
+/// memoised per (path, size, mtime) so a repeat request re-sends bytes it already has.
+fn gzip_fast(bytes: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(bytes).ok()?;
+    encoder.finish().ok()
+}
+
+/// Compressed copies of emitted text assets, keyed by path and invalidated by the
+/// same (size, mtime) validator the ETag uses — so an edit is never served stale, and
+/// an unchanged bundle is only ever compressed once.
+///
+/// Bounded on both axes: a single entry over `MAX_ENTRY` is not worth holding, and the
+/// map is cleared once it exceeds `MAX_TOTAL` rather than growing for the life of a
+/// dev session.
+struct GzipCache {
+    entries: HashMap<PathBuf, (u64, u128, Arc<Vec<u8>>)>,
+    total: usize,
+}
+
+impl GzipCache {
+    const MAX_ENTRY: usize = 64 * 1024 * 1024;
+    const MAX_TOTAL: usize = 256 * 1024 * 1024;
+
+    fn global() -> &'static Mutex<GzipCache> {
+        static CACHE: OnceLock<Mutex<GzipCache>> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            Mutex::new(GzipCache {
+                entries: HashMap::new(),
+                total: 0,
+            })
+        })
+    }
+
+    /// The gzip of `bytes`, from the cache when the file has not changed since it was
+    /// compressed. A poisoned lock or an oversized entry falls back to compressing
+    /// without caching, never to sending nothing.
+    fn get(path: &Path, len: u64, mtime: u128, bytes: &[u8]) -> Option<Arc<Vec<u8>>> {
+        if let Ok(cache) = Self::global().lock()
+            && let Some((cached_len, cached_mtime, gz)) = cache.entries.get(path)
+            && *cached_len == len
+            && *cached_mtime == mtime
+        {
+            return Some(Arc::clone(gz));
+        }
+        let gz = Arc::new(gzip_fast(bytes)?);
+        if gz.len() <= Self::MAX_ENTRY
+            && let Ok(mut cache) = Self::global().lock()
+        {
+            {
+                if cache.total + gz.len() > Self::MAX_TOTAL {
+                    cache.entries.clear();
+                    cache.total = 0;
+                }
+                if let Some((_, _, old)) = cache
+                    .entries
+                    .insert(path.to_path_buf(), (len, mtime, Arc::clone(&gz)))
+                {
+                    cache.total = cache.total.saturating_sub(old.len());
+                }
+                cache.total += gz.len();
+            }
+        }
+        Some(gz)
+    }
+}
+
+/// A `304 Not Modified` for a request whose `If-None-Match` still matches. A 304
+/// carries no body and no `Content-Length`.
+fn write_not_modified(stream: &mut TcpStream, etag: &str) -> Result<(), String> {
+    let header = format!(
+        "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(header.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("cannot write 304 response: {error}"))
 }
 
 /// Resolve a URL path to an existing regular file under `dir`, or `None`. Guards
@@ -1185,8 +1666,26 @@ fn resolve_static_file(dir: &Path, url_path: &str) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// Serve a file off disk as a dev HTTP response (no caching, `Connection: close`).
-fn write_file(stream: &mut TcpStream, file: &Path) -> Result<(), String> {
+/// Serve a file off disk as a dev HTTP response (`Connection: close`).
+///
+/// The response carries a validator and `Cache-Control: no-cache`: the browser must
+/// ask every time, but when nothing changed it gets a 304 and reuses what it already
+/// has — including V8's compiled-code cache for that script. Without this the dev
+/// client bundle was re-sent and re-compiled on every full navigation, which on
+/// cal.com meant 18 MB per page load and made a warm route slower than it is.
+fn write_file(
+    stream: &mut TcpStream,
+    file: &Path,
+    if_none_match: Option<&str>,
+    gzip: bool,
+) -> Result<(), String> {
+    let meta = std::fs::metadata(file).ok();
+    let etag = meta.as_ref().and_then(file_validator);
+    if let (Some(etag), Some(sent)) = (&etag, if_none_match)
+        && etag_matches(sent, etag)
+    {
+        return write_not_modified(stream, etag);
+    }
     let bytes =
         std::fs::read(file).map_err(|error| format!("cannot read {}: {error}", file.display()))?;
     let content_type = match file.extension().and_then(|value| value.to_str()) {
@@ -1209,13 +1708,38 @@ fn write_file(stream: &mut TcpStream, file: &Path) -> Result<(), String> {
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     };
+    let validator = etag
+        .map(|etag| format!("ETag: {etag}\r\n"))
+        .unwrap_or_default();
+    // The dev client bundle is megabytes of text. Uncompressed it dominated every
+    // full page load on the wire; gzip takes cal.com's 17.8 MB bundle under 3 MB, and
+    // the compressed copy is memoised so only the first request after an edit pays.
+    let encoded = if gzip && compressible(content_type) {
+        meta.as_ref()
+            .and_then(|meta| {
+                let mtime = meta
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos();
+                GzipCache::get(file, meta.len(), mtime, &bytes)
+            })
+            .filter(|gz| gz.len() < bytes.len())
+    } else {
+        None
+    };
+    let (body, encoding) = match &encoded {
+        Some(gz) => (gz.as_slice(), "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n"),
+        None => (bytes.as_slice(), ""),
+    };
     let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        bytes.len()
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{validator}{encoding}Cache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     );
     stream
         .write_all(header.as_bytes())
-        .and_then(|()| stream.write_all(&bytes))
+        .and_then(|()| stream.write_all(body))
         .and_then(|()| stream.flush())
         .map_err(|error| format!("cannot write file response: {error}"))
 }
@@ -1565,6 +2089,54 @@ fn rfind_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 
 // --- watch helpers ------------------------------------------------------------
 
+/// Every filesystem event either watch source delivered that the watch loop would
+/// ACT on, counted.
+///
+/// The channel tells the watch loop WHAT changed; this tells anything else in the
+/// process THAT something changed, without owning the receiver. Deferred work (chunk
+/// compaction, the stylesheet recompile) samples it before it starts and polls it while
+/// it runs, so an edit landing mid-pass abandons that pass instead of queueing behind
+/// it.
+///
+/// It counts only paths that pass the loop's own filter, and that is load-bearing
+/// rather than an optimisation: the watch roots contain `node_modules` and diffpack's
+/// own output directory, so an unfiltered count is bumped by the emit's own writes —
+/// deferred work would then cancel itself, every time, and never finish.
+static WATCH_EVENTS_SEEN: AtomicU64 = AtomicU64::new(0);
+
+/// The tree the watch loop judges paths against (see `is_dependency_or_generated`).
+/// Set once when a dev server starts; a process runs one.
+static WATCH_BASE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Count `paths` if any of them is a source file the loop would rebuild for.
+fn note_watch_paths(paths: &[PathBuf]) {
+    let base = WATCH_BASE.lock().unwrap().clone();
+    let relevant = paths.iter().any(|path| {
+        is_module_path(path)
+            && base
+                .as_deref()
+                .is_none_or(|base| !is_dependency_or_generated(path, base))
+    });
+    if relevant {
+        WATCH_EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A snapshot of [`WATCH_EVENTS_SEEN`] and the question deferred work asks of it.
+#[derive(Copy, Clone)]
+struct EventEpoch(u64);
+
+impl EventEpoch {
+    fn now() -> Self {
+        Self(WATCH_EVENTS_SEEN.load(Ordering::Relaxed))
+    }
+
+    /// Whether any file event has arrived since this epoch was taken.
+    fn superseded(&self) -> bool {
+        WATCH_EVENTS_SEEN.load(Ordering::Relaxed) != self.0
+    }
+}
+
 fn start_watcher(root: &Path) -> Result<Receiver<notify::Result<notify::Event>>, String> {
     start_watcher_paths(&[(root.to_path_buf(), RecursiveMode::Recursive)])
 }
@@ -1573,10 +2145,131 @@ fn start_watcher(root: &Path) -> Result<Receiver<notify::Result<notify::Event>>,
 /// The SPA path watches `src` recursively AND the project root non-recursively, so
 /// root-level files (`index.html`, `vite.config.*`) are seen without recursing into
 /// `node_modules`.
+/// The source trees `diffpack dev` must watch, derived from the modules the build
+/// ACTUALLY compiled rather than from a convention directory.
+///
+/// Watching only `app/` was wrong for every application bigger than an example: a Next
+/// app keeps its components in `components/`, `modules/`, `lib/`, `src/`, and in a
+/// monorepo in sibling workspace packages. Editing any of those produced no event at
+/// all — the dev server sat there while nothing happened, which is worse than a slow
+/// rebuild because it looks like the tool is working. cal.com renders its login form
+/// from `apps/web/modules/auth/login-view.tsx` and its design system from
+/// `packages/ui/**`; neither is under `app/`.
+///
+/// Every reachable module's directory is collected and then reduced to the ONE level
+/// below their deepest common ancestor: for a monorepo that is `<repo>/apps` and
+/// `<repo>/packages`, for a standalone app `<app>/app`, `<app>/components`, … The
+/// common ancestor itself is watched non-recursively, so a loose file sitting directly
+/// in it (cal.com's root `i18n.json`, which its i18n config reads) is covered without
+/// one such file collapsing the whole tree into a single enormous root.
+///
+/// Modules inside `node_modules` are excluded (a dependency is not edited during a dev
+/// session, and the trees are enormous), as is anything inside a dot directory
+/// (`.diffpack-next` shims and other generated output — regenerating them during a
+/// rebuild must not look like a user edit and retrigger one).
+/// Whether `path` is inside an installed dependency or inside generated output — the
+/// two kinds of file a source watcher must never treat as a user edit. One rule covers
+/// both: `node_modules`, and any dot directory (`.diffpack-output`, `.diffpack-next`,
+/// `.next`, `.git`, `.turbo`). Application source never lives in either.
+///
+/// Only the part of the path BELOW `base` is examined. A project can perfectly well
+/// live inside a dot directory itself (`~/.config/site`, a CI checkout under
+/// `/.builds/…`); judging the absolute path would then exclude every file in it and
+/// the dev server would silently stop reacting to anything.
+fn is_dependency_or_generated(path: &Path, base: &Path) -> bool {
+    let relative = path.strip_prefix(base).unwrap_or(path);
+    relative.components().any(|component| {
+        let name = component.as_os_str();
+        name == "node_modules" || name.as_encoded_bytes().starts_with(b".")
+    })
+}
+
+fn source_watch_roots(
+    project_root: &Path,
+    envs: [&EnvBuild; 3],
+) -> Vec<(PathBuf, RecursiveMode)> {
+    let mut directories: BTreeSet<PathBuf> = BTreeSet::new();
+    for env in envs {
+        for id in &env.reachable {
+            // A module id can carry a `?query` (route splits, virtual variants); the
+            // file on disk is the part before it.
+            let path = Path::new(id.split('?').next().unwrap_or(id.as_str()));
+            if !path.is_absolute() {
+                continue;
+            }
+            let excluded = path.components().any(|component| {
+                let name = component.as_os_str();
+                name == "node_modules" || name.as_encoded_bytes().starts_with(b".")
+            });
+            if excluded {
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                directories.insert(parent.to_path_buf());
+            }
+        }
+    }
+    if directories.is_empty() {
+        return vec![(project_root.to_path_buf(), RecursiveMode::Recursive)];
+    }
+    // The deepest common ancestor, never allowed above the project's own parent: a
+    // module linked in from somewhere else entirely must not turn `/` (or `/Users`)
+    // into a watch root.
+    let mut common = directories
+        .iter()
+        .cloned()
+        .reduce(|a, b| {
+            a.ancestors()
+                .find(|ancestor| b.starts_with(ancestor))
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("/"))
+        })
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let floor = project_root.parent().unwrap_or(project_root);
+    if !floor.starts_with(&common) || common.components().count() < 2 {
+        common = project_root.to_path_buf();
+    }
+
+    let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
+    for directory in &directories {
+        // A directory outside the common ancestor (only reachable when the ancestor was
+        // clamped above) is watched on its own; otherwise take the one segment below it.
+        match directory.strip_prefix(&common) {
+            Ok(relative) => {
+                if let Some(first) = relative.components().next() {
+                    roots.insert(common.join(first));
+                }
+            }
+            Err(_) => {
+                roots.insert(directory.clone());
+            }
+        }
+    }
+    let mut out = vec![(common, RecursiveMode::NonRecursive)];
+    out.extend(roots.into_iter().map(|root| (root, RecursiveMode::Recursive)));
+    out
+}
+
 fn start_watcher_paths(
     roots: &[(PathBuf, RecursiveMode)],
 ) -> Result<Receiver<notify::Result<notify::Event>>, String> {
     let (events, receiver) = mpsc::channel();
+    start_watcher_paths_into(roots, events)?;
+    Ok(receiver)
+}
+
+/// [`start_watcher_paths`] against a channel the caller owns, so a second set of roots can
+/// be added later without losing what the first set has already queued.
+///
+/// The Next dev server needs exactly that: it starts watching as soon as the FIRST build
+/// exists (so an edit during the background fill is not silently dropped), and the fill then
+/// compiles more of the app, which can pull in source directories the first build never
+/// reached. Both watchers feed one receiver; the watch loop already drops an event whose
+/// `(mtime, len)` it has processed, so overlapping roots cost nothing but a duplicate event.
+fn start_watcher_paths_into(
+    roots: &[(PathBuf, RecursiveMode)],
+    events: Sender<notify::Result<notify::Event>>,
+) -> Result<(), String> {
     // TWO event sources feed one channel:
     //
     // 1. The OS-native backend (FSEvents on macOS, inotify on Linux) — the RELIABLE
@@ -1593,7 +2286,10 @@ fn start_watcher_paths(
     // double-detection never causes a second rebuild.
     let mut watcher = notify::recommended_watcher({
         let events = events.clone();
-        move |event| {
+        move |event: notify::Result<notify::Event>| {
+            if let Ok(event) = &event {
+                note_watch_paths(&event.paths);
+            }
             let _ = events.send(event);
         }
     })
@@ -1606,7 +2302,26 @@ fn start_watcher_paths(
     // Leak the watcher so it lives for the whole process (dropping it stops watching).
     Box::leak(Box::new(watcher));
     spawn_supplement_poller(roots.to_vec(), events);
-    Ok(receiver)
+    Ok(())
+}
+
+/// The roots in `wanted` that `covered` does not already watch — a root is covered by an
+/// equal path, or by a recursive ancestor of it.
+fn uncovered_watch_roots(
+    wanted: &[(PathBuf, RecursiveMode)],
+    covered: &[(PathBuf, RecursiveMode)],
+) -> Vec<(PathBuf, RecursiveMode)> {
+    wanted
+        .iter()
+        .filter(|(root, mode)| {
+            !covered.iter().any(|(existing, existing_mode)| {
+                existing == root
+                    || (*existing_mode == RecursiveMode::Recursive && root.starts_with(existing))
+                    || (*mode == RecursiveMode::NonRecursive && root.starts_with(existing))
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// The fast supplementary poller (see [`start_watcher_paths`]). Walks the watched
@@ -1625,6 +2340,7 @@ fn spawn_supplement_poller(
             let mut snapshot: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
             let mut first = true;
             loop {
+                let scan_started = Instant::now();
                 let mut current: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
                 for (root, mode) in &roots {
                     scan_root(root, *mode, &mut current);
@@ -1637,6 +2353,7 @@ fn spawn_supplement_poller(
                                 notify::event::ModifyKind::Any,
                             ))
                             .add_path(path.clone());
+                            note_watch_paths(&event.paths);
                             if events.send(Ok(event)).is_err() {
                                 return; // receiver gone: dev server shutting down.
                             }
@@ -1645,7 +2362,17 @@ fn spawn_supplement_poller(
                 }
                 snapshot = current;
                 first = false;
-                std::thread::sleep(Duration::from_millis(2));
+                // SELF-THROTTLING. The 2ms interval is tuned for a small source tree,
+                // where a scan costs microseconds. A real application's watch set is
+                // orders of magnitude larger (cal.com compiles ~6k modules across a
+                // monorepo), and a fixed 2ms interval there would burn a whole core
+                // scanning. The poller is only a LATENCY optimization — the OS watcher
+                // is the never-miss backstop — so it caps itself at a ~20% duty cycle:
+                // small trees keep the 2ms floor and their ~1ms detection, large ones
+                // degrade gracefully toward the OS watcher's latency instead of
+                // degrading the machine.
+                let scan = scan_started.elapsed();
+                std::thread::sleep(std::cmp::max(Duration::from_millis(2), scan * 4));
             }
         });
 }
@@ -1665,7 +2392,13 @@ fn scan_root(root: &Path, mode: RecursiveMode, out: &mut HashMap<PathBuf, (Syste
         if file_type.is_dir() {
             if mode == RecursiveMode::Recursive {
                 let name = entry.file_name();
-                if name == "node_modules" || name == ".diffpack-output" || name == ".git" {
+                // `node_modules` and every DOT directory. The latter covers `.git`,
+                // `.diffpack-output`, `.next`, `.turbo`, `.yarn` and any other tool
+                // cache in one rule: application source never lives in a dot directory,
+                // and those caches are both large and constantly rewritten, so polling
+                // them costs a great deal and can never detect a user edit. The OS
+                // watcher still sees them.
+                if name == "node_modules" || name.as_encoded_bytes().starts_with(b".") {
                     continue;
                 }
                 scan_root(&path, mode, out);
@@ -1738,6 +2471,16 @@ fn is_module_path(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|extension| extension.to_str()),
         Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "json" | "css" | "scss" | "sass" | "less")
+    )
+}
+
+/// Whether a path is a stylesheet source. Such an edit's visible result IS the
+/// generated sheet, so the dev loop recompiles and delivers it on the edit rather
+/// than waiting for any idle.
+fn is_stylesheet_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("css" | "scss" | "sass" | "less" | "styl")
     )
 }
 
@@ -1938,12 +2681,15 @@ mod spa {
         config: &crate::config::WebConfig,
         emit_options: EmitOptions,
     ) -> Result<EnvBuild, String> {
-        let (bundler, update) = Bundler::discover_direct_with_config(entry, &config.build)?;
-        // A dangling import in a dev build is a real error, but surface it as a
-        // diagnostic (like the TanStack path) rather than aborting the whole server
-        // — the browser overlay work is deferred, so print and continue.
-        for diagnostic in &update.diagnostics {
-            println!("[dev] client known gap: {diagnostic}");
+        let mut build_config = config.build.clone();
+        build_config.source_maps = emit_options.source_map;
+        let (bundler, update) = Bundler::discover_direct_with_config(entry, &build_config)?;
+        // The initial build is a hard error: a dev server with nothing loadable to
+        // serve should say so, not start and hand the browser a broken chunk.
+        for warning in
+            crate::bundler::partition_diagnostics(&update.diagnostics, "dev client build")?
+        {
+            println!("[dev] warning: {warning}");
         }
         let session = bundler.direct_reachability();
         let reachable = session.reachable_modules();
@@ -2211,7 +2957,7 @@ mod spa {
 
     /// Broadcast a CSS hot-swap for the given stylesheet hrefs (the browser replaces
     /// each matching `<link>` in place, preserving all component state).
-    fn push_css(hrefs: &[String], hub: &HmrHub) {
+    pub(super) fn push_css(hrefs: &[String], hub: &HmrHub) {
         let list = hrefs
             .iter()
             .map(|href| json_string(href))
@@ -2375,9 +3121,24 @@ mod spa {
         // public/ files). Base-prefix stripped; path traversal rejected.
         if let Some(file) = resolve_static(output_root, base, path) {
             if file.is_file() {
+                // Same validator as the Next dev path: revalidate every time, but let
+                // an unchanged chunk be reused instead of re-sent and re-compiled.
+                let etag = fs::metadata(&file).ok().as_ref().and_then(file_validator);
+                if let (Some(etag), Some(sent)) = (&etag, if_none_match(&headers))
+                    && etag_matches(sent, etag)
+                {
+                    return write_not_modified(&mut stream, etag);
+                }
                 let bytes = fs::read(&file)
                     .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
-                return write_response(&mut stream, "200 OK", content_type(&file), &bytes, head_only);
+                return write_static_response(
+                    &mut stream,
+                    content_type(&file),
+                    &bytes,
+                    head_only,
+                    etag.as_deref(),
+                    accepts_gzip(&headers).then_some(file.as_path()),
+                );
             }
             // A path that names a concrete file (has an extension) but is missing is
             // a real 404 — not the SPA document.
@@ -2456,6 +3217,58 @@ mod spa {
             Some("txt") => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         }
+    }
+
+    /// Write an emitted static file as a `200 OK` carrying its validator, so the next
+    /// navigation can revalidate into a 304 instead of re-downloading the chunk.
+    /// `gzip_for` is the file's path when the client accepts gzip; passing it opts the
+    /// response into the same memoised compression the Next dev path uses.
+    fn write_static_response(
+        stream: &mut TcpStream,
+        content_type: &str,
+        body: &[u8],
+        head_only: bool,
+        etag: Option<&str>,
+        gzip_for: Option<&Path>,
+    ) -> Result<(), String> {
+        let validator = etag
+            .map(|etag| format!("ETag: {etag}\r\n"))
+            .unwrap_or_default();
+        let encoded = gzip_for
+            .filter(|_| compressible(content_type))
+            .and_then(|file| {
+                let meta = fs::metadata(file).ok()?;
+                let mtime = meta
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos();
+                GzipCache::get(file, meta.len(), mtime, body)
+            })
+            .filter(|gz| gz.len() < body.len());
+        let (body, encoding) = match &encoded {
+            Some(gz) => (
+                gz.as_slice(),
+                "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n",
+            ),
+            None => (body, ""),
+        };
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{validator}{encoding}Cache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .map_err(|error| format!("cannot write response head: {error}"))?;
+        if !head_only {
+            stream
+                .write_all(body)
+                .map_err(|error| format!("cannot write response body: {error}"))?;
+        }
+        stream
+            .flush()
+            .map_err(|error| format!("cannot flush response: {error}"))
     }
 
     /// Write a complete HTTP/1.1 response (dev; no caching, `Connection: close`).
@@ -2575,6 +3388,7 @@ mod spa {
 /// `<out>/.rsc/server` and copying to `<out>/rsc-render` keeps them separate.
 mod next {
     use super::*;
+    use crate::next_adapter::RouteScope;
     use std::fs;
 
     /// The next orchestrator, embedded so the dev server is self-contained (it does
@@ -2599,42 +3413,43 @@ mod next {
             ..EmitOptions::default()
         };
 
-        // Build order is load-bearing: client first (its manifest feeds the server
-        // graphs), then react-server (-> rsc-render), then ssr.
-        println!("[dev] next: building client graph...");
-        let mut client = build_next_client(project_root, &output_root, emit_options)?;
-        println!("[dev] next: building react-server graph...");
-        let mut react_server =
-            build_next_react_server(project_root, &output_root, &rsc_root, emit_options)?;
-        println!("[dev] next: building ssr graph...");
-        let mut ssr = build_next_ssr(project_root, &output_root, emit_options)?;
-
-        // Write the orchestrator into the output dir and boot it on an internal port.
-        let next_server_script = output_root.join("next-server.mjs");
-        fs::create_dir_all(&output_root)
-            .map_err(|error| format!("cannot create {}: {error}", output_root.display()))?;
-        fs::write(&next_server_script, NEXT_SERVER_MJS).map_err(|error| {
-            format!("cannot write {}: {error}", next_server_script.display())
-        })?;
-        let node_port = free_port()?;
-        let mut node = spawn_next_node(&next_server_script, &output_root, node_port)?;
-        wait_for_node(node_port).inspect_err(|_| {
-            let _ = node.kill();
-        })?;
-        println!("[dev] next orchestrator listening on 127.0.0.1:{node_port}");
-
         // Fast Refresh runtime (must be present — a missing dep is a hard error now,
         // not a broken update later).
         let refresh_runtime = Arc::new(crate::hmr::find_refresh_runtime(project_root)?);
-
-        // The diffpack reverse proxy: serves the HMR client + Fast Refresh runtime,
-        // upgrades the WS channel, and injects the preamble into every HTML document.
         let hub = HmrHub::default();
-        let proxy_listener = TcpListener::bind(("127.0.0.1", options.port)).map_err(|error| {
-            let _ = node.kill();
-            format!("cannot bind dev port {}: {error}", options.port)
-        })?;
-        {
+
+        // Everything the orchestrator needs beyond the graph outputs, written
+        // before ANY boot (warm or cold) so both paths run the same bytes.
+        let next_server_script = output_root.join("next-server.mjs");
+        // Takes the output dir explicitly because the background fill emits into a SHADOW
+        // dir (see the fill below) that is then swapped in wholesale, and it has to carry
+        // the same orchestrator bytes.
+        let write_orchestrator_scripts = |dir: &Path| -> Result<(), String> {
+            fs::create_dir_all(dir)
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+            let script = dir.join("next-server.mjs");
+            fs::write(&script, NEXT_SERVER_MJS)
+                .map_err(|error| format!("cannot write {}: {error}", script.display()))?;
+            // The orchestrator imports this as a sibling (the one place that joins the
+            // three references manifests into the divergent-id ssrModuleMapping).
+            let ssr_module_map = dir.join(crate::rsc::SSR_MODULE_MAP_FILE);
+            fs::write(&ssr_module_map, include_str!("../scripts/rsc/ssr-module-map.mjs"))
+                .map_err(|error| format!("cannot write {}: {error}", ssr_module_map.display()))?;
+            Ok(())
+        };
+        let boot_node = |port: u16| -> Result<Child, String> {
+            let mut node = spawn_next_node(&next_server_script, project_root, &output_root, port)?;
+            wait_for_node(port).inspect_err(|_| {
+                let _ = node.kill();
+            })?;
+            Ok(node)
+        };
+        let start_proxy = |node_port: u16, lazy: Option<Arc<LazyRoutes>>| -> Result<(), String> {
+            // The diffpack reverse proxy: serves the HMR client + Fast Refresh
+            // runtime, upgrades the WS channel, and injects the preamble into
+            // every served HTML document.
+            let proxy_listener = TcpListener::bind(("127.0.0.1", options.port))
+                .map_err(|error| format!("cannot bind dev port {}: {error}", options.port))?;
             let hub = hub.clone();
             let refresh_runtime = Arc::clone(&refresh_runtime);
             // Serve the emitted client `public/` (chunks + assets) directly from the
@@ -2643,24 +3458,246 @@ mod next {
             std::thread::Builder::new()
                 .name("diffpack-dev-next-proxy".into())
                 .spawn(move || {
-                    serve_proxy(proxy_listener, node_port, hub, refresh_runtime, static_dir)
+                    serve_proxy(proxy_listener, node_port, hub, refresh_runtime, static_dir, lazy)
                 })
                 .map_err(|error| format!("cannot start proxy thread: {error}"))?;
+            Ok(())
+        };
+
+        // LAZY COMPILATION, OPT IN. Instead of compiling every route before answering
+        // anything, the dev server can put the proxy up first, let the first request say
+        // which route it wants, compile that, and fill in the rest behind it. The pattern
+        // table comes from discovery alone (a directory walk), so a request can be matched
+        // to a route before a single module is compiled.
+        //
+        // OFF by default, on measurement rather than taste. On cal.com it makes the first
+        // document faster (6.2s -> 5.4s) but a second route clicked during the ~7s
+        // background fill much slower (6.3s -> 12.7s), because widening the route scope
+        // renumbers every runtime module id and so costs a full second build. The eager
+        // path keeps every other win of this work (island pins derived from the
+        // react-server graph, react-server built first, the parallel Tailwind scan) with no
+        // such window. When ids become stable the fill turns incremental and this default
+        // should flip — see docs/DEV_LAZY_ROUTES.md §5.
+        //
+        //   DIFFPACK_DEV_LAZY=1     pages compile on demand, endpoints stay eager
+        //   DIFFPACK_DEV_LAZY=api   endpoints compile on demand too (measured SLOWER on
+        //                           cal.com, whose server render calls its own API)
+        let lazy_mode = std::env::var("DIFFPACK_DEV_LAZY").unwrap_or_default();
+        let lazy = match lazy_mode.as_str() {
+            "1" | "pages" | "api" => crate::next_adapter::discover_route_patterns(project_root)?
+                .map(|patterns| Arc::new(LazyRoutes::new(patterns))),
+            "" | "0" => None,
+            other => {
+                return Err(format!(
+                    "DIFFPACK_DEV_LAZY={other:?} is not a mode; use 1 (lazy pages), api (lazy pages + endpoints), or 0 (the default, compile everything up front)"
+                ));
+            }
+        };
+        let cold_started = Instant::now();
+        write_orchestrator_scripts(&output_root)?;
+        let node_port = free_port()?;
+        // The proxy binds BEFORE anything is compiled when lazy: a request arriving now is
+        // what tells the first build which route to compile, and it blocks in
+        // `LazyRoutes::ensure` until that build lands.
+        if lazy.is_some() {
+            start_proxy(node_port, lazy.clone())?;
+            println!(
+                "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} — routes compile on demand",
+                options.port,
+            );
         }
+
+        // The first build's scope: what the first visitor asked for, or the whole app when
+        // nobody asks within the grace period (nothing is waiting, so there is no reason
+        // to compile a subset).
+        let first_scope = match &lazy {
+            Some(lazy) => first_build_scope(lazy),
+            None => RouteScope::All,
+        };
+        println!("[dev] next: building graphs ({})...", first_scope.label());
+        let graphs_started = Instant::now();
+        let first = build_all_graphs(
+            project_root, &output_root, &rsc_root, emit_options, &first_scope,
+        )
+                .inspect_err(|error| {
+                    // Release anything blocked on this build with the real error rather
+                    // than leaving the connection hanging until the wait times out.
+                    if let Some(lazy) = &lazy {
+                        lazy.failed(error);
+                    }
+                })?;
+        let (mut client, mut react_server, mut ssr) = (first.client, first.react_server, first.ssr);
+        let graphs_ms = graphs_started.elapsed().as_secs_f64() * 1_000.0;
         println!(
-            "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} (proxying node :{node_port})",
-            options.port
+            "[dev] next: {} | wall {graphs_ms:.0}ms | {} islands pinned",
+            graph_timing_label(&first.timings),
+            crate::next_adapter::recorded_islands(project_root).len(),
         );
 
-        // Watch app/ recursively (all convention files live there) + the project root
-        // non-recursively (next.config.*), without recursing into node_modules.
-        let app_dir = project_root.join("app");
-        let watch_roots = vec![
-            (app_dir, RecursiveMode::Recursive),
-            (project_root.to_path_buf(), RecursiveMode::NonRecursive),
-        ];
-        let receiver = start_watcher_paths(&watch_roots)?;
-        println!("[dev] watching {}/app", project_root.display());
+        let boot_started = Instant::now();
+        let mut node = boot_node(node_port).inspect_err(|error| {
+            if let Some(lazy) = &lazy {
+                lazy.failed(error);
+            }
+        })?;
+        let boot_ms = boot_started.elapsed().as_secs_f64() * 1_000.0;
+        println!("[dev] next orchestrator listening on 127.0.0.1:{node_port} (boot {boot_ms:.0}ms)");
+        let cold_ms = cold_started.elapsed().as_secs_f64() * 1_000.0;
+        println!(
+            "[dev] next cold start: {cold_ms:.0}ms total (graphs {graphs_ms:.0} + boot {boot_ms:.0})",
+        );
+        // A dev server never reaches main's exit-time report (it blocks in the watch loop
+        // until killed), so the cold start prints its own stage table under
+        // `DIFFPACK_PROFILE=1`. Without this the startup breakdown is unobservable in the
+        // one process where startup is the whole question.
+        crate::build_profile::report("dev cold start", cold_ms);
+        // Whatever was waiting for this build can go now.
+        if let Some(lazy) = &lazy {
+            lazy.landed(&first_scope, node_port);
+        }
+        if lazy.is_none() {
+            start_proxy(node_port, None)?;
+            println!(
+                "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} (proxying node :{node_port})",
+                options.port
+            );
+        }
+
+        // THE FILL: compile the routes the first build left out, so a later navigation is
+        // instant instead of paying for its own build. It runs right after the first page
+        // has been served — getting that page out was the whole point of the first build,
+        // and the fill is what makes the second one free.
+        //
+        // It emits into a SHADOW output dir rather than over the live one. The live
+        // orchestrator serves its bundles out of `<out>` and the proxy serves chunks
+        // straight off `<out>/public`, so emitting the fill there would rewrite, mid-render,
+        // the exact files the page being displayed is running from — which is not a
+        // theoretical risk: doing that made every request between the first build and the
+        // fill's end fail. The finished shadow dir is renamed into place instead, which is
+        // atomic enough that only the swap itself (a few milliseconds, with requests held)
+        // is a window at all.
+        //
+        // The swap does need the orchestrator restarted and open browsers reloaded once:
+        // growing the module set moves runtime module ids, so a page holding the old ids
+        // cannot resolve the new bundles' client references. Said out loud in the log,
+        // because a reload nobody explained looks like a bug.
+        // START WATCHING NOW, before the fill. The watch loop cannot run until the graphs
+        // are final, but the WATCHER can, and it has to: the fill takes seconds, and an
+        // edit made during it would otherwise be dropped on the floor — the browser shows
+        // stale output with nothing said. Events queue in this channel and the loop drains
+        // them the moment it starts.
+        let app_dir = crate::next_adapter::app_dir(project_root).ok_or_else(|| {
+            format!("next dev: {} has no app/ or src/app directory", project_root.display())
+        })?;
+        let watch_roots_for = |client: &EnvBuild, react_server: &EnvBuild, ssr: &EnvBuild| {
+            let mut roots = source_watch_roots(project_root, [client, react_server, ssr]);
+            if !roots
+                .iter()
+                .any(|(root, mode)| *mode == RecursiveMode::Recursive && app_dir.starts_with(root))
+            {
+                roots.push((app_dir.clone(), RecursiveMode::Recursive));
+            }
+            if !roots.iter().any(|(root, _)| root == project_root) {
+                roots.push((project_root.to_path_buf(), RecursiveMode::NonRecursive));
+            }
+            roots
+        };
+        let announce_roots = |roots: &[(PathBuf, RecursiveMode)]| {
+            for (root, mode) in roots {
+                println!(
+                    "[dev] watching {}{}",
+                    root.display(),
+                    if *mode == RecursiveMode::Recursive { "" } else { " (top level only)" }
+                );
+            }
+        };
+        let (watch_events, receiver) = mpsc::channel();
+        let mut watch_roots = watch_roots_for(&client, &react_server, &ssr);
+        announce_roots(&watch_roots);
+        start_watcher_paths_into(&watch_roots, watch_events.clone())?;
+
+        let mut live_scope = first_scope.clone();
+        if first_scope != RouteScope::All {
+            // Let the page that triggered the first build actually finish first. A whole-app
+            // compile saturates every core, and starting it while the first render is in
+            // flight is measurable in exactly the number this whole change exists to
+            // improve (cal.com: 1.4s render -> 2.5s). Capped so a page that polls forever
+            // cannot postpone the fill for good.
+            if let Some(lazy) = &lazy {
+                lazy.wait_for_quiet(FILL_QUIET, FILL_QUIET_BUDGET);
+            }
+            let fill_started = Instant::now();
+            println!("[dev] next: compiling the remaining routes in the background...");
+            let fill_root = path_with_suffix_local(&output_root, ".fill");
+            let fill_rsc_root = fill_root.join(".rsc");
+            if fill_root.exists() {
+                fs::remove_dir_all(&fill_root)
+                    .map_err(|error| format!("cannot clear {}: {error}", fill_root.display()))?;
+            }
+            match build_all_graphs(
+                project_root, &fill_root, &fill_rsc_root, emit_options, &RouteScope::All,
+            )
+            .and_then(|built| write_orchestrator_scripts(&fill_root).map(|()| built))
+            {
+                Ok(filled) => {
+                    let build_ms = fill_started.elapsed().as_secs_f64() * 1_000.0;
+                    let swap_started = Instant::now();
+                    if let Some(lazy) = &lazy {
+                        lazy.begin_swap();
+                    }
+                    let _ = node.kill();
+                    let _ = node.wait();
+                    swap_output_dir(&fill_root, &output_root)?;
+                    client = filled.client;
+                    react_server = filled.react_server;
+                    ssr = filled.ssr;
+                    live_scope = RouteScope::All;
+                    node = boot_node(node_port)?;
+                    if let Some(lazy) = &lazy {
+                        lazy.landed(&RouteScope::All, node_port);
+                    }
+                    hub.broadcast_reload();
+                    println!(
+                        "[dev] next: all routes compiled in {build_ms:.0}ms | {} | swapped in {:.0}ms, reloading open browsers once (module ids moved)",
+                        graph_timing_label(&filled.timings),
+                        swap_started.elapsed().as_secs_f64() * 1_000.0,
+                    );
+                }
+                // A fill failure must NOT take down a dev server that is already serving the
+                // route it was asked for. Keep serving it, say exactly what is degraded (a
+                // request for any other route now fails instead of waiting forever), and let
+                // the next edit — which rebuilds from scratch — recover.
+                Err(error) => {
+                    eprintln!(
+                        "[dev] next: compiling the remaining routes FAILED: {error}\n\
+                         [dev] next: still serving {}; other routes will report this error until an edit rebuilds",
+                        first_scope.label(),
+                    );
+                    if let Some(lazy) = &lazy {
+                        lazy.failed(&error);
+                    }
+                }
+            }
+        }
+
+        // The fill compiled the rest of the app, which can reach source directories the
+        // first build never did. Watch the ones the running watcher does not already cover;
+        // the two feed one channel (see `start_watcher_paths_into`).
+        let extra_roots = uncovered_watch_roots(
+            &watch_roots_for(&client, &react_server, &ssr),
+            &watch_roots,
+        );
+        if !extra_roots.is_empty() {
+            announce_roots(&extra_roots);
+            start_watcher_paths_into(&extra_roots, watch_events.clone())?;
+            watch_roots.extend(extra_roots);
+        }
+        // The shallowest watched directory; everything watched lives under it.
+        let watch_base = watch_roots
+            .iter()
+            .map(|(root, _)| root.clone())
+            .min_by_key(|root| root.components().count())
+            .unwrap_or_else(|| project_root.to_path_buf());
 
         let result = next_watch_loop(
             &receiver,
@@ -2675,6 +3712,8 @@ mod next {
             &mut ssr,
             &hub,
             emit_options,
+            &watch_base,
+            &live_scope,
         );
         let _ = node.kill();
         let _ = node.wait();
@@ -2688,17 +3727,56 @@ mod next {
         project_root: &Path,
         output_root: &Path,
         options: EmitOptions,
+        scope: &RouteScope,
     ) -> Result<EnvBuild, String> {
-        let mut config = next_config_dev(project_root, "client")?;
-        // The client needs `#diffpack-call-server` so a `"use server"` client stub
-        // resolves its transport (harmless/unreachable when there is no action).
-        config.build.virtual_modules.push((
-            crate::rsc::CALL_SERVER_SPECIFIER.to_string(),
-            crate::rsc::call_server_module_source().to_string(),
-        ));
-        let build = discover_next_env(config, "client", options)?;
+        let build = discover_next_env_reconciled(project_root, "client", options, scope, &|config| {
+            // The client needs `#diffpack-call-server` so a `"use server"` client stub
+            // resolves its transport (harmless/unreachable when there is no action).
+            config.build.virtual_modules.push((
+                crate::rsc::CALL_SERVER_SPECIFIER.to_string(),
+                crate::rsc::call_server_module_source().to_string(),
+            ));
+            Ok(())
+        })?;
         emit_next_client(&build, project_root, output_root)?;
         Ok(build)
+    }
+
+    /// [`discover_next_env`] with the async-island reconcile loop: client islands
+    /// are pinned lazily except the recorded async set; when discovery shows the
+    /// recorded set is stale, the entries are regenerated (a fresh
+    /// `configure_dev` pass rewrites them) and the graph rediscovered once.
+    fn discover_next_env_reconciled(
+        project_root: &Path,
+        environment: &str,
+        options: EmitOptions,
+        scope: &RouteScope,
+        prepare: &dyn Fn(&mut AppConfig) -> Result<(), String>,
+    ) -> Result<EnvBuild, String> {
+        let mut regenerated = false;
+        loop {
+            let mut config = next_config_dev(project_root, environment, scope)?;
+            prepare(&mut config)?;
+            let build = discover_next_env(config, environment, options)?;
+            if !crate::next_adapter::reconcile_async_islands(
+                project_root,
+                environment,
+                &build.bundler,
+                &build.reachable,
+            )? {
+                return Ok(build);
+            }
+            if regenerated {
+                return Err(format!(
+                    "dev {environment}: the async-island set did not stabilize after \
+                     regenerating the entries once; this is a diffpack bug"
+                ));
+            }
+            regenerated = true;
+            println!(
+                "[dev] async island set changed; regenerating the {environment} entry and rediscovering"
+            );
+        }
     }
 
     /// Build the react-server graph (flight render/action bundle) into the isolated
@@ -2708,11 +3786,20 @@ mod next {
         output_root: &Path,
         rsc_root: &Path,
         options: EmitOptions,
+        scope: &RouteScope,
     ) -> Result<EnvBuild, String> {
-        let mut config = next_config_dev(project_root, "react-server")?;
-        register_server_virtual_modules(&mut config, project_root, output_root)?;
+        let mut config = next_config_dev(project_root, "react-server", scope)?;
+        register_next_server_virtual_modules(&mut config, project_root)?;
         let build = discover_next_env(config, "react-server", options)?;
-        emit_next_react_server(&build, output_root, rsc_root)?;
+        emit_next_react_server(&build, output_root, rsc_root, crate::bundler::EmitCancel::never())?;
+        // The emit just wrote this graph's client-references manifest, whose keys are
+        // exactly the islands a flight from these routes can reference. Record them: the
+        // client and ssr graphs are configured next and pin precisely that set instead of
+        // every `"use client"` file in the tree.
+        crate::next_adapter::write_referenced_islands(
+            project_root,
+            &output_root.join(crate::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE),
+        )?;
         Ok(build)
     }
 
@@ -2721,19 +3808,24 @@ mod next {
         project_root: &Path,
         output_root: &Path,
         options: EmitOptions,
+        scope: &RouteScope,
     ) -> Result<EnvBuild, String> {
-        let mut config = next_config_dev(project_root, "ssr")?;
-        register_server_virtual_modules(&mut config, project_root, output_root)?;
-        let build = discover_next_env(config, "ssr", options)?;
-        emit_next_ssr(&build, output_root)?;
+        let build = discover_next_env_reconciled(project_root, "ssr", options, scope, &|config| {
+            register_next_server_virtual_modules(config, project_root)
+        })?;
+        emit_next_ssr(&build, output_root, crate::bundler::EmitCancel::never())?;
         Ok(build)
     }
 
     /// Scaffold `.diffpack-next/` + derive the dev [`AppConfig`] for one environment
     /// (a Next app-router project is guaranteed here — the caller already detected
     /// it, so `None` is an internal invariant break, a clear error not a silent skip).
-    fn next_config_dev(project_root: &Path, environment: &str) -> Result<AppConfig, String> {
-        crate::next_adapter::configure_dev(project_root, environment)?.ok_or_else(|| {
+    fn next_config_dev(
+        project_root: &Path,
+        environment: &str,
+        scope: &RouteScope,
+    ) -> Result<AppConfig, String> {
+        crate::next_adapter::configure_dev(project_root, environment, scope)?.ok_or_else(|| {
             format!(
                 "next dev: {} is not an app-router project (environment={environment})",
                 project_root.display()
@@ -2747,13 +3839,17 @@ mod next {
         label: &str,
         options: EmitOptions,
     ) -> Result<EnvBuild, String> {
+        let mut config = config;
+        config.build.source_maps = options.source_map;
         let entry = config
             .entry
             .clone()
             .ok_or_else(|| format!("no {label} entry found for the next app"))?;
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
-        for diagnostic in &update.diagnostics {
-            println!("[dev] next {label} known gap: {diagnostic}");
+        for warning in
+            crate::bundler::partition_diagnostics(&update.diagnostics, &format!("dev {label} build"))?
+        {
+            println!("[dev] warning: {warning}");
         }
         let session = bundler.direct_reachability();
         let reachable = session.reachable_modules();
@@ -2773,15 +3869,43 @@ mod next {
         output_root: &Path,
     ) -> Result<EmitSummary, String> {
         let reachable = reachable_ids(client);
-        let summary = client
-            .bundler
-            .emit_public(&reachable, output_root, client.options)?;
+        // `public/rsc.css` belongs to the REACT-SERVER graph, which is built first in dev
+        // and preserves its compiled sheet there. Without this the client's prune — which
+        // deletes everything under `public/` the client graph did not itself write —
+        // removed it, and the document went on linking `/rsc.css` (that link is guarded on
+        // `rsc-render/server.css`, which the prune never touches) while `GET /rsc.css`
+        // 404ed: an unstyled page, served with `X-Content-Type-Options: nosniff` so the
+        // browser rejected the 404's HTML outright.
+        //
+        // Preserved on exactly the condition that makes the document link it — the sheet
+        // sitting beside the render bundle — so the link and the artifact stay one fact,
+        // and a react-server graph that stops compiling CSS still has its stale sheet
+        // pruned.
+        let mut preserve = BTreeSet::new();
+        if output_root
+            .join("rsc-render")
+            .join(crate::next_adapter::RSC_EMITTED_CSS_FILE)
+            .is_file()
+        {
+            preserve.insert(
+                output_root
+                    .join("public")
+                    .join(crate::next_adapter::RSC_CSS_URL.trim_start_matches('/')),
+            );
+        }
+        let summary =
+            client
+                .bundler
+                .emit_public_preserving(&reachable, output_root, client.options, &preserve)?;
         config::copy_static_public(project_root, &summary.output_dir)?;
         // next/image: emit downscaled responsive variants for every public raster.
         let images = crate::next_adapter::scan_public_images(project_root)?;
         if !images.is_empty() {
             crate::next_adapter::emit_image_variants(project_root, &summary.output_dir, &images)?;
         }
+        // next/font/local: copy the app's font files to the hashed URLs the generated
+        // @font-face rules point at, so dev serves the same face the build does.
+        crate::next_font::emit_font_assets(project_root, &summary.output_dir)?;
         // The route -> client-chunk manifest the server build's start-manifest reads.
         let client_manifest = client
             .bundler
@@ -2806,11 +3930,18 @@ mod next {
     /// makes the edit-to-update latency competitive; the full emit (`emit_next_client`)
     /// still runs afterward, off the critical path, so a subsequent full document load
     /// remains correct.
-    fn emit_next_client_hmr(client: &EnvBuild, output_root: &Path) -> Result<usize, String> {
+    fn emit_next_client_hmr(
+        client: &EnvBuild,
+        output_root: &Path,
+        cancel: crate::bundler::EmitCancel<'_>,
+    ) -> Result<(usize, bool), String> {
         let reachable = reachable_ids(client);
-        client
-            .bundler
-            .emit_public_incremental(&reachable, output_root, client.options)
+        client.bundler.emit_public_incremental_cancellable(
+            &reachable,
+            output_root,
+            client.options,
+            cancel,
+        )
     }
 
     /// Emit the react-server graph into `<rsc_root>/server`, preserve its compiled CSS
@@ -2820,50 +3951,797 @@ mod next {
         env: &EnvBuild,
         output_root: &Path,
         rsc_root: &Path,
-    ) -> Result<EmitSummary, String> {
+        cancel: crate::bundler::EmitCancel<'_>,
+    ) -> Result<(EmitSummary, bool), String> {
         let reachable = reachable_ids(env);
-        let summary = env.bundler.emit_server(&reachable, rsc_root, env.options)?;
+        let (summary, cancelled) = env.bundler.emit_server_into_cancellable(
+            &reachable,
+            &rsc_root.join("server"),
+            env.options,
+            cancel,
+        )?;
+        // Abandoned: the emitted tree is a partial rewrite of chunks whose patched
+        // versions on disk are already current, so nothing downstream of it runs —
+        // no CSS preserve, no manifest, and above all no copy of a half-written
+        // bundle over the one the render worker loads.
+        if cancelled {
+            return Ok((summary, true));
+        }
         // The react-server graph is authoritative for CSS; preserve it to the served,
-        // non-pruned public/rsc.css (the adapter links it into <head>).
-        let css = rsc_root.join("server/server.css");
+        // non-pruned public/rsc.css. The render entry links it iff this same
+        // `RSC_EMITTED_CSS_FILE` sits beside it (it is copied to `rsc-render/` with the
+        // bundle below), so the <link> and the artifact are one fact.
+        let css = rsc_root
+            .join("server")
+            .join(crate::next_adapter::RSC_EMITTED_CSS_FILE);
         if css.is_file() {
-            let dest = output_root.join("public/rsc.css");
+            let dest = output_root
+                .join("public")
+                .join(crate::next_adapter::RSC_CSS_URL.trim_start_matches('/'));
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
             }
-            fs::copy(&css, &dest).map_err(|error| {
+            copy_file_if_changed(&css, &dest).map_err(|error| {
                 format!("cannot preserve react-server CSS to {}: {error}", dest.display())
             })?;
         }
-        // This build's OWN client-references manifest (its ids) — written under the
-        // `.rsc` root so it never clobbers the ssr build's manifest at `<out>`.
+        // This build's OWN client-references manifest (its ids) — written beside the
+        // ssr build's at `<out>` under the react-server-distinct file name, so the two
+        // server-like graphs cannot clobber each other and the render seam reads the
+        // SAME pair of files in dev as it does after a production build. It is also
+        // the set that decides which client references a flight can carry, which the
+        // seam validates the ssr manifest against.
         let server_references = env
             .bundler
             .client_references_manifest(&reachable, "server.mjs")?;
-        server_references.write(&rsc_root.join(crate::rsc::SERVER_REFERENCES_MANIFEST_FILE))?;
+        server_references
+            .write(&output_root.join(crate::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE))?;
         // Copy the fresh bundle to rsc-render (the orchestrator's per-request child).
         replace_dir(&rsc_root.join("server"), &output_root.join("rsc-render"))?;
-        Ok(summary)
+        Ok((summary, false))
     }
 
     /// Emit the ssr-of-flight graph into `<out>/server` and write ITS client-references
     /// manifest (its ids) to `<out>` — the manifest the orchestrator reads as the SSR
     /// half of the divergent-id module map.
-    fn emit_next_ssr(env: &EnvBuild, output_root: &Path) -> Result<EmitSummary, String> {
+    fn emit_next_ssr(
+        env: &EnvBuild,
+        output_root: &Path,
+        cancel: crate::bundler::EmitCancel<'_>,
+    ) -> Result<(EmitSummary, bool), String> {
         let reachable = reachable_ids(env);
-        let summary = env.bundler.emit_server(&reachable, output_root, env.options)?;
+        let (summary, cancelled) = env.bundler.emit_server_into_cancellable(
+            &reachable,
+            &output_root.join("server"),
+            env.options,
+            cancel,
+        )?;
+        if cancelled {
+            return Ok((summary, true));
+        }
         let server_references = env
             .bundler
             .client_references_manifest(&reachable, "server.mjs")?;
         server_references.write(&output_root.join(crate::rsc::SERVER_REFERENCES_MANIFEST_FILE))?;
-        Ok(summary)
+        Ok((summary, false))
+    }
+
+    /// Where per-edit server micro-chunks are written, under the output dir so the
+    /// watcher already ignores it and no graph's emit prunes it.
+    const HOT_DIR: &str = ".hot";
+
+    /// One pushed micro-chunk: the file a live Node process imports, and the runtime
+    /// ids whose factories it re-registers.
+    #[derive(Clone)]
+    struct HotUpdate {
+        chunk: PathBuf,
+        ids: Vec<usize>,
+    }
+
+    /// The two server graphs a batch may have touched, each with the module ids that
+    /// changed in it.
+    struct HotGraphs<'a> {
+        ssr: Option<(&'a EnvBuild, &'a BTreeSet<String>)>,
+        react_server: Option<(&'a EnvBuild, &'a BTreeSet<String>)>,
+    }
+
+    /// The dev server → orchestrator hot-update channel: the Next analogue of the
+    /// TanStack control endpoint ([`hmr_reload_server`]), at the granularity that
+    /// actually changes.
+    ///
+    /// Node caches an ES module by URL forever, so the only way an edit reaches an
+    /// already-loaded server graph is a URL Node has never seen. Re-importing the
+    /// ENTRY under a fresh `?v=` cannot be that URL: the entry reaches its split
+    /// chunks through query-less `import("./server.chunk-N.mjs")`, which Node answers
+    /// from its cache — so the fresh entry binds stale factories (on cal.com's 69-chunk
+    /// react-server graph that was not even silent: the fresh runtime's id table and
+    /// the cached chunks' registrations disagreed and the worker died with
+    /// `Module is not loaded: <id>`).
+    ///
+    /// So each edit gets its own tiny register-only chunk holding ONLY the changed
+    /// modules, at a filename no previous edit used. The live runtime imports it,
+    /// re-registers exactly those factories, and `serverInvalidate` re-runs them and
+    /// their importers up to the entry — leaving React and every untouched dependency
+    /// cached. Per edit that is ~1 KB of new module, not a graph-wide re-import: the
+    /// inverse failure (re-importing the whole SSR graph per keystroke, and leaking a
+    /// copy of it every time) is what the granularity choice avoids.
+    struct HotChannel {
+        /// Monotonic, so each micro-chunk gets a URL Node has never resolved.
+        seq: u64,
+        /// react-server updates that are NOT yet on disk in full. The orchestrator
+        /// replays these into any worker it respawns, so a crash-respawn in the window
+        /// between the hot push and the deferred full re-emit is still caught up.
+        pending_react_server: Vec<HotUpdate>,
+        /// Micro-chunk files the orchestrator may still hold a reference to. Deleted
+        /// once a later push has told it a shorter list.
+        live_files: Vec<PathBuf>,
+    }
+
+    impl HotChannel {
+        fn new(output_root: &Path) -> Result<Self, String> {
+            let mut channel = Self {
+                seq: 0,
+                pending_react_server: Vec::new(),
+                live_files: Vec::new(),
+            };
+            channel.reset(output_root)?;
+            Ok(channel)
+        }
+
+        /// Drop every pending update and clear the directory. Called when all three
+        /// graphs were just re-emitted from scratch and the orchestrator restarted, so
+        /// disk IS the truth and no replay is owed.
+        fn reset(&mut self, output_root: &Path) -> Result<(), String> {
+            self.pending_react_server.clear();
+            self.live_files.clear();
+            let dir = output_root.join(HOT_DIR);
+            if dir.exists() {
+                fs::remove_dir_all(&dir)
+                    .map_err(|error| format!("cannot clear {}: {error}", dir.display()))?;
+            }
+            fs::create_dir_all(&dir)
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+            Ok(())
+        }
+
+        /// The deferred full re-emit has landed: `rsc-render/` on disk now contains
+        /// every react-server edit pushed so far, so a respawned worker needs no
+        /// replay. The files stay until the next push tells the orchestrator to drop
+        /// them (it is still holding the list it was last sent).
+        fn mark_react_server_on_disk(&mut self) {
+            self.pending_react_server.clear();
+        }
+
+        /// The sequence number of the most recent push — names its micro-chunks
+        /// (`.hot/ssr.<seq>.mjs`, `.hot/rsc.<seq>.mjs`) for the disk patcher.
+        fn last_seq(&self) -> u64 {
+            self.seq
+        }
+
+        /// Render a micro-chunk per changed server graph and apply them to the live
+        /// Node processes, returning a log fragment. Returns `Err` — never a quiet
+        /// no-op — if the orchestrator could not apply one: the alternative is serving
+        /// HTML that disagrees with the editor.
+        fn push(
+            &mut self,
+            node_port: u16,
+            output_root: &Path,
+            graphs: HotGraphs<'_>,
+            profile: &mut EditProfile,
+        ) -> Result<String, String> {
+            if graphs.ssr.is_none() && graphs.react_server.is_none() {
+                return Ok("server: no change".to_string());
+            }
+            self.seq += 1;
+            let dir = output_root.join(HOT_DIR);
+            fs::create_dir_all(&dir)
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+            let ssr = profile.stage("hot-render-ssr", || {
+                graphs
+                    .ssr
+                    .map(|(env, ids)| {
+                        Self::render(env, ids, &dir.join(format!("ssr.{}.mjs", self.seq)))
+                    })
+                    .transpose()
+            })?
+            .flatten();
+            let react_server = profile.stage("hot-render-rsc", || {
+                graphs
+                    .react_server
+                    .map(|(env, ids)| {
+                        Self::render(env, ids, &dir.join(format!("rsc.{}.mjs", self.seq)))
+                    })
+                    .transpose()
+            })?
+            .flatten();
+
+            let mut pending = self.pending_react_server.clone();
+            if let Some(update) = &react_server {
+                pending.push(update.clone());
+            }
+            let payload = serde_json::json!({
+                "ssr": ssr.as_ref().map(Self::json),
+                "reactServer": react_server.as_ref().map(Self::json),
+                "pendingReactServer": pending.iter().map(Self::json).collect::<Vec<_>>(),
+            })
+            .to_string();
+            profile.stage("hot-post", || {
+                post_json(node_port, "/__diffpack_dev/hot", &payload)
+            })?;
+
+            // The orchestrator now holds exactly `pending`; anything it no longer
+            // references (including the SSR chunk, which it imported synchronously
+            // during the POST above and never replays) can go.
+            let keep = pending
+                .iter()
+                .map(|update| update.chunk.clone())
+                .collect::<BTreeSet<_>>();
+            for file in std::mem::take(&mut self.live_files) {
+                if !keep.contains(&file) {
+                    // The micro-chunk carries a source-map sidecar (`<chunk>.map`) —
+                    // the code being edited right now is exactly the code whose stack
+                    // traces matter — so retire the pair together.
+                    let mut map = file.clone().into_os_string();
+                    map.push(".map");
+                    let _ = fs::remove_file(&file);
+                    let _ = fs::remove_file(PathBuf::from(map));
+                }
+            }
+            self.live_files = keep.iter().cloned().collect();
+            if let Some(update) = &ssr {
+                self.live_files.push(update.chunk.clone());
+            }
+            self.pending_react_server = pending;
+
+            Ok(format!(
+                "server hot: ssr {} module(s), react-server {} module(s)",
+                ssr.as_ref().map_or(0, |update| update.ids.len()),
+                react_server.as_ref().map_or(0, |update| update.ids.len()),
+            ))
+        }
+
+        /// Render one graph's micro-chunk. `None` when no changed module is live in
+        /// that graph (e.g. it was tree-shaken away), which is a real "nothing to
+        /// apply", not a swallowed failure.
+        fn render(
+            env: &EnvBuild,
+            changed: &BTreeSet<String>,
+            path: &Path,
+        ) -> Result<Option<HotUpdate>, String> {
+            let reachable = reachable_ids(env);
+            // Both server graphs emit through `emit_server`, whose entry chunk is
+            // `server.mjs`; the ids must be the ones that emit assigned or the
+            // registration would bind against the wrong modules.
+            let located = env.bundler.hmr_locate(&reachable, changed, "server.mjs")?;
+            if located.is_empty() {
+                return Ok(None);
+            }
+            // Node ESM, matching `emit_server`: a module that references `__dirname` /
+            // `__filename` binds the entry's REAL values there, where browser output
+            // would hand it `"/index.js"` / `"/"` stubs. Getting this wrong would only
+            // show up after a hot update, on a server module that reads a file.
+            if !env.bundler.write_hmr_chunk(
+                &reachable,
+                changed,
+                "server.mjs",
+                env.options,
+                crate::bundler::ModuleFormat::Esm,
+                path,
+            )? {
+                return Ok(None);
+            }
+            Ok(Some(HotUpdate {
+                chunk: path.to_path_buf(),
+                ids: located.iter().map(|located| located.runtime_id).collect(),
+            }))
+        }
+
+        fn json(update: &HotUpdate) -> serde_json::Value {
+            serde_json::json!({ "chunk": update.chunk.to_string_lossy(), "ids": update.ids })
+        }
+    }
+
+    /// How long the watch loop waits for another file event before running one step
+    /// of chunk COMPACTION (the full re-emit of a touched graph).
+    ///
+    /// Compaction is housekeeping, not correctness: after every edit the on-disk
+    /// chunks are already patched in place with the edit's own micro-chunk (see
+    /// [`ChunkPatcher`]), so a full reload or a respawned worker reads CURRENT code at
+    /// all times. Compaction only rewrites the accumulated patch tail into a pristine
+    /// chunk (restoring real source maps for patched regions and bounding file
+    /// growth).
+    ///
+    /// It used to wait TEN SECONDS, because it cost ~0.7s of loop-thread time per
+    /// graph and an edit landing inside that window had to wait it out. A long idle
+    /// only makes that collision rarer — at any steady typing cadence slower than the
+    /// idle it happens on every edit, which is exactly the cliff that was measured
+    /// (an edit at a ~1/sec cadence taking ~1s instead of 50ms). The fix is not a
+    /// bigger number: the pass now carries an [`EventEpoch`] and is ABANDONED within
+    /// a millisecond or two of a file event (see [`crate::bundler::EmitCancel`]),
+    /// keeping its debt for the next quiet moment. With the collision cost gone, the
+    /// idle can be short — disk catches up right after a pause instead of ten seconds
+    /// later — and it is short.
+    const SETTLE_MS: u64 = 750;
+
+    /// Stage-by-stage timing of one edit, appended to the `[dev]` summary line when
+    /// `DIFFPACK_DEV_PROFILE=1`. The headline edit number is a single total; when it
+    /// regresses there is no way to aim a fix without knowing which stage grew, and
+    /// guessing has already cost one round of wasted work.
+    #[derive(Default)]
+    struct EditProfile {
+        on: bool,
+        stages: Vec<(&'static str, f64)>,
+    }
+
+    impl EditProfile {
+        fn new() -> Self {
+            Self {
+                on: std::env::var_os("DIFFPACK_DEV_PROFILE").is_some(),
+                stages: Vec::new(),
+            }
+        }
+
+        /// Time `body`, recording it under `name`. Always runs `body` — the profile is
+        /// observation only, so an unprofiled run takes exactly the same path.
+        fn stage<T>(&mut self, name: &'static str, body: impl FnOnce() -> T) -> T {
+            if !self.on {
+                return body();
+            }
+            let started = Instant::now();
+            let value = body();
+            self.stages
+                .push((name, started.elapsed().as_secs_f64() * 1_000.0));
+            value
+        }
+
+        fn note(&mut self, name: &'static str, ms: f64) {
+            if self.on {
+                self.stages.push((name, ms));
+            }
+        }
+
+        /// ` | profile: a=1.2ms b=3.4ms`, or empty when profiling is off.
+        fn label(&self) -> String {
+            if !self.on || self.stages.is_empty() {
+                return String::new();
+            }
+            let mut merged: Vec<(&'static str, f64)> = Vec::new();
+            for (name, ms) in &self.stages {
+                match merged.iter_mut().find(|(seen, _)| seen == name) {
+                    Some((_, total)) => *total += ms,
+                    None => merged.push((name, *ms)),
+                }
+            }
+            let body = merged
+                .iter()
+                .map(|(name, ms)| format!("{name}={ms:.1}ms"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(" | profile: {body}")
+        }
+    }
+
+    /// How long ago `path` was written, in milliseconds — the file-event detection
+    /// latency (FSEvents delivery + the coalesce window + dedup) that precedes every
+    /// stage the rebuild itself can see. Measured against the edited file's own mtime
+    /// so it covers the part of the edit budget the dev server spends before it has
+    /// even woken up. `None` when the file has no readable mtime (e.g. deleted).
+    fn detection_lag_ms(path: &Path) -> Option<f64> {
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        Some(SystemTime::now().duration_since(modified).ok()?.as_secs_f64() * 1_000.0)
+    }
+
+    /// Which graphs owe disk a full chunk re-emit. See the `owed` binding in
+    /// [`next_watch_loop`] for why this is deferred and coalesced rather than run
+    /// inside the edit.
+    #[derive(Clone, Copy, Default)]
+    struct OwedEmits {
+        client: bool,
+        ssr: bool,
+        react_server: bool,
+    }
+
+    impl OwedEmits {
+        fn any(self) -> bool {
+            self.client || self.ssr || self.react_server
+        }
+
+        fn label(self) -> String {
+            let names = [
+                self.client.then_some("client"),
+                self.ssr.then_some("ssr"),
+                self.react_server.then_some("react-server"),
+            ];
+            names.into_iter().flatten().collect::<Vec<_>>().join(" + ")
+        }
+    }
+
+    /// Re-render the full chunks of every graph that owes disk one, so `public/` and
+    /// `rsc-render/` match what the live processes are already running. Clears the debt
+    /// only for graphs that succeeded, so a failing emit is retried rather than lost.
+    /// Millisecond-cost patching of the big on-disk chunks after a hot update, so
+    /// disk is never stale between edits and the deferred full re-emit becomes pure
+    /// COMPACTION rather than a correctness requirement.
+    ///
+    /// Every dev chunk (main and split, all three graphs) has the same shape: one
+    /// IIFE that registers its module factories into the globalThis-keyed registry
+    /// and ends with a fixed tail —
+    /// `if(import.meta...__diffpack_hmr...)return __runtime; return __runtime.require(N); })(); export default ...` —
+    /// and registration is last-wins (`Object.assign` in `__register`). A hot
+    /// micro-chunk is itself such an IIFE over ONLY the changed modules, with its
+    /// own scope-isolated consts. So splicing the micro-chunk's IIFE into a chunk
+    /// file immediately BEFORE the tail makes a fresh evaluation of that file run
+    /// base registrations, then the patch registrations (overriding the stale
+    /// factories), then the entry — byte-cheap (a few KB write) and semantically
+    /// the same replay the live runtime already performed. A full page reload or a
+    /// respawned worker then reads current code straight from disk.
+    ///
+    /// The sidecar map gets one explicit UNMAPPED (single-field) segment per
+    /// appended line, inserted at the splice line's position in `mappings` — never
+    /// omitted, because a consumer resolves an omitted position to the previous
+    /// mapping and would attribute patched code to some unrelated module (the
+    /// doctrine of `compose_source_map`). Single-field segments carry no source
+    /// index, so nothing downstream in the delta chain needs re-basing. Real maps
+    /// for the patched region come back at compaction; live debugging of the
+    /// edited module meanwhile uses the micro-chunk's own map, which is the one
+    /// the running page actually loaded.
+    struct ChunkPatcher {
+        path: PathBuf,
+        map_path: PathBuf,
+        /// Byte offset where the next patch inserts (start of the sentinel tail).
+        splice: u64,
+        tail: Vec<u8>,
+        /// Line index of the splice point (number of `\n` before it).
+        splice_line: usize,
+        /// Byte offset in the MAP file where the next `A;` markers insert, or None
+        /// when map patching is unavailable (map missing/unparseable — chunk
+        /// patching still proceeds; the map is then stale-but-unshifted only for
+        /// the tail lines, which are unmapped anyway).
+        map_splice: Option<u64>,
+    }
+
+    impl ChunkPatcher {
+        const SENTINEL: &'static [u8] =
+            b"\nif(import.meta&&import.meta.url&&import.meta.url.indexOf(\"__diffpack_hmr\")";
+
+        fn open(path: &Path) -> Result<Self, String> {
+            let bytes = fs::read(path)
+                .map_err(|error| format!("cannot read {} for patching: {error}", path.display()))?;
+            let splice = find_last(&bytes, Self::SENTINEL)
+                .ok_or_else(|| {
+                    format!(
+                        "{} has no hmr sentinel tail; is this a dev (hmr) chunk?",
+                        path.display()
+                    )
+                })?
+                + 1; // keep the preceding newline with the base
+            let tail = bytes[splice..].to_vec();
+            let splice_line = bytes[..splice].iter().filter(|&&b| b == b'\n').count();
+            let map_path = path_with_suffix_local(path, ".map");
+            let map_splice = Self::map_offset(&map_path, splice_line);
+            Ok(Self {
+                path: path.to_path_buf(),
+                map_path,
+                splice: splice as u64,
+                tail,
+                splice_line,
+                map_splice,
+            })
+        }
+
+        /// The byte offset in the map file right after `splice_line` semicolons of
+        /// its `mappings` string — where per-appended-line unmapped markers insert.
+        fn map_offset(map_path: &Path, splice_line: usize) -> Option<u64> {
+            let bytes = fs::read(map_path).ok()?;
+            let key = b"\"mappings\":\"";
+            let start = find_last(&bytes, key)? + key.len();
+            let mut seen = 0usize;
+            let mut at = start;
+            while at < bytes.len() && seen < splice_line {
+                match bytes[at] {
+                    b';' => seen += 1,
+                    b'"' => break, // mappings ended before the splice line: insert here
+                    _ => {}
+                }
+                at += 1;
+            }
+            Some(at as u64)
+        }
+
+        /// Extract the registration IIFE from a micro-chunk's source: everything
+        /// from its `const __diffpackEntry=(()=>{` (the file prelude above it is
+        /// import statements, illegal mid-file) through the end, minus the
+        /// `//# sourceMappingURL=` line (the base chunk has its own).
+        fn patch_body(micro_chunk_source: &str) -> Result<String, String> {
+            let start = micro_chunk_source
+                .find("const __diffpackEntry=(()=>{")
+                .ok_or_else(|| "micro-chunk has no registration IIFE".to_string())?;
+            let body = &micro_chunk_source[start..];
+            // Cut at the IIFE's own close. The micro-chunk's trailing
+            // `export default __diffpackEntry;` and sourceMappingURL comment must
+            // NOT be carried along: an `export` statement spliced inside the base
+            // chunk's IIFE is a SyntaxError that would corrupt the whole file.
+            let close = body
+                .rfind("})();")
+                .ok_or_else(|| "micro-chunk registration IIFE never closes".to_string())?;
+            let mut body = body[..close + "})();".len()].to_string();
+            body.push('\n');
+            Ok(body)
+        }
+
+        fn append(&mut self, micro_chunk_source: &str) -> Result<(), String> {
+            use std::io::{Seek, SeekFrom, Write};
+            let body = Self::patch_body(micro_chunk_source)?;
+            let lines = body.bytes().filter(|&b| b == b'\n').count();
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .open(&self.path)
+                .map_err(|error| format!("cannot open {}: {error}", self.path.display()))?;
+            file.seek(SeekFrom::Start(self.splice))
+                .and_then(|_| file.write_all(body.as_bytes()))
+                .and_then(|_| file.write_all(&self.tail))
+                .and_then(|_| file.set_len(self.splice + (body.len() + self.tail.len()) as u64))
+                .map_err(|error| format!("cannot patch {}: {error}", self.path.display()))?;
+            self.splice += body.len() as u64;
+            self.splice_line += lines;
+            if let Some(map_at) = self.map_splice {
+                // `A` = one explicit unmapped segment per appended line.
+                let markers = "A;".repeat(lines);
+                let patched = (|| -> std::io::Result<()> {
+                    let mut map = fs::OpenOptions::new().read(true).write(true).open(&self.map_path)?;
+                    map.seek(SeekFrom::Start(map_at))?;
+                    let mut rest = Vec::new();
+                    std::io::Read::read_to_end(&mut map, &mut rest)?;
+                    map.seek(SeekFrom::Start(map_at))?;
+                    map.write_all(markers.as_bytes())?;
+                    map.write_all(&rest)?;
+                    Ok(())
+                })();
+                match patched {
+                    Ok(()) => self.map_splice = Some(map_at + markers.len() as u64),
+                    Err(error) => {
+                        // The chunk is patched; losing map markers only mis-shifts
+                        // the (unmapped) tail lines. Do not fail the edit for it.
+                        eprintln!(
+                            "[dev] map patch failed for {} ({error}); disabling map patching until compaction",
+                            self.map_path.display()
+                        );
+                        self.map_splice = None;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return None;
+        }
+        (0..=haystack.len() - needle.len()).rev().find(|&i| &haystack[i..i + needle.len()] == needle)
+    }
+
+    fn path_with_suffix_local(path: &Path, suffix: &str) -> PathBuf {
+        let mut s = path.as_os_str().to_owned();
+        s.push(suffix);
+        PathBuf::from(s)
+    }
+
+    /// Apply one micro-chunk to every on-disk chunk that HOSTS one of the changed
+    /// modules (last-wins registration makes the patch authoritative wherever the
+    /// module's home chunk is evaluated — main, prerequisite, or lazily loaded).
+    /// Patchers are cached per file and dropped when the graph re-emits.
+    #[allow(clippy::too_many_arguments)]
+    fn append_hot_patch(
+        patchers: &mut HashMap<PathBuf, ChunkPatcher>,
+        env: &EnvBuild,
+        changed_ids: &BTreeSet<String>,
+        entry_name: &str,
+        chunk_dir: &Path,
+        micro_chunk_path: &Path,
+    ) -> Result<usize, String> {
+        let source = fs::read_to_string(micro_chunk_path).map_err(|error| {
+            format!("cannot read micro-chunk {}: {error}", micro_chunk_path.display())
+        })?;
+        let located = env
+            .bundler
+            .hmr_locate(&reachable_ids(env), changed_ids, entry_name)?;
+        let files: BTreeSet<PathBuf> =
+            located.iter().map(|l| chunk_dir.join(&l.chunk_file)).collect();
+        for file in &files {
+            if !patchers.contains_key(file) {
+                patchers.insert(file.clone(), ChunkPatcher::open(file)?);
+            }
+            patchers
+                .get_mut(file)
+                .expect("just inserted")
+                .append(&source)?;
+        }
+        Ok(files.len())
+    }
+
+    /// Flushes ONE owed graph per call, so the loop returns to its event channel
+    /// between graphs: an edit that lands mid-flush waits for at most a single
+    /// graph's emit, not the whole set. The caller keeps invoking on quiet settle
+    /// timeouts until `owed.any()` is false. Returns `(which graph, rendered)`.
+    fn flush_owed_step(
+        owed: &mut OwedEmits,
+        output_root: &Path,
+        rsc_root: &Path,
+        client: &EnvBuild,
+        react_server: &EnvBuild,
+        ssr: &EnvBuild,
+        // Abandoned the moment a file event arrives: this is housekeeping, and the
+        // developer's next keystroke outranks it. A graph whose pass was abandoned
+        // stays owed, so the next quiet moment picks it up again.
+        epoch: EventEpoch,
+    ) -> Result<FlushStep, String> {
+        let signal = move || epoch.superseded();
+        let cancel = crate::bundler::EmitCancel::when(&signal);
+        if owed.client {
+            let (rendered, cancelled) = emit_next_client_hmr(client, output_root, cancel)?;
+            owed.client = cancelled;
+            return Ok(FlushStep { which: "client", rendered, cancelled });
+        }
+        if owed.ssr {
+            let (summary, cancelled) = emit_next_ssr(ssr, output_root, cancel)?;
+            owed.ssr = cancelled;
+            return Ok(FlushStep {
+                which: "ssr",
+                rendered: summary.rendered_chunks,
+                cancelled,
+            });
+        }
+        if owed.react_server {
+            let (summary, cancelled) =
+                emit_next_react_server(react_server, output_root, rsc_root, cancel)?;
+            owed.react_server = cancelled;
+            return Ok(FlushStep {
+                which: "react-server",
+                rendered: summary.rendered_chunks,
+                cancelled,
+            });
+        }
+        Ok(FlushStep { which: "nothing", rendered: 0, cancelled: false })
+    }
+
+    /// One compaction step's outcome: which graph it was for, how many chunks it
+    /// re-rendered, and whether it was abandoned before finishing.
+    struct FlushStep {
+        which: &'static str,
+        rendered: usize,
+        cancelled: bool,
+    }
+
+    /// How long the loop waits for another file event before recompiling the
+    /// STYLESHEETS (see [`refresh_next_stylesheets`]).
+    ///
+    /// A stylesheet edit does not wait for this at all — it is delivered inline on
+    /// the edit, because the sheet IS that edit's visible result. This idle covers
+    /// the other direction: under Tailwind, editing a component's class names
+    /// changes the generated sheet even though no `.css` file was touched, and
+    /// scanning candidates + recompiling costs real loop time. Waiting out a short
+    /// typing pause keeps that off a burst of keystrokes while still restyling well
+    /// inside a second of the last one.
+    const CSS_SETTLE_MS: u64 = 400;
+
+    /// Recompile ONLY the stylesheets and hand any that moved to open browsers as an
+    /// in-place `<link>` swap.
+    ///
+    /// The sheets used to be written solely by the full environment re-emit, so a css
+    /// edit inherited that pass's schedule: when compaction moved to a 10 s idle
+    /// (chunk patching made it housekeeping), a css edit went with it and took 11.5 s
+    /// to reach the browser. Nothing about a stylesheet needs a chunk render, so this
+    /// runs the stylesheet pipeline on its own — the react-server graph is
+    /// authoritative for the app's CSS and its sheet is preserved to the served
+    /// `public/rsc.css` (and mirrored beside the `rsc-render` bundle, whose entry
+    /// links it iff that file sits beside it), while the client graph writes its sheet
+    /// straight into `public/`.
+    ///
+    /// Abandoned — and reported as such, so the caller keeps it owed — as soon as a
+    /// file event arrives: recompiling a monorepo's sheet means rescanning its class
+    /// candidates and running the app's own Tailwind, which is real loop time, and a
+    /// result computed from superseded sources is worth nothing anyway.
+    fn refresh_next_stylesheets(
+        output_root: &Path,
+        rsc_root: &Path,
+        client: &EnvBuild,
+        react_server: &EnvBuild,
+        css_prints: &mut Vec<(String, Option<u64>)>,
+        hub: &HmrHub,
+        epoch: EventEpoch,
+    ) -> Result<StylesheetRefresh, String> {
+        let signal = move || epoch.superseded();
+        let cancel = crate::bundler::EmitCancel::when(&signal);
+        if matches!(
+            client.bundler.emit_stylesheet_only(
+                &reachable_ids(client),
+                &output_root.join("public").join("client.js"),
+                cancel,
+            )?,
+            crate::bundler::StylesheetEmit::Cancelled
+        ) {
+            return Ok(StylesheetRefresh::Abandoned);
+        }
+        let react_server_sheet = react_server.bundler.emit_stylesheet_only(
+            &reachable_ids(react_server),
+            &rsc_root.join("server").join("server.mjs"),
+            cancel,
+        )?;
+        if matches!(react_server_sheet, crate::bundler::StylesheetEmit::Cancelled) {
+            return Ok(StylesheetRefresh::Abandoned);
+        }
+        if let crate::bundler::StylesheetEmit::Written(sheet) = react_server_sheet {
+            let served = output_root
+                .join("public")
+                .join(crate::next_adapter::RSC_CSS_URL.trim_start_matches('/'));
+            if let Some(parent) = served.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+            }
+            copy_file_if_changed(&sheet, &served).map_err(|error| {
+                format!("cannot preserve react-server CSS to {}: {error}", served.display())
+            })?;
+            // Keep the copy the per-request worker loads in step with the served one,
+            // so a respawn in this window links a sheet whose bytes are current.
+            let beside_render = output_root
+                .join("rsc-render")
+                .join(crate::next_adapter::RSC_EMITTED_CSS_FILE);
+            if beside_render.exists() {
+                copy_file_if_changed(&sheet, &beside_render).map_err(|error| {
+                    format!("cannot mirror react-server CSS to {}: {error}", beside_render.display())
+                })?;
+            }
+        }
+        let now = next_stylesheet_fingerprints(output_root);
+        let changed: Vec<String> = now
+            .iter()
+            .zip(css_prints.iter())
+            .filter(|(new, old)| new.1.is_some() && new.1 != old.1)
+            .map(|(new, _)| new.0.clone())
+            .collect();
+        *css_prints = now;
+        if !changed.is_empty() {
+            super::spa::push_css(&changed, hub);
+        }
+        Ok(StylesheetRefresh::Done(changed.len()))
+    }
+
+    /// What a stylesheet refresh did: how many sheets it pushed, or that it gave way
+    /// to an edit and is still owed.
+    enum StylesheetRefresh {
+        Done(usize),
+        Abandoned,
+    }
+
+    /// Content fingerprints of the stylesheets the served document links, keyed by
+    /// their public hrefs. Compared across refreshes: a changed sheet is delivered to
+    /// open browsers via the HMR client's in-place `<link>` swap (`push_css`) — the
+    /// Next topology previously rebuilt these sheets on a css edit and then never
+    /// told anyone (KNOWN_ISSUES #7).
+    fn next_stylesheet_fingerprints(output_root: &Path) -> Vec<(String, Option<u64>)> {
+        ["/rsc.css", "/client.css"]
+            .iter()
+            .map(|href| {
+                let file = output_root.join("public").join(href.trim_start_matches('/'));
+                let print = fs::read(&file).ok().map(|bytes| {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    bytes.hash(&mut hasher);
+                    hasher.finish()
+                });
+                (href.to_string(), print)
+            })
+            .collect()
     }
 
     /// The incremental rebuild loop. Classifies each coalesced batch and applies the
     /// smallest correct update: a structural change → full rebuild + orchestrator
     /// restart + reload; an island edit → client+ssr rebuild + Fast Refresh WS update;
-    /// a server-component edit → react-server rebuild + reload.
+    /// a server-component edit → react-server rebuild + in-place RSC refresh. Both
+    /// server graphs are hot-patched through [`HotChannel`] BEFORE the browser push, so
+    /// the next full document load renders the edit.
     #[allow(clippy::too_many_arguments)]
     fn next_watch_loop(
         receiver: &Receiver<notify::Result<notify::Event>>,
@@ -2878,7 +4756,16 @@ mod next {
         ssr: &mut EnvBuild,
         hub: &HmrHub,
         emit_options: EmitOptions,
+        // The topmost watched directory: dependency/generated-output exclusion is
+        // judged relative to it (see `is_dependency_or_generated`).
+        watch_base: &Path,
+        // The routes the live graphs were built from; a rebuild must reproduce the SAME
+        // scope, or an edit would silently widen or narrow what is served.
+        scope: &RouteScope,
     ) -> Result<(), String> {
+        // Publish the base the watch sources judge relevance against, so their event
+        // COUNT (what deferred work cancels on) matches what this loop rebuilds for.
+        *WATCH_BASE.lock().unwrap() = Some(watch_base.to_path_buf());
         // Last processed `(mtime, len)` per path, so the FSEvents + fast-poller pair
         // (see `start_watcher_paths`) never rebuilds twice for one edit: whichever
         // source fires first is handled and recorded; the other's later echo reads the
@@ -2887,15 +4774,170 @@ mod next {
         // Whether a build-error overlay is currently shown, so the next good rebuild
         // clears it (build-ok).
         let mut build_error_showing = false;
+        // The chunk-granular hot-update channel into the live orchestrator + worker.
+        // Constructing it clears `<out>/.hot` — the three graphs were just emitted from
+        // scratch, so any micro-chunk left by a previous session is already superseded.
+        let mut hot = HotChannel::new(output_root)?;
+        // Per-chunk-file disk patchers (see ChunkPatcher). Dropped for a graph's
+        // files whenever that graph re-emits (compaction or structural rebuild),
+        // because a fresh emit rewrites the file under them.
+        let mut patchers: HashMap<PathBuf, ChunkPatcher> = HashMap::new();
+        // Pre-open patchers for the three main chunks so the first edit does not
+        // pay their one-time init (a read+scan of ~60MB of chunk+map, ~0.7s
+        // measured on cal.com). Failures are fine — the edit path re-opens lazily.
+        for main in [
+            output_root.join("public/client.js"),
+            output_root.join("server/server.mjs"),
+            output_root.join("rsc-render/server.mjs"),
+        ] {
+            if let Ok(patcher) = ChunkPatcher::open(&main) {
+                patchers.insert(main, patcher);
+            }
+        }
+        // Which graphs owe disk a full chunk re-emit. STICKY across iterations: the
+        // re-emit is what makes a browser FULL RELOAD and a respawned react-server
+        // worker correct, and nothing in a hot update needs it, so it runs when typing
+        // STOPS rather than between two keystrokes. Re-rendering cal.com's 18.6 MB
+        // client entry and 20.8 MB SSR entry costs ~1.2s; doing that inside every
+        // keystroke's loop iteration would make a burst of edits queue behind it and
+        // turn a 166ms hot update into a 1.2s one. Coalescing is sound because the emit
+        // reads the CURRENT graph state, so one run after the burst covers every edit
+        // in it.
+        let mut owed = OwedEmits::default();
+        // The served stylesheets as browsers last saw them.
+        let mut css_prints = next_stylesheet_fingerprints(output_root);
+        // Whether an edit may have moved the generated stylesheet WITHOUT touching a
+        // `.css` file (a Tailwind class name added to a component). Cleared by the
+        // short-idle recompile below; a real stylesheet edit never sets it, because
+        // that one is delivered inline on the edit.
+        let mut css_owed = false;
         loop {
-            let first = match receiver.recv() {
-                Ok(event) => event,
-                Err(_) => return Ok(()),
+            let first = if css_owed || owed.any() {
+                // Two pending kinds of work, two very different idles: a stylesheet
+                // that may have moved is recompiled after a short typing pause (the
+                // browser is showing stale styling until it lands), while chunk
+                // compaction waits for a long one (it is housekeeping, and costs ~1s
+                // of loop time during which an edit would queue). Whichever is
+                // pending picks this wait; both flush ONE step per quiet timeout, so
+                // the loop returns to its channel between them.
+                let idle = if css_owed { CSS_SETTLE_MS } else { SETTLE_MS };
+                match receiver.recv_timeout(Duration::from_millis(idle)) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) if css_owed => {
+                        let started = Instant::now();
+                        match refresh_next_stylesheets(
+                            output_root, rsc_root, client, react_server, &mut css_prints, hub,
+                            EventEpoch::now(),
+                        ) {
+                            // Gave way to an edit: still owed, so the next quiet moment
+                            // tries again against the newer sources. Logged under
+                            // `DIFFPACK_DEV_PROFILE`, because "the sheet did not update
+                            // and nothing was said" is otherwise indistinguishable from
+                            // a bug.
+                            Ok(StylesheetRefresh::Abandoned) => {
+                                if std::env::var_os("DIFFPACK_DEV_PROFILE").is_some() {
+                                    println!(
+                                        "[dev] css refresh gave way to an edit after {:.1}ms (still owed)",
+                                        started.elapsed().as_secs_f64() * 1_000.0,
+                                    );
+                                }
+                            }
+                            Ok(StylesheetRefresh::Done(0)) => css_owed = false,
+                            Ok(StylesheetRefresh::Done(sheets)) => {
+                                css_owed = false;
+                                println!(
+                                    "[dev] css hot-swap -> {sheets} sheet(s), {} browser(s) in {:.1}ms",
+                                    hub.client_count(),
+                                    started.elapsed().as_secs_f64() * 1_000.0,
+                                );
+                            }
+                            Err(error) => {
+                                css_owed = false;
+                                eprintln!("[dev] stylesheet refresh failed: {error}");
+                            }
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let started = Instant::now();
+                        match flush_owed_step(
+                            &mut owed, output_root, rsc_root, client, react_server, ssr,
+                            EventEpoch::now(),
+                        ) {
+                            Ok(step) => {
+                                // Disk now matches the live processes for the
+                                // react-server graph, so a worker respawned from here
+                                // on needs no replay. Only a pass that FINISHED can say
+                                // that: an abandoned one wrote a subset of the chunks.
+                                if step.which == "react-server" && !step.cancelled {
+                                    hot.mark_react_server_on_disk();
+                                }
+                                // The compacted emit rewrote chunk files out from under
+                                // their patchers. Dropping a patcher only drops a cached
+                                // file offset — the next patch reopens the file as it now
+                                // stands — so doing it for the whole graph directory is
+                                // correct whether the pass finished or was abandoned
+                                // part-way through it.
+                                let dir = match step.which {
+                                    "client" => Some(output_root.join("public")),
+                                    "ssr" => Some(output_root.join("server")),
+                                    "react-server" => Some(output_root.join("rsc-render")),
+                                    _ => None,
+                                };
+                                if let Some(dir) = dir {
+                                    patchers.retain(|path, _| !path.starts_with(&dir));
+                                }
+                                if step.cancelled {
+                                    println!(
+                                        "[dev] compaction of {} dropped after {:.1}ms — an edit arrived; still owed: {}",
+                                        step.which,
+                                        started.elapsed().as_secs_f64() * 1_000.0,
+                                        owed.label(),
+                                    );
+                                } else {
+                                    println!(
+                                        "[dev] compacted {} in {:.1}ms | rendered_chunks={}{}",
+                                        step.which,
+                                        started.elapsed().as_secs_f64() * 1_000.0,
+                                        step.rendered,
+                                        if owed.any() { " | more owed" } else { "" },
+                                    );
+                                }
+                                // Compaction does not deliver CSS: it re-renders chunks
+                                // from graph state the stylesheet pass already read, so
+                                // the sheets it writes are the bytes browsers were sent
+                                // on the edit itself. Delivery lives on the edit path
+                                // and the short css idle above.
+                                css_prints = next_stylesheet_fingerprints(output_root);
+                            }
+                            Err(error) => {
+                                eprintln!("[dev] build error (kept serving): {error}");
+                                hub.broadcast_build_error(&error);
+                                build_error_showing = true;
+                            }
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+            } else {
+                match receiver.recv() {
+                    Ok(event) => event,
+                    Err(_) => return Ok(()),
+                }
             };
             let paths = coalesce_batch(receiver, first);
             let changed = paths
                 .into_iter()
                 .filter(|path| is_module_path(path))
+                // Never react to a dependency or to generated output. The watch roots
+                // are derived from the compiled module set, which in a monorepo means
+                // watching a tree that CONTAINS `node_modules` and diffpack's own
+                // `.diffpack-output` / `.diffpack-next`. Those are unknown to every
+                // graph, so a write there would be classified as a new module — a
+                // structural change — and a rebuild's own emit would retrigger the
+                // rebuild, forever.
+                .filter(|path| !is_dependency_or_generated(path, watch_base))
                 .filter(|path| {
                     // Drop a path whose content signature is unchanged since we last
                     // processed it (a duplicate event from the other watch source). A
@@ -2939,15 +4981,29 @@ mod next {
             if structural {
                 let started = Instant::now();
                 rebuild_all(
-                    project_root,
-                    output_root,
-                    rsc_root,
+                    BuildPaths { project_root, output_root, rsc_root },
                     client,
                     react_server,
                     ssr,
                     emit_options,
+                    scope,
                 )?;
-                restart_next_node(node, next_server_script, output_root, node_port)?;
+                // Everything was re-emitted from scratch: no deferred debt survives, and
+                // the worker replay list (whose micro-chunks the new bundles already
+                // contain) is discharged.
+                owed = OwedEmits::default();
+                hot.reset(output_root)?;
+                // A structural change means files appeared or vanished, so each graph's
+                // per-file candidate scan no longer describes the tree.
+                client.bundler.invalidate_tailwind_scan();
+                react_server.bundler.invalidate_tailwind_scan();
+                ssr.bundler.invalidate_tailwind_scan();
+                // The rebuild wrote the sheets and the browser is reloading onto them,
+                // so nothing is owed and the baseline moves with it — otherwise the
+                // next idle pass would push a sheet the reload already fetched.
+                css_owed = false;
+                css_prints = next_stylesheet_fingerprints(output_root);
+                restart_next_node(node, next_server_script, project_root, output_root, node_port)?;
                 hub.broadcast_reload();
                 println!(
                     "[dev] next structural change ({} file(s)) in {:.1}ms | full rebuild + reload",
@@ -2958,52 +5014,76 @@ mod next {
             }
 
             let started = Instant::now();
+            let mut profile = EditProfile::new();
+            // How much of the budget was already spent before this loop woke up.
+            if let Some(lag) = changed.iter().filter_map(|path| detection_lag_ms(path)).fold(
+                None,
+                |worst: Option<f64>, lag| Some(worst.map_or(lag, |worst| worst.max(lag))),
+            ) {
+                profile.note("detect", lag);
+            }
             let mut island_ids: BTreeSet<String> = BTreeSet::new();
+            let mut ssr_ids: BTreeSet<String> = BTreeSet::new();
+            let mut react_server_ids: BTreeSet<String> = BTreeSet::new();
             let mut client_c = EnvCounters::default();
             let mut server_c = EnvCounters::default();
             let mut server_reload = false;
             let mut graph_changed = false;
-            // Islands re-emitted leanly on the critical path; their SSR-of-flight
-            // re-emit is deferred PAST the push (below) so it never inflates the
-            // measured edit-to-update latency — the Fast Refresh hot update never
-            // consults the SSR bundle, only the next full document load does.
-            let mut deferred_ssr: Vec<PathBuf> = Vec::new();
 
             // Catch edit-time build errors (e.g. a syntax error in the edited island or
             // server component) and surface them in the browser overlay instead of
             // killing the dev server; keep serving and clear the overlay on the next
             // good rebuild. The full rebuilds (`rebuild_all`) stay hard errors.
+            // A non-stylesheet edit can add or remove a Tailwind class, which changes
+            // what EVERY graph's sheet compiles to — the scan reads the source tree,
+            // not the graph, so the file's owning graph is irrelevant. Only the edited
+            // file is re-tokenized (~1 ms), not the tree (~660 ms on this app), because
+            // a full rescan on the loop thread is exactly what made a JS edit collide
+            // with the stylesheet pass.
+            for path in changed.iter().filter(|path| !is_stylesheet_path(path)) {
+                client.bundler.refresh_tailwind_scan_path(path);
+                react_server.bundler.refresh_tailwind_scan_path(path);
+                ssr.bundler.refresh_tailwind_scan_path(path);
+            }
+
             let batch = (|| -> Result<(), String> {
                 for path in &changed {
-                    let source = fs::read_to_string(path).unwrap_or_default();
-                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-                    let is_island = crate::rsc::detect_directive(&canonical, &source)
-                        == Some(crate::rsc::RscDirective::Client);
+                    let is_island = profile.stage("classify", || {
+                        let source = fs::read_to_string(path).unwrap_or_default();
+                        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                        crate::rsc::detect_directive(&canonical, &source)
+                            == Some(crate::rsc::RscDirective::Client)
+                    });
                     if is_island && client.bundler.is_known_module(path) {
-                        // Island edit — CRITICAL PATH: rebuild the client Fast Refresh
-                        // boundary and incrementally re-emit ONLY the changed chunk. A
-                        // same-graph island edit cannot move ids, so the manifests, the
-                        // copied `public/` static assets, and the next/image variants are
-                        // all unchanged — none of that is re-run here (only a structural
-                        // change, handled by `rebuild_all`, touches them). The SSR re-emit
-                        // is deferred past the push.
-                        let rebuilt = client.rebuild(path)?;
-                        let rendered_chunks = emit_next_client_hmr(client, output_root)?;
+                        // Island edit — CRITICAL PATH: re-transform the changed module in
+                        // the client graph AND in the SSR-of-flight graph, which is the
+                        // one that renders this island into the served HTML. A same-graph
+                        // island edit cannot move ids, so the manifests, the copied
+                        // `public/` static assets and the next/image variants are all
+                        // unchanged — none of that is re-run here (only a structural
+                        // change, handled by `rebuild_all`, touches them).
+                        let rebuilt = profile.stage("rebuild-client", || client.rebuild(path))?;
                         island_ids.extend(rebuilt.changed_ids.iter().cloned());
                         graph_changed |= rebuilt.graph_changed;
-                        client_c.add(&rebuilt, rendered_chunks);
+                        client_c.add(&rebuilt, 0);
+                        owed.client = true;
                         if ssr.bundler.is_known_module(path) {
-                            deferred_ssr.push(path.clone());
+                            let rebuilt = profile.stage("rebuild-ssr", || ssr.rebuild(path))?;
+                            ssr_ids.extend(rebuilt.changed_ids.iter().cloned());
+                            graph_changed |= rebuilt.graph_changed;
+                            server_c.add(&rebuilt, 0);
+                            owed.ssr = true;
                         }
                     } else if react_server.bundler.is_known_module(path) {
-                        // Server-component edit: rebuild ONLY the react-server graph and
-                        // re-publish it to `rsc-render`. The persistent dev worker
-                        // re-imports the bundle (`?v=<mtime>`) on the next `?__rsc=1` flight
-                        // fetch, so it sees this bundle — no orchestrator/worker restart.
-                        let rebuilt = react_server.rebuild(path)?;
-                        let summary = emit_next_react_server(react_server, output_root, rsc_root)?;
+                        // Server-component edit: re-transform ONLY the react-server graph.
+                        // The persistent dev worker is hot-patched below, so the next
+                        // `?__rsc=1` flight fetch renders this code — no worker respawn.
+                        let rebuilt =
+                            profile.stage("rebuild-react-server", || react_server.rebuild(path))?;
+                        react_server_ids.extend(rebuilt.changed_ids.iter().cloned());
                         graph_changed |= rebuilt.graph_changed;
-                        server_c.add(&rebuilt, summary.rendered_chunks);
+                        server_c.add(&rebuilt, 0);
+                        owed.react_server = true;
                         server_reload = true;
                     } else {
                         // Known to neither the client nor the react-server graph as an
@@ -3023,19 +5103,32 @@ mod next {
             }
 
             // A graph-structure change (import added/removed) re-partitions chunks and
-            // shifts ids — the hot update's ESM re-import would fail to bind. Re-emit
-            // already ran; a full rebuild + reload is the correct, non-crashing path.
+            // shifts ids — the hot update's ESM re-import would fail to bind. A full
+            // rebuild + reload is the correct, non-crashing path; it re-emits all three
+            // graphs, so it also clears everything the hot channel was carrying.
             if graph_changed {
                 rebuild_all(
-                    project_root,
-                    output_root,
-                    rsc_root,
+                    BuildPaths { project_root, output_root, rsc_root },
                     client,
                     react_server,
                     ssr,
                     emit_options,
+                    scope,
                 )?;
-                restart_next_node(node, next_server_script, output_root, node_port)?;
+                // Every graph was just emitted from scratch: disk IS the truth, so the
+                // deferred debt, the worker replay list, and every chunk patcher are
+                // all discharged.
+                owed = OwedEmits::default();
+                hot.reset(output_root)?;
+                patchers.clear();
+                client.bundler.invalidate_tailwind_scan();
+                react_server.bundler.invalidate_tailwind_scan();
+                ssr.bundler.invalidate_tailwind_scan();
+                // Same as the structural path: the sheets are on disk and the reload
+                // will fetch them, so the baseline moves and nothing stays owed.
+                css_owed = false;
+                css_prints = next_stylesheet_fingerprints(output_root);
+                restart_next_node(node, next_server_script, project_root, output_root, node_port)?;
                 hub.broadcast_reload();
                 println!(
                     "[dev] next rebuilt {} file(s) in {:.1}ms | graph changed -> full reload",
@@ -3045,74 +5138,370 @@ mod next {
                 continue;
             }
 
-            // PUSH FIRST — the user-visible edit-to-update event, measured here.
+            // SERVER FIRST, on the critical path: hand each changed server graph a
+            // micro-chunk holding ONLY its changed modules and have the live Node
+            // processes swap them in place. This is what makes the next full document
+            // load fresh, and it must happen BEFORE the browser is told anything —
+            // otherwise a user who reloads the instant Fast Refresh lands sees the old
+            // HTML. It is chunk-granular by construction: the micro-chunk carries the
+            // changed modules and nothing else, so no unrelated chunk is re-imported
+            // and no module leaks per keystroke beyond the ~1 KB update itself.
+            let hot_result = hot.push(
+                node_port,
+                output_root,
+                HotGraphs {
+                    ssr: (!ssr_ids.is_empty()).then_some((&*ssr, &ssr_ids)),
+                    react_server: (!react_server_ids.is_empty())
+                        .then_some((&*react_server, &react_server_ids)),
+                },
+                &mut profile,
+            );
+            let hot_note = match hot_result {
+                Ok(note) => note,
+                Err(error) => {
+                    // A hot update that did not land means the server would serve stale
+                    // HTML for this edit. Say so loudly (overlay + log) rather than
+                    // pushing a browser update that disagrees with the server.
+                    let error = format!("dev server hot update failed: {error}");
+                    eprintln!("[dev] {error}");
+                    hub.broadcast_build_error(&error);
+                    build_error_showing = true;
+                    continue;
+                }
+            };
+
+            // STYLESHEETS, still on the critical path: when a `.css` source was
+            // edited, its recompiled sheet IS this edit's visible result, so it is
+            // compiled and pushed here rather than waiting for any idle — the sheet
+            // used to be a side-product of the deferred full re-emit, which put a css
+            // edit 10s behind the keystroke. Every other edit only MIGHT have moved
+            // the sheet (a Tailwind class name added to a component): worth a
+            // candidate rescan, not worth it on a keystroke, so it is owed to the
+            // short css idle at the top of the loop instead.
+            let (css_note, css_failed) = if changed.iter().any(|path| is_stylesheet_path(path)) {
+                let epoch = EventEpoch::now();
+                match profile.stage("css-emit", || {
+                    refresh_next_stylesheets(
+                        output_root, rsc_root, client, react_server, &mut css_prints, hub, epoch,
+                    )
+                }) {
+                    // A newer edit landed while this sheet was compiling, so this
+                    // result describes sources nobody has any more. The newer edit
+                    // owns the sheet now; if it was not itself a stylesheet edit, the
+                    // short css idle picks the work up.
+                    Ok(StylesheetRefresh::Abandoned) => {
+                        css_owed = true;
+                        (" | stylesheet superseded by a newer edit".to_string(), false)
+                    }
+                    Ok(StylesheetRefresh::Done(0)) => (" | stylesheet unchanged".to_string(), false),
+                    Ok(StylesheetRefresh::Done(sheets)) => (
+                        format!(
+                            " | css hot-swap -> {sheets} sheet(s), {} browser(s)",
+                            hub.client_count()
+                        ),
+                        false,
+                    ),
+                    Err(error) => {
+                        // The browser would otherwise keep showing the old styling with
+                        // nothing said. Surface it in the overlay; a later good edit
+                        // clears it.
+                        eprintln!("[dev] stylesheet refresh failed: {error}");
+                        hub.broadcast_build_error(&error);
+                        build_error_showing = true;
+                        (" | STYLESHEET REFRESH FAILED".to_string(), true)
+                    }
+                }
+            } else {
+                css_owed = true;
+                (String::new(), false)
+            };
+
+            // Then the browser push — the user-visible edit-to-update event.
             let update = if !island_ids.is_empty() {
                 // State-preserving React Fast Refresh (no reload). Push a MICRO-CHUNK
                 // (only the changed modules) so the browser re-parses ~1 KB, not the
                 // ~1 MB entry chunk; served directly off disk by the proxy.
-                hmr_push_client(client, &island_ids, hub, Some(output_root))
+                let pushed = profile.stage("push-client", || {
+                    hmr_push_client(client, &island_ids, hub, Some(output_root))
+                });
+                // And splice the same micro-chunk into the browser chunks on disk,
+                // so a full reload loads current code without waiting for compaction.
+                profile.stage("patch-disk-client", || {
+                    if let Err(error) = append_hot_patch(
+                        &mut patchers,
+                        client,
+                        &island_ids,
+                        "client.js",
+                        &output_root.join("public"),
+                        &output_root.join("public/client.hmr.js"),
+                    ) {
+                        eprintln!("[dev] client disk patch skipped: {error}");
+                    }
+                });
+                pushed
             } else if server_reload {
                 // Server-component edit: an in-place RSC refresh (no full page reload).
                 // The client refetches the current route's flight and diff-renders it;
-                // the fresh react-server bundle is already published to `rsc-render`,
-                // and client-island state is preserved by React reconciliation.
+                // the react-server worker is already running the new code (above), and
+                // client-island state is preserved by React reconciliation.
                 hub.broadcast_rsc_refresh();
                 "server component -> in-place RSC refresh (no reload)".to_string()
             } else {
                 "no visible change".to_string()
             };
+            // DISK, right after the pushes and byte-cheaply: splice the same
+            // micro-chunks into
+            // the on-disk chunks that host the changed modules (see ChunkPatcher).
+            // After this, a full reload or worker respawn reads CURRENT code from
+            // disk, and the deferred re-emit below is pure compaction. A patch
+            // failure is not an edit failure: it just means disk is as stale as it
+            // always was pre-patching, and compaction restores it.
+            profile.stage("patch-disk", || {
+                let seq = hot.last_seq();
+                let mut patched = 0usize;
+                if !ssr_ids.is_empty() {
+                    match append_hot_patch(
+                        &mut patchers,
+                        ssr,
+                        &ssr_ids,
+                        "server.mjs",
+                        &output_root.join("server"),
+                        &output_root.join(HOT_DIR).join(format!("ssr.{seq}.mjs")),
+                    ) {
+                        Ok(n) => patched += n,
+                        Err(error) => eprintln!("[dev] ssr disk patch skipped: {error}"),
+                    }
+                }
+                if !react_server_ids.is_empty() {
+                    match append_hot_patch(
+                        &mut patchers,
+                        react_server,
+                        &react_server_ids,
+                        "server.mjs",
+                        &output_root.join("rsc-render"),
+                        &output_root.join(HOT_DIR).join(format!("rsc.{seq}.mjs")),
+                    ) {
+                        Ok(n) => patched += n,
+                        Err(error) => eprintln!("[dev] rsc disk patch skipped: {error}"),
+                    }
+                }
+                patched
+            });
+
+
             let update_ms = started.elapsed().as_secs_f64() * 1_000.0;
 
-            // OFF THE CRITICAL PATH (after the push, before the next event drains):
-            // finish each island's SSR-of-flight re-emit so a subsequent FULL document
-            // load hydrates against fresh code. Both steps are incremental.
-            let deferred = (|| -> Result<(), String> {
-                for path in &deferred_ssr {
-                    let rebuilt = ssr.rebuild(path)?;
-                    let summary = emit_next_ssr(ssr, output_root)?;
-                    server_c.add(&rebuilt, summary.rendered_chunks);
-                }
-                Ok(())
-            })();
-            if let Err(error) = deferred {
-                eprintln!("[dev] build error (kept serving): {error}");
-                hub.broadcast_build_error(&error);
-                build_error_showing = true;
-                continue;
-            }
-            if build_error_showing {
+            // The full chunk re-emit each touched graph now owes DISK is NOT run here.
+            // Nothing in the update just delivered needs it — the browser has the
+            // micro-chunk, both server graphs are hot-patched — and it costs ~1.2s on
+            // cal.com, which inside the loop would make every keystroke of a burst queue
+            // behind the previous one's re-emit. It runs at the top of the loop as soon
+            // as `SETTLE_MS` passes with no new event, coalesced across the whole burst.
+            // Until it lands, `hot.pending_react_server` keeps the worker replay list
+            // non-empty, so a react-server worker respawned in that window is still
+            // caught up from the micro-chunks.
+            if build_error_showing && !css_failed {
                 hub.broadcast_build_ok();
                 build_error_showing = false;
             }
 
             println!(
-                "[dev] next rebuilt {} file(s) | update in {update_ms:.1}ms (total {:.1}ms) | client transformed={} changed={} rendered_chunks={} | server transformed={} changed={} rendered_chunks={} | {update}",
+                "[dev] next rebuilt {} file(s) | update in {update_ms:.1}ms | client transformed={} changed={} | server transformed={} changed={} | {hot_note} | {update}{css_note} | disk re-emit owed: {}{}",
                 changed.len(),
-                started.elapsed().as_secs_f64() * 1_000.0,
                 client_c.transformed,
                 client_c.changed,
-                client_c.rendered_chunks,
                 server_c.transformed,
                 server_c.changed,
-                server_c.rendered_chunks,
+                if owed.any() { owed.label() } else { "none".to_string() },
+                profile.label(),
             );
         }
+    }
+
+    /// How long the first build waits for a request to tell it which route to compile.
+    /// Short: a dev server is normally started with a browser already open or about to be,
+    /// and if nobody asks, compiling the whole app is exactly the right thing to do.
+    const FIRST_REQUEST_GRACE: Duration = Duration::from_millis(750);
+
+    /// How quiet the server has to be before the fill starts, and how long the fill will
+    /// wait for that quiet before starting anyway.
+    const FILL_QUIET: Duration = Duration::from_millis(400);
+    const FILL_QUIET_BUDGET: Duration = Duration::from_secs(20);
+
+    /// How long to keep collecting wants after the first one, so a page load that fires a
+    /// document plus several API calls compiles them in ONE build instead of one per
+    /// request. Small enough to stay invisible against a multi-second build.
+    const WANT_COALESCE_MS: u64 = 60;
+
+    /// The scope of the first build: whatever the first requests asked for, or the whole
+    /// app if nothing arrived within [`FIRST_REQUEST_GRACE`].
+    ///
+    /// HTTP endpoints (`route.ts`, `pages/api/**`) are compiled EAGERLY even under
+    /// `DIFFPACK_DEV_LAZY=1`. A page whose API answers 404 is a broken app, not a page that
+    /// is still compiling, and on cal.com the document immediately reads a next-auth
+    /// session and several tRPC queries. `DIFFPACK_DEV_LAZY=api` makes them lazy as well
+    /// and those requests WAIT rather than be answered wrongly — but it measured SLOWER
+    /// than compiling everything up front (10.5s to the first document against 6.2s),
+    /// because cal.com's server render calls the app's own API over HTTP, so the render
+    /// itself sits waiting for an endpoint build. Kept because an app whose pages do not
+    /// call their own API would win from it; do not reach for it without measuring.
+    fn first_build_scope(lazy: &LazyRoutes) -> RouteScope {
+        let lazy_endpoints = std::env::var("DIFFPACK_DEV_LAZY").as_deref() == Ok("api");
+        println!("[dev] next: lazy route compilation is ON; waiting for the first request");
+        let Some(wanted) = wait_for_first_wants(lazy) else {
+            println!(
+                "[dev] next: no request within {}ms — compiling the whole app",
+                FIRST_REQUEST_GRACE.as_millis(),
+            );
+            return RouteScope::All;
+        };
+        let (pages, endpoints): (Vec<String>, Vec<String>) = wanted
+            .into_iter()
+            .partition(|path| {
+                lazy.patterns
+                    .iter()
+                    .find(|pattern| pattern.url_path == *path)
+                    .is_none_or(|pattern| pattern.kind == crate::next_adapter::PatternKind::Page)
+            });
+        if lazy_endpoints {
+            RouteScope::pages_and_endpoints(pages, endpoints)
+        } else {
+            RouteScope::pages(pages)
+        }
+    }
+
+    /// Block until a request registers a want, then keep collecting for
+    /// [`WANT_COALESCE_MS`]. `None` means either nothing arrived within the grace period or
+    /// a request matched no pattern at all — both of which mean "compile everything".
+    fn wait_for_first_wants(lazy: &LazyRoutes) -> Option<BTreeSet<String>> {
+        {
+            let mut state = lazy.state.lock().expect("lazy routes mutex");
+            let deadline = Instant::now() + FIRST_REQUEST_GRACE;
+            while state.wanted.is_empty() && !state.wanted_everything {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                let (next, _) = lazy
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .expect("lazy routes condvar");
+                state = next;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(WANT_COALESCE_MS));
+        lazy.take_wanted()
+    }
+
+    /// One graph's contribution to a cold start / rebuild, for the log line.
+    struct GraphTiming {
+        ms: f64,
+        modules: usize,
+    }
+
+    /// The three environment builds a pass produces, in the order they are always named:
+    /// client, react-server, ssr.
+    struct Graphs {
+        client: EnvBuild,
+        react_server: EnvBuild,
+        ssr: EnvBuild,
+        /// What each one cost, for the log line.
+        timings: [(&'static str, GraphTiming); 3],
+    }
+
+    /// Build all three graphs for `scope`, in the order their facts flow.
+    ///
+    /// REACT-SERVER FIRST, then client and ssr concurrently. The react-server graph is
+    /// what decides which islands exist as client references at all, so building it first
+    /// lets the other two pin exactly that set (see [`REFERENCED_ISLANDS_FILE`]) instead
+    /// of every `"use client"` file in the project. The client and ssr graphs read no
+    /// output of each other's — client emits `public/`, ssr emits `server/` — so they run
+    /// on two threads, and neither reads the react-server graph's output at build time.
+    ///
+    /// (The pre-existing order was client first, because TanStack Start's server graph
+    /// imports a virtual module derived from the client build. A Next graph cannot import
+    /// it; see `register_next_server_virtual_modules`.)
+    fn build_all_graphs(
+        project_root: &Path,
+        output_root: &Path,
+        rsc_root: &Path,
+        emit_options: EmitOptions,
+        scope: &RouteScope,
+    ) -> Result<Graphs, String> {
+        let started = Instant::now();
+        let react_server =
+            build_next_react_server(project_root, output_root, rsc_root, emit_options, scope)?;
+        let react_server_timing = GraphTiming {
+            ms: started.elapsed().as_secs_f64() * 1_000.0,
+            modules: react_server.reachable.len(),
+        };
+        let (client_result, ssr_result) = std::thread::scope(|threads| {
+            let client = threads.spawn(|| {
+                let started = Instant::now();
+                let build = build_next_client(project_root, output_root, emit_options, scope);
+                (build, started.elapsed().as_secs_f64() * 1_000.0)
+            });
+            let ssr = threads.spawn(|| {
+                let started = Instant::now();
+                let build = build_next_ssr(project_root, output_root, emit_options, scope);
+                (build, started.elapsed().as_secs_f64() * 1_000.0)
+            });
+            (client.join(), ssr.join())
+        });
+        let (client_result, client_ms) =
+            client_result.map_err(|_| "the client build thread panicked".to_string())?;
+        let (ssr_result, ssr_ms) =
+            ssr_result.map_err(|_| "the ssr build thread panicked".to_string())?;
+        let client = client_result?;
+        let ssr = ssr_result?;
+        let timings = [
+            ("react-server", react_server_timing),
+            ("client", GraphTiming { ms: client_ms, modules: client.reachable.len() }),
+            ("ssr", GraphTiming { ms: ssr_ms, modules: ssr.reachable.len() }),
+        ];
+        Ok(Graphs { client, react_server, ssr, timings })
+    }
+
+    /// The one-line summary of a [`build_all_graphs`] pass.
+    fn graph_timing_label(timings: &[(&'static str, GraphTiming); 3]) -> String {
+        timings
+            .iter()
+            .map(|(name, timing)| {
+                format!("{name} {:.0}ms ({} modules)", timing.ms, timing.modules)
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// Where a rebuild reads its inputs from and writes its outputs to. Grouped because the
+    /// four travel together everywhere a rebuild happens.
+    #[derive(Clone, Copy)]
+    struct BuildPaths<'a> {
+        project_root: &'a Path,
+        output_root: &'a Path,
+        rsc_root: &'a Path,
     }
 
     /// Re-discover and re-emit all three graphs from scratch (used for structural /
     /// graph-changing edits, where module ids shift across the partition).
     fn rebuild_all(
-        project_root: &Path,
-        output_root: &Path,
-        rsc_root: &Path,
+        paths: BuildPaths<'_>,
         client: &mut EnvBuild,
         react_server: &mut EnvBuild,
         ssr: &mut EnvBuild,
         emit_options: EmitOptions,
+        scope: &RouteScope,
     ) -> Result<(), String> {
-        *client = build_next_client(project_root, output_root, emit_options)?;
-        *react_server = build_next_react_server(project_root, output_root, rsc_root, emit_options)?;
-        *ssr = build_next_ssr(project_root, output_root, emit_options)?;
+        let fresh = build_all_graphs(
+            paths.project_root,
+            paths.output_root,
+            paths.rsc_root,
+            emit_options,
+            scope,
+        )?;
+        *client = fresh.client;
+        *react_server = fresh.react_server;
+        *ssr = fresh.ssr;
         Ok(())
     }
 
@@ -3125,15 +5514,31 @@ mod next {
     /// orchestrator (and, in turn, its persistent worker) shuts down instead of
     /// orphaning. The returned [`Child`] owns the write end; keeping it alive keeps the
     /// pipe open for the orchestrator's lifetime.
-    fn spawn_next_node(script: &Path, output_root: &Path, port: u16) -> Result<Child, String> {
+    fn spawn_next_node(
+        script: &Path,
+        project_root: &Path,
+        output_root: &Path,
+        port: u16,
+    ) -> Result<Child, String> {
         let mut command = Command::new("node");
         command
             .arg(script)
             .arg(output_root)
             .arg(port.to_string())
-            .env("DIFFPACK_NEXT_DEV", "1");
-        // The runtime next/image optimizer (`/_next/image`) in the orchestrator shells
-        // back to this binary for the native resize (dynamic/remote fallback only).
+            // `next dev` loads next.config in the process that then serves, so the
+            // config's `process.env` side effects (cal.com's whole `.env`, loaded by a
+            // `dotenv.config()` call in `next.config.ts`) are the environment the app's
+            // server code runs under. Diffpack evaluates the config in a child process,
+            // so the delta it recorded is handed to the orchestrator here — and through
+            // it to the SSR worker.
+            .envs(crate::next_adapter::config_env_from_manifest(project_root))
+            .env("DIFFPACK_NEXT_DEV", "1")
+            // The app's own working directory, as when a developer runs `next dev` from
+            // it: server code that resolves a path relative to the cwd (a locale
+            // directory, an on-disk template) must find it where the app expects.
+            .current_dir(project_root);
+        // The next/image optimizer (`/_next/image`) in the orchestrator shells back to
+        // this binary for a native resize the build did not precompute.
         if let Ok(exe) = std::env::current_exe() {
             command.env("DIFFPACK_BIN", exe);
         }
@@ -3150,17 +5555,50 @@ mod next {
     fn restart_next_node(
         node: &mut Child,
         script: &Path,
+        project_root: &Path,
         output_root: &Path,
         port: u16,
     ) -> Result<(), String> {
         let _ = node.kill();
         let _ = node.wait();
-        *node = spawn_next_node(script, output_root, port)?;
+        *node = spawn_next_node(script, project_root, output_root, port)?;
         wait_for_node(port)
     }
 
     /// Replace `dest` with a fresh recursive copy of `src` (used to publish the freshly
     /// emitted react-server bundle from `.rsc/server` to `rsc-render`).
+    /// Move `fresh` into `live`'s place by RENAME, not by copy: `live` is a 626 MB tree on
+    /// cal.com and the requests being held during the swap are waiting on it, so the swap
+    /// has to be O(1). The displaced tree is renamed aside and deleted on a background
+    /// thread, since nothing reads it any more.
+    fn swap_output_dir(fresh: &Path, live: &Path) -> Result<(), String> {
+        let displaced = path_with_suffix_local(live, ".old");
+        if displaced.exists() {
+            fs::remove_dir_all(&displaced)
+                .map_err(|error| format!("cannot clear {}: {error}", displaced.display()))?;
+        }
+        if live.exists() {
+            fs::rename(live, &displaced).map_err(|error| {
+                format!(
+                    "cannot move {} aside to {}: {error}",
+                    live.display(),
+                    displaced.display(),
+                )
+            })?;
+        }
+        fs::rename(fresh, live).map_err(|error| {
+            format!("cannot move {} into {}: {error}", fresh.display(), live.display())
+        })?;
+        if displaced.exists() {
+            let _ = std::thread::Builder::new()
+                .name("diffpack-dev-output-cleanup".into())
+                .spawn(move || {
+                    let _ = fs::remove_dir_all(&displaced);
+                });
+        }
+        Ok(())
+    }
+
     fn replace_dir(src: &Path, dest: &Path) -> Result<(), String> {
         if dest.exists() {
             fs::remove_dir_all(dest)
@@ -3184,18 +5622,370 @@ mod next {
             if file_type.is_dir() {
                 copy_dir_recursive(&from, &to)?;
             } else {
-                fs::copy(&from, &to).map_err(|error| {
-                    format!("cannot copy {} -> {}: {error}", from.display(), to.display())
-                })?;
+                copy_file_if_changed(&from, &to)?;
             }
         }
         Ok(())
+    }
+
+    /// `fs::copy`, except a destination already holding the source's exact bytes
+    /// is left alone. Skipping the write keeps the destination's mtime stable
+    /// across a rebuild that reproduced it — which is what lets the dev warm
+    /// start prove "the rebuild changed nothing" from an mtime snapshot — and
+    /// costs a read the copy was going to do anyway.
+    fn copy_file_if_changed(from: &Path, to: &Path) -> Result<(), String> {
+        let source = fs::read(from)
+            .map_err(|error| format!("cannot read {}: {error}", from.display()))?;
+        if fs::read(to).ok().as_deref() == Some(source.as_slice()) {
+            return Ok(());
+        }
+        fs::write(to, source).map_err(|error| {
+            format!("cannot copy {} -> {}: {error}", from.display(), to.display())
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A chunk patch must land BEFORE the sentinel tail (so the entry invoke
+        /// still runs last), preserve the tail byte-for-byte, stack across multiple
+        /// appends in edit order, and mark every appended line explicitly unmapped
+        /// in the sidecar map at the splice line's position — never omitted, or a
+        /// consumer would attribute patched code to the previous module's mapping.
+        #[test]
+        fn chunk_patcher_splices_before_the_tail_and_marks_the_map() {
+            let dir = tempfile::tempdir().unwrap();
+            let chunk = dir.path().join("client.js");
+            let base = "const __diffpackEntry=(()=>{\n\
+                        const __newModules={1:function(){}};\n\
+                        __runtime.register(__newModules,__newMaps,__newChunks);\n\
+                        if(import.meta&&import.meta.url&&import.meta.url.indexOf(\"__diffpack_hmr\")>=0)return __runtime;\n\
+                        return __runtime.require(1);\n\
+                        })();\n\
+                        export default __diffpackEntry;\n";
+            fs::write(&chunk, base).unwrap();
+            // Map with one entry per line of the chunk (7 lines) — all "A" markers.
+            let map = format!("{}.map", chunk.display());
+            fs::write(&map, r#"{"version":3,"file":"client.js","names":[],"sources":[],"sourcesContent":[],"mappings":"A;A;A;A;A;A;A"}"#).unwrap();
+
+            let micro = "import { x } from \"node:url\";\n\
+                         const __diffpackEntry=(()=>{\n\
+                         const __newModules={1:function(){/*patched*/}};\n\
+                         __runtime.register(__newModules,__newMaps,__newChunks);\n\
+                         if(import.meta&&import.meta.url&&import.meta.url.indexOf(\"__diffpack_hmr\")>=0)return __runtime;\n\
+                         return __runtime.require(1);\n\
+                         })();\n\
+                         export default __diffpackEntry;\n\
+                         //# sourceMappingURL=hot.mjs.map\n";
+
+            let mut patcher = ChunkPatcher::open(&chunk).unwrap();
+            patcher.append(micro).unwrap();
+            patcher.append(&micro.replace("patched", "patched-again")).unwrap();
+
+            let out = fs::read_to_string(&chunk).unwrap();
+            // Both patches present, in order, and before the sentinel tail.
+            let first = out.find("/*patched*/").expect("first patch");
+            let second = out.find("patched-again").expect("second patch");
+            let tail = out.rfind("if(import.meta&&import.meta.url").unwrap();
+            assert!(first < second && second < tail, "order: {out}");
+            // The file prelude of the micro-chunk (an import statement, illegal
+            // mid-file) must have been stripped.
+            assert!(!out.contains("node:url"), "{out}");
+            // The original tail survives byte-for-byte at the end.
+            assert!(out.ends_with("export default __diffpackEntry;\n"), "{out}");
+            // Each patch is a nested IIFE, so its consts cannot collide.
+            assert_eq!(out.matches("const __diffpackEntry=(()=>{").count(), 3);
+            // The micro-chunk's own `export default` must NOT be spliced in: an
+            // export inside the base IIFE is a SyntaxError (caught live on
+            // cal.com's server.mjs before this assertion existed). Exactly the
+            // base's one export survives.
+            assert_eq!(out.matches("export default").count(), 1, "{out}");
+
+            // The map gained one explicit unmapped marker per appended line, at the
+            // splice line (line 3 = index of the sentinel line), not at the end.
+            let mapped = fs::read_to_string(&map).unwrap();
+            let mappings = mapped.split("\"mappings\":\"").nth(1).unwrap().split('"').next().unwrap();
+            let base_lines = 3; // lines before the sentinel in the base
+            let patch_lines: usize = out.lines().count() - base.lines().count();
+            let entries: Vec<&str> = mappings.split(';').collect();
+            assert_eq!(entries.len(), 7 + patch_lines, "one entry per line: {mappings}");
+            assert!(entries[base_lines..base_lines + patch_lines].iter().all(|e| *e == "A"),
+                "appended lines are explicit unmapped markers: {mappings}");
+        }
+
+        /// The embedded orchestrator must take its dev freshness from the hot-update
+        /// channel and NOT from polling a bundle's mtime.
+        ///
+        /// The mtime cache is the exact defect this replaced, and it is the kind that
+        /// reads as harmless: an island edit re-emits only the chunk that HOSTS the
+        /// changed module, so `server/server.mjs`'s own mtime never moves and the cached
+        /// module is returned forever — a `curl` after an edit served the OLD string for
+        /// the life of the process while every browser-side HMR gate stayed green. The
+        /// end-to-end proof is `scripts/rsc/next-dev-fresh-check.sh`; this asserts the
+        /// shape at unit-test speed so a reintroduced poll is caught immediately.
+        #[test]
+        fn the_embedded_orchestrator_takes_dev_freshness_from_the_hot_channel_not_an_mtime_poll() {
+            assert!(
+                NEXT_SERVER_MJS.contains("/__diffpack_dev/hot"),
+                "the orchestrator must expose the dev hot-update endpoint",
+            );
+            assert!(
+                NEXT_SERVER_MJS.contains("serverInvalidate"),
+                "a hot update must drive the live runtime's serverInvalidate",
+            );
+            assert!(
+                !NEXT_SERVER_MJS.contains("statSync(ssrEntry).mtimeMs"),
+                "the orchestrator must not key its SSR module cache on the entry's mtime",
+            );
+            assert!(
+                !NEXT_SERVER_MJS.contains("ssrEntry).href + \"?v=\""),
+                "re-importing the SSR entry under a query cannot bust its chunks' ESM cache",
+            );
+        }
+
+        /// The deferred full re-emit is tracked as DEBT, not run inside the edit. The
+        /// bookkeeping has to survive a batch that touches several graphs and has to
+        /// report exactly what it owes, because that log line is how a developer sees
+        /// which half of the update is still pending.
+        #[test]
+        fn owed_emits_accumulate_across_graphs_and_report_what_is_pending() {
+            let mut owed = OwedEmits::default();
+            assert!(!owed.any(), "nothing is owed before an edit");
+            assert_eq!(owed.label(), "");
+            owed.client = true;
+            owed.ssr = true;
+            assert!(owed.any());
+            assert_eq!(owed.label(), "client + ssr", "an island edit owes both browser-facing graphs");
+            owed.react_server = true;
+            assert_eq!(owed.label(), "client + ssr + react-server");
+        }
+    }
+}
+
+#[cfg(test)]
+mod lazy_route_tests {
+    use super::*;
+    use crate::next_adapter::{PatternKind, RoutePattern, RouteScope};
+
+    fn lazy() -> LazyRoutes {
+        // Endpoints before pages, the orchestrator's own precedence — and the ordering that
+        // matters here, since cal.com's `/api/**` endpoints would otherwise be swallowed by
+        // a root catch-all page.
+        LazyRoutes::new(vec![
+            RoutePattern::parse("/api/auth/[...nextauth]", PatternKind::Endpoint),
+            RoutePattern::parse("/api/trpc/[trpc]", PatternKind::Endpoint),
+            RoutePattern::parse("/auth/login", PatternKind::Page),
+            RoutePattern::parse("/[user]", PatternKind::Page),
+        ])
+    }
+
+    #[test]
+    fn a_request_matches_the_pattern_that_will_serve_it_endpoints_first() {
+        let lazy = lazy();
+        assert_eq!(
+            lazy.match_path("/api/trpc/viewer.me").map(|p| p.url_path.as_str()),
+            Some("/api/trpc/[trpc]"),
+        );
+        assert_eq!(
+            lazy.match_path("/auth/login").map(|p| p.url_path.as_str()),
+            Some("/auth/login"),
+        );
+        // A path only the catch-all page can serve.
+        assert_eq!(lazy.match_path("/jimmy").map(|p| p.url_path.as_str()), Some("/[user]"));
+        // Nothing matches a path with too many segments for any pattern.
+        assert_eq!(lazy.match_path("/a/b/c/d").map(|p| p.url_path.as_str()), None);
+    }
+
+    /// Regression: readiness has to be decided by asking the SCOPE, not by looking a path up
+    /// in a set of compiled routes. A scope that compiles every endpoint knows
+    /// `/api/trpc/[trpc]` is ready without ever naming it, and an earlier version — which
+    /// recorded only the compiled PAGES — left every endpoint request blocked until the whole
+    /// app had been compiled, turning a 5s first response into a 13s one.
+    #[test]
+    fn an_endpoint_request_is_ready_when_the_scope_compiles_all_endpoints() {
+        let lazy = lazy();
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        assert_eq!(lazy.ensure("/api/trpc/viewer.me"), Ok(Some(4242)));
+        assert_eq!(lazy.ensure("/auth/login"), Ok(Some(4242)));
+        // A path no pattern matches needs a running orchestrator and nothing else: the app
+        // owns that answer (its own 404, a rewrite, a static file).
+        assert_eq!(lazy.ensure("/a/b/c/d"), Ok(Some(4242)));
+    }
+
+    #[test]
+    fn a_request_for_an_uncompiled_page_waits_and_is_released_by_the_build_that_covers_it() {
+        let lazy = Arc::new(lazy());
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        // `/[user]` is not compiled: this blocks, and registers the want that tells the
+        // build thread what to compile.
+        let waiter = {
+            let lazy = Arc::clone(&lazy);
+            std::thread::spawn(move || lazy.ensure("/jimmy"))
+        };
+        // The build thread sees the want (blocking until there is one) and lands a scope
+        // covering it.
+        assert_eq!(lazy.take_wanted(), Some(["/[user]".to_string()].into_iter().collect()));
+        lazy.landed(&RouteScope::All, 4243);
+        assert_eq!(waiter.join().expect("waiter thread"), Ok(Some(4243)));
+        // Everything is compiled now, so the proxy stops consulting this at all.
+        assert!(!lazy.incomplete());
+    }
+
+    #[test]
+    fn a_build_failure_releases_waiters_with_the_error_instead_of_hanging_them() {
+        let lazy = Arc::new(lazy());
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        let waiter = {
+            let lazy = Arc::clone(&lazy);
+            std::thread::spawn(move || lazy.ensure("/jimmy"))
+        };
+        assert!(lazy.take_wanted().is_some());
+        lazy.failed("the ssr graph did not compile");
+        assert_eq!(
+            waiter.join().expect("waiter thread"),
+            Err("the ssr graph did not compile".to_string()),
+        );
+    }
+
+    /// The fill must not start while a request is already blocked on a wider build: an
+    /// in-flight render can itself depend on a route this build does not have (cal.com's
+    /// server components call the app's own API over HTTP), so waiting for the server to go
+    /// idle would wait for a render that is waiting for the fill.
+    #[test]
+    fn waiting_demand_outranks_idleness_so_the_fill_cannot_deadlock_behind_a_render() {
+        let lazy = lazy();
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        {
+            let mut state = lazy.state.lock().expect("lazy routes mutex");
+            state.in_flight = 1;
+            state.wanted.insert("/[user]".to_string());
+        }
+        let started = Instant::now();
+        lazy.wait_for_quiet(Duration::from_secs(30), Duration::from_secs(30));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a blocked want must make the fill start at once, waited {:?}",
+            started.elapsed(),
+        );
+    }
+
+    #[test]
+    fn the_fill_waits_for_an_in_flight_render_when_nothing_is_blocked() {
+        let lazy = lazy();
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        let guard = lazy.serving_request();
+        let started = Instant::now();
+        // Nothing is waiting for a build, so the request in flight holds the fill off — up
+        // to the budget, which is what stops a page that polls forever from postponing it.
+        lazy.wait_for_quiet(Duration::from_secs(30), Duration::from_millis(150));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        drop(guard);
+    }
+
+    #[test]
+    fn a_watch_root_already_covered_recursively_is_not_watched_twice() {
+        let recursive = |path: &str| (PathBuf::from(path), RecursiveMode::Recursive);
+        let top_level = |path: &str| (PathBuf::from(path), RecursiveMode::NonRecursive);
+        let covered = vec![recursive("/app/src"), top_level("/app")];
+        // Already covered: an equal root, and one under a recursive root.
+        assert!(uncovered_watch_roots(&[recursive("/app/src")], &covered).is_empty());
+        assert!(uncovered_watch_roots(&[recursive("/app/src/routes")], &covered).is_empty());
+        // A sibling the first build never reached IS new.
+        assert_eq!(
+            uncovered_watch_roots(&[recursive("/app/packages")], &covered),
+            vec![recursive("/app/packages")],
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn etag_comparison_is_weak_and_handles_lists() {
+        let tag = "W/\"1f-2a\"";
+        assert!(etag_matches(tag, tag));
+        // Weak comparison: the `W/` prefix is not part of the identity.
+        assert!(etag_matches("\"1f-2a\"", tag));
+        assert!(etag_matches("W/\"1f-2a\"", "\"1f-2a\""));
+        // A list, and the wildcard.
+        assert!(etag_matches("W/\"aa-bb\", W/\"1f-2a\"", tag));
+        assert!(etag_matches("*", tag));
+        // A different entity must not match, or an edit would be served stale.
+        assert!(!etag_matches("W/\"1f-2b\"", tag));
+        assert!(!etag_matches("", tag));
+    }
+
+    #[test]
+    fn file_validator_changes_when_the_file_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("client.js");
+        std::fs::write(&file, "a").unwrap();
+        let first = file_validator(&std::fs::metadata(&file).unwrap()).unwrap();
+        // A rewrite with different content must produce a different validator, which is
+        // what makes an edit reach the browser instead of revalidating into a 304.
+        std::fs::write(&file, "abcd").unwrap();
+        let second = file_validator(&std::fs::metadata(&file).unwrap()).unwrap();
+        assert_ne!(first, second, "length change must move the validator");
+    }
+
+    #[test]
+    fn gzip_is_offered_only_when_accepted_and_only_for_text() {
+        let header = |value: &str| vec![("Accept-Encoding".to_string(), value.to_string())];
+        assert!(accepts_gzip(&header("gzip, deflate, br")));
+        assert!(accepts_gzip(&header("br;q=1.0, gzip;q=0.8")));
+        assert!(!accepts_gzip(&header("br, deflate")));
+        assert!(!accepts_gzip(&[]));
+        // `gzip;q=0` is a refusal, not an offer.
+        assert!(!accepts_gzip(&header("gzip;q=0")));
+
+        assert!(compressible("application/javascript; charset=utf-8"));
+        assert!(compressible("text/css; charset=utf-8"));
+        assert!(compressible("image/svg+xml"));
+        // Already-compressed payloads: deflating them costs time and saves nothing.
+        assert!(!compressible("image/png"));
+        assert!(!compressible("font/woff2"));
+        assert!(!compressible("application/octet-stream"));
+    }
+
+    #[test]
+    fn gzip_round_trips_and_is_memoised_per_file_version() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("chunk.js");
+        let body = "export const x = 1;\n".repeat(400);
+        std::fs::write(&file, &body).unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        let gz = GzipCache::get(&file, meta.len(), mtime, body.as_bytes()).unwrap();
+        assert!(gz.len() < body.len(), "repetitive text must compress");
+        let mut out = String::new();
+        flate2::read::GzDecoder::new(gz.as_slice())
+            .read_to_string(&mut out)
+            .unwrap();
+        assert_eq!(out, body, "the browser must decode exactly what was emitted");
+
+        // Same version -> the identical Arc, no recompression.
+        let again = GzipCache::get(&file, meta.len(), mtime, body.as_bytes()).unwrap();
+        assert!(Arc::ptr_eq(&gz, &again));
+
+        // A new version must NOT serve the old bytes.
+        let edited = format!("{body}// edit\n");
+        let fresh = GzipCache::get(&file, edited.len() as u64, mtime + 1, edited.as_bytes()).unwrap();
+        let mut out2 = String::new();
+        flate2::read::GzDecoder::new(fresh.as_slice())
+            .read_to_string(&mut out2)
+            .unwrap();
+        assert_eq!(out2, edited);
+    }
 
     #[test]
     fn injects_hmr_client_into_head() {

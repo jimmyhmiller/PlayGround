@@ -13,7 +13,8 @@
 # docs/COMPETITIVE_BENCHMARKS.md come from the default run (node scripts/bench-dev-hmr.mjs).
 # Native build (Rust); Node + Chrome (agent-browser) are the oracle only.
 # Exit 0 = PASS.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="$repo/integration/next-app-router"
@@ -24,8 +25,6 @@ page="$fixture/app/page.tsx"
 # quotes (produced by the default `node scripts/bench-dev-hmr.mjs`).
 results="$repo/bench/results/dev-hmr-liveness.json"
 stamp="$(date +%s)"
-
-fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== building diffpack (release) =="
 cargo build --release --manifest-path "$repo/Cargo.toml"

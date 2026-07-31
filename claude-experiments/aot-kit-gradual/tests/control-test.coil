@@ -1,0 +1,508 @@
+;; The M2 gate: control flow.
+;;
+;; Simple's chapters 5 through 8 translated to hand-built graphs, plus the two things that go
+;; beyond them here: JavaScript truthiness deciding which branch is reachable, and `Cast` as
+;; the mechanism the guard design in DECISIONS.md D4 rests on.
+;;
+;; Golden comparisons use the FLAT form, not the expression form. Control flow is genuinely
+;; graph-shaped, and an expression printer either loses the structure or fails to terminate
+;; around a loop.
+;;
+;;   coil test tests/control-test.coil
+(module controltest)
+
+(import "../src/ty.coil"   :use *)
+(import "../src/node.coil" :use *)
+(import "assert.coil"      :use *)
+(import "control.coil"     :use *)
+(import "io.coil"          :use *)
+(import "fmt.coil"         :use *)
+(import "alloc.coil"       :use *)
+(import "arraylist.coil"   :use *)
+(import "str.coil"         :use *)
+(import "slice.coil"       :use *)
+
+; ---------------------------------------------------------------------------
+; Builders
+; ---------------------------------------------------------------------------
+(defn mk-arg [(t i64)] (-> i64) (n-peephole (n-new1 OP-ARG t (g-start))))
+(defn mk-int [(v i64)] (-> i64) (n-const (t-int-con v)))
+(defn mk-con [(t i64)] (-> i64) (n-const t))
+(defn mk-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
+(defn mk-if [(ctrl i64) (pred i64)] (-> i64) (n-peephole (n-new2 OP-IF 0 ctrl pred)))
+(defn mk-cast [(ctrl i64) (t i64) (v i64)] (-> i64) (n-peephole (n-new2 OP-CAST t ctrl v)))
+
+;; Regions are created UNPEEPHOLED, because a two-armed region with no Phi yet collapses
+;; immediately as a degenerate diamond. A real parser has the same problem and solves it the
+;; same way: build the merge, attach the values, then let the peepholes look at it.
+(defn new-region2 [(a i64) (b i64)] (-> i64)
+  (let [r (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r a) (n-add-def! r b) r))
+(defn new-region3 [(a i64) (b i64) (c i64)] (-> i64)
+  (let [r (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r a) (n-add-def! r b) (n-add-def! r c) r))
+(defn new-phi2 [(r i64) (declared i64) (a i64) (b i64)] (-> i64)
+  (let [p (n-new OP-PHI declared)]
+    (n-add-def! p r) (n-add-def! p a) (n-add-def! p b) p))
+(defn new-phi3 [(r i64) (declared i64) (a i64) (b i64) (c i64)] (-> i64)
+  (let [p (n-new OP-PHI declared)]
+    (n-add-def! p r) (n-add-def! p a) (n-add-def! p b) (n-add-def! p c) p))
+
+(defn add-ret [(ctrl i64) (v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 ctrl v))]
+    (n-add-def! (g-stop) r)
+    (n-peephole (g-stop))
+    r))
+
+(defn finish [] (-> i64) (n-peephole (g-stop)) (iterate!))
+
+; ---------------------------------------------------------------------------
+; Checking
+; ---------------------------------------------------------------------------
+(defn render-stop [(buf (ptr i8))] (-> (slice u8)) (n-render (g-stop) buf 2048))
+
+(defn check-ir [(name (slice u8)) (expect (slice u8))] (-> i64)
+  (let [buf (alloc-stack (array u8 2048))
+        got (render-stop (cast (ptr i8) buf))]
+    (if (str-eq got expect) 0
+      (do (let [w (stderr)]
+            (ps w "\nIR MISMATCH in ") (ps w name)
+            (ps w "\n  want: ") (ps w expect)
+            (ps w "\n  got:  ") (ps w got)
+            (ps w "\n  flat:\n")
+            (g-print-flat w))
+          (abort)
+          0))))
+
+(defn fail [(name (slice u8)) (msg (slice u8))] (-> i64)
+  (let [w (stderr)]
+    (ps w "\n") (ps w name) (ps w ": ") (ps w msg) (ps w "\n")
+    (g-print-flat w))
+  (abort) 0)
+
+(defn check-no-leaks [(name (slice u8))] (-> i64)
+  (if (= (g-leaked-count) 0) 0 (fail name "leaked live nodes")))
+
+;; How many live nodes have this op. Structural assertions read better as "no Ifs survive"
+;; than as a golden string that also happens to encode node numbering.
+(defn count-op [(op i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut c) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) op))
+                (store! c (+ (load c) 1))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load c)))
+
+; ---------------------------------------------------------------------------
+; Truthiness decides reachability
+; ---------------------------------------------------------------------------
+;; This is where the dynamic language shows up in control flow. Simple asks "is the predicate
+;; a non-zero constant"; JavaScript needs the whole falsey set, and it needs to know that an
+;; object is always truthy however little else is known about it.
+(deftest truthiness_decides_which_branches_exist
+  ; a type that cannot be falsey takes only the true branch
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-obj)))]
+    (assert (= (n-ty iff) (t-if-true))))
+
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-fun)))]
+    (assert (= (n-ty iff) (t-if-true))))
+
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-int-range 1 5)))]
+    (assert (= (n-ty iff) (t-if-true))))
+
+  ; and one that cannot be truthy takes only the false branch
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-undef)))]
+    (assert (= (n-ty iff) (t-if-false))))
+
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-null)))]
+    (assert (= (n-ty iff) (t-if-false))))
+
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-int 0))]
+    (assert (= (n-ty iff) (t-if-false))))
+
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-con (t-flt-con 0.0)))]
+    (assert (= (n-ty iff) (t-if-false))))
+
+  ; NaN is falsey, which is the one everybody forgets
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-con (t-flt-bits 9221120237041090560)))]
+    (assert (= (n-ty iff) (t-if-false))))
+
+  ; a range straddling zero, and a string, could go either way
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-int-range 0 5)))]
+    (assert (= (n-ty iff) (t-if-both))))
+
+  ; "" is falsey and "x" is truthy, and the lattice cannot yet tell them apart
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-str)))]
+    (assert (= (n-ty iff) (t-if-both))))
+
+  ; dyn spans everything
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-dyn)))]
+    (assert (= (n-ty iff) (t-if-both)))))
+
+(deftest not_agrees_with_the_branch_decision
+  (graph-reset! 1)
+  (assert (= (n-ty (n-peephole (n-new2 OP-NOT 0 NO-NODE (mk-arg (t-undef))))) (t-bool-con true)))
+  (graph-reset! 1)
+  (assert (= (n-ty (n-peephole (n-new2 OP-NOT 0 NO-NODE (mk-arg (t-obj))))) (t-bool-con false)))
+  (graph-reset! 1)
+  (assert (= (n-ty (n-peephole (n-new2 OP-NOT 0 NO-NODE (mk-int 0)))) (t-bool-con true)))
+  (graph-reset! 1)
+  (assert (= (n-ty (n-peephole (n-new2 OP-NOT 0 NO-NODE (mk-int 7)))) (t-bool-con false)))
+  ; a string is undecided, exactly as the branch is
+  (graph-reset! 1)
+  (assert (= (n-ty (n-peephole (n-new2 OP-NOT 0 NO-NODE (mk-arg (t-str))))) (t-bool))))
+
+; ---------------------------------------------------------------------------
+; Dead control flow really goes away
+; ---------------------------------------------------------------------------
+(deftest a_provably_taken_branch_removes_the_if
+  ; if(1) return 1; else return 2;
+  (graph-reset! 1)
+  (let [arms-iff (n-if-arms! (mk-if (g-start) (mk-int 1)))
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)]
+    (add-ret t (mk-int 1))
+    (add-ret f (mk-int 2))
+    (finish)
+    ; the false Return is unreachable and gone from Stop; only one Return remains
+    (check-ir "if(1) two returns" "return int=1;")
+    (assert (= (count-op OP-RETURN) 1))
+    ; and with only one branch reachable, the If and its projections have no reason to exist
+    (assert (= (count-op OP-IF) 0))
+    (assert (= (count-op OP-CPROJ) 0))
+    (check-no-leaks "if(1)")))
+
+(deftest the_other_side_folds_too
+  (graph-reset! 1)
+  (let [arms-iff (n-if-arms! (mk-if (g-start) (mk-int 0)))
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)]
+    (add-ret t (mk-int 1))
+    (add-ret f (mk-int 2))
+    (finish)
+    (check-ir "if(0) two returns" "return int=2;")
+    (assert (= (count-op OP-IF) 0))
+    (check-no-leaks "if(0)")))
+
+(deftest an_undecided_branch_keeps_both_returns
+  (graph-reset! 1)
+  (let [arms-iff (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)]
+    (add-ret t (mk-int 1))
+    (add-ret f (mk-int 2))
+    (finish)
+    (assert (= (count-op OP-RETURN) 2))
+    (assert (= (count-op OP-IF) 1))
+    (assert (= (count-op OP-CPROJ) 2))
+    (check-no-leaks "if(dyn)")))
+
+(deftest an_empty_diamond_collapses
+  ; if(arg) {} else {}  followed by a single return: the merge is not a merge
+  (graph-reset! 1)
+  (let [arms-iff (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)
+        r   (n-peephole (new-region2 t f))]
+    (add-ret r (mk-int 7))
+    (finish)
+    (check-ir "empty diamond" "return int=7;")
+    ; nothing merged, so the branch itself was pointless
+    (assert (= (count-op OP-REGION) 0))
+    (assert (= (count-op OP-IF) 0))
+    (check-no-leaks "empty diamond")))
+
+; ---------------------------------------------------------------------------
+; Phi
+; ---------------------------------------------------------------------------
+(deftest a_phi_merges_the_arms
+  ; if(arg) x=1 else x=2; return x;
+  (graph-reset! 1)
+  (let [arms-iff (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)
+        r   (new-region2 t f)
+        ph  (new-phi2 r (t-dyn) (mk-int 1) (mk-int 2))]
+    (add-ret r ph)
+    (wl-push! r) (wl-push! ph)
+    (finish)
+    ; the phi survives, and its type is the meet of the two arms, not `dyn`
+    (assert (= (count-op OP-PHI) 1))
+    (assert (= (count-op OP-REGION) 1))
+    (assert (= (n-ty ph) (t-int-range 1 2)))
+    (check-no-leaks "phi merge")))
+
+(deftest a_phi_with_one_live_path_collapses
+  ; if(1) x=1 else x=2; return x;   -- the false arm cannot run
+  (graph-reset! 1)
+  (let [arms-iff (n-if-arms! (mk-if (g-start) (mk-int 1)))
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)
+        r   (new-region2 t f)
+        ph  (new-phi2 r (t-dyn) (mk-int 1) (mk-int 2))]
+    (add-ret r ph)
+    (wl-push! r) (wl-push! ph)
+    (finish)
+    (check-ir "phi with a dead arm" "return int=1;")
+    (assert (= (count-op OP-PHI) 0))
+    (assert (= (count-op OP-REGION) 0))
+    (check-no-leaks "phi dead arm")))
+
+(deftest a_phi_with_equal_arms_collapses
+  ; if(arg) x=5 else x=5; return x;  -- the branch is real, the value is not
+  (graph-reset! 1)
+  (let [arms-iff (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)
+        r   (new-region2 t f)
+        ph  (new-phi2 r (t-int) (mk-int 5) (mk-int 5))]
+    (add-ret r ph)
+    (wl-push! r) (wl-push! ph)
+    (finish)
+    (check-ir "phi with equal arms" "return int=5;")
+    (assert (= (count-op OP-PHI) 0))
+    ; the branch stays: it is still an undecided test, only the merged VALUE was redundant
+    (check-no-leaks "phi equal arms")))
+
+;; The invariant most likely to be broken by a future peephole. A Region's path count and every
+;; Phi's value count are ONE fact. If a path is dropped from the region alone, every Phi on it
+;; silently starts reading the wrong arm, which is a miscompile that typechecks cleanly.
+(deftest region_and_phi_arity_stay_in_lockstep
+  (graph-reset! 1)
+  (let [arms-i1 (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))
+        a (arms-t arms-i1)
+        b0 (arms-f arms-i1)
+        arms-i2 (n-if-arms! (mk-if b0 (mk-int 0)))                 ; provably false: this arm dies
+        b (arms-t arms-i2)
+        c (arms-f arms-i2)
+        r  (new-region3 a b c)
+        ph (new-phi3 r (t-dyn) (mk-int 10) (mk-int 20) (mk-int 30))]
+    (add-ret r ph)
+    (wl-push! r) (wl-push! ph)
+    (finish)
+    ; path b came off the true side of if(0) and cannot be reached, so it goes, and the phi
+    ; must lose exactly the matching value (20) and keep 10 and 30
+    (if (= (count-op OP-PHI) 1)
+        (let [live-phi ph]
+          (if (!= (n-nins live-phi) (n-nins r))
+              (fail "lockstep" "phi and region disagree on arity") 0)
+          (if (!= (n-ty live-phi) (ty-meet (t-int-con 10) (t-int-con 30)))
+              (fail "lockstep" "phi kept the wrong arm") 0)
+          0)
+      (fail "lockstep" "expected exactly one surviving phi"))
+    (check-no-leaks "lockstep")))
+
+; ---------------------------------------------------------------------------
+; Cast: the guard mechanism
+; ---------------------------------------------------------------------------
+;; Per DECISIONS.md D4 a guard is `If(TypeTest)` plus a `Cast` on the taken edge, and per D1 a
+;; type annotation is discharged rather than trusted. Both of those reduce to the two
+;; behaviours tested here.
+(deftest a_proven_cast_disappears
+  ; the value already satisfies the cast, so the annotation costs nothing
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        c (mk-cast (g-start) (t-num) a)]
+    (assert (= c a))
+    (assert (= (count-op OP-CAST) 0)))
+
+  ; an exactly-matching cast also folds
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 0 10))
+        c (mk-cast (g-start) (t-int) a)]
+    (assert (= c a))))
+
+(deftest an_unproven_cast_survives_and_narrows
+  ; nothing is known about the value, so the cast stays and the narrowing is real
+  (graph-reset! 1)
+  (let [a (mk-arg (t-dyn))
+        c (mk-cast (g-start) (t-int) a)]
+    (assert (!= c a))
+    (assert (= (count-op OP-CAST) 1))
+    ; downstream of the cast the value IS an int, which is the entire point
+    (assert (= (n-ty c) (t-int)))
+    (let [e (mk-bin OP-ADD c (mk-int 1))]
+      (assert (= (n-ty e) (t-int)))))
+
+  ; and the narrowing composes: casting dyn to num then adding gives num, not dyn
+  (graph-reset! 1)
+  (let [a (mk-arg (t-dyn))
+        c (mk-cast (g-start) (t-num) a)
+        e (mk-bin OP-ADD c (mk-int 1))]
+    (assert (= (n-ty e) (t-num)))))
+
+(deftest a_contradictory_cast_does_not_claim_the_impossible
+  ; casting a string to an int cannot succeed. The compute must NOT report an impossible type,
+  ; because an impossible type reads as unreachable and would delete a live branch.
+  (graph-reset! 1)
+  (let [a (mk-arg (t-str))
+        c (mk-cast (g-start) (t-int) a)]
+    (assert (not (ty-high? (n-ty c))))))
+
+; ---------------------------------------------------------------------------
+; Loops
+; ---------------------------------------------------------------------------
+;; The termination story. A loop phi's range grows on every trip, so without widening the
+;; analysis climbs forever. This builds `i = 0; while (true) i = i + 1;` and requires the phi's
+;; type to settle.
+;; Built in the order the in-progress contract requires, which is the order a parser naturally
+;; produces: open the merge, open the phi, build and peephole the body INSIDE that window, then
+;; close the phi, then close control. See the contract note in node.coil for what goes wrong
+;; otherwise, which is that the whole loop is deleted with no error reported.
+(defn build-counted-loop [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE)
+    (n-add-def! lp (g-start))
+    (n-add-def! lp NO-NODE)             ; the back edge: this is what marks it in progress
+    (n-peephole lp)
+    (let [ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph lp)
+      (n-add-def! ph (mk-int 0))
+      (n-add-def! ph NO-NODE)
+      (n-peephole ph)                   ; reports its declared type while the merge is open
+      (let [nx (mk-bin OP-ADD ph (mk-int 1))]   ; the body, peepholed inside the window
+        (n-set-def! ph 2 nx)            ; phis close first
+        (n-set-def! lp 2 lp)            ; then control
+        (wl-push! lp) (wl-push! ph) (wl-push! nx)
+        (iterate!)
+        ph))))
+
+(deftest a_loop_phi_settles
+  (let [ph (build-counted-loop 1)]
+    ; it must not still be a constant (the loop really does change it), and it must have
+    ; reached the int axis bottom rather than an ever-growing range
+    (assert (not (ty-const? (n-ty ph))))
+    (assert (= (n-ty ph) (t-int)))
+    (assert (= (count-op OP-LOOP) 1))
+    (assert (= (count-op OP-PHI) 1))))
+
+(deftest a_loop_phi_settles_under_every_seed
+  ;; Worklist order changes which intermediate ranges the phi passes through on the way down.
+  ;; If widening were order-sensitive, the final type would differ by seed, and a compiler
+  ;; whose inferred types depend on visit order is a compiler with a latent miscompile.
+  (let [ref (n-ty (build-counted-loop 1))
+        (mut s) 0]
+    (loop
+      (if (>= (load s) 12) (break)
+        (let [seed (+ 2 (* (load s) 7919))
+              got  (n-ty (build-counted-loop seed))]
+          (if (!= got ref)
+              (do (let [w (stderr)]
+                    (fmt w "\nSEED {d}: loop phi settled at a different type\n" seed)
+                    (ps w "  seed 1: ") (ty-print w ref)
+                    (fmt w "\n  seed {d}: " seed) (ty-print w got) (ps w "\n"))
+                  (abort) 0)
+            0)
+          (store! s (+ (load s) 1))
+          0)))))
+
+(deftest a_loop_over_a_dead_entry_dies
+  ; a loop whose entry cannot be reached is not a loop
+  (graph-reset! 1)
+  ; ONE projection, deliberately, so the open/close window is written out longhand: an If has to
+  ; survive while its projections are built (see n-multi-open!), and there is no sibling here.
+  (let [iff (n-multi-open! (mk-if (g-start) (mk-int 0)))
+        t   (n-peephole (n-new1 OP-CPROJ 0 iff))]   ; the true arm of if(0): unreachable
+    (n-multi-close! iff)
+    (let [lp (n-new OP-LOOP 0)]
+      (n-add-def! lp NO-NODE)
+      (n-add-def! lp t)
+      (n-add-def! lp lp)
+      (n-peephole lp)
+      (iterate!)
+      (assert (ty-high? (n-ty lp))))))
+
+;; The gate the widening bug slipped through. The eagerly-peepholed loop above terminates partly
+;; by luck: the in-progress contract makes the increment read the phi's DECLARED type, so the very
+;; first joined type is already at the axis bottom and no widening is ever needed. Build the same
+;; loop RAW, with nothing peepholed, and the analysis has to widen for real. It used to creep
+;; `int=[0..k]` by one step per round for ever, because the fuel was read out of the meet of the
+;; phi's paths and integer arithmetic mints a fresh type with the counter at zero. Terminating by
+;; accident of construction order is not terminating.
+(defn build-raw-counted-loop [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE)
+    (n-add-def! lp (g-start))
+    (n-add-def! lp NO-NODE)
+    (let [c0 (n-new1 OP-CONST (t-int-con 0) (g-start))
+          ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph lp)
+      (n-add-def! ph c0)
+      (n-add-def! ph NO-NODE)
+      (let [c1 (n-new1 OP-CONST (t-int-con 1) (g-start))
+            nx (n-new3 OP-ADD 0 NO-NODE ph c1)]
+        ; nothing above was peepholed, so every type starts at ANY and the analysis does all
+        ; the work, widening included
+        (n-set-def! ph 2 nx)
+        (n-set-def! lp 2 lp)
+        (let [r (n-new2 OP-RETURN 0 lp ph)]
+          (n-add-def! (g-stop) r))
+        ph))))
+
+(deftest a_raw_loop_phi_settles_too
+  (let [ph (build-raw-counted-loop 1)]
+    ; g-analyze! caps its step count and raises a named error, so failing to converge shows up as
+    ; an abort rather than a hang. Reaching this assertion at all is most of the claim.
+    (g-analyze!)
+    (assert (= (n-ty ph) (t-int)))
+    (assert (not (ty-const? (n-ty ph)))))
+
+  ; and it settles at the SAME type the eager build reaches, since they are the same program.
+  ; Type ids are interned globally and outlive graph-reset!, so comparing across the two graphs is
+  ; comparing types and not addresses.
+  (let [raw-phi (build-raw-counted-loop 7)]
+    (g-analyze!)
+    (let [raw (n-ty raw-phi)
+          eager (n-ty (build-counted-loop 7))]
+      (if (= raw eager) 0
+        (do (let [w (stderr)]
+              (ps w "\nraw and eager builds of the same loop settled differently\n  raw:   ")
+              (ty-print w raw) (ps w "\n  eager: ") (ty-print w eager) (ps w "\n"))
+            (abort) 0)))))
+
+;; Widening fuel accumulates. Fuel taken from the type being widened rather than from the previous
+;; one is the bug above, and it looks identical from outside unless you count the steps: a fresh
+;; tank every round still converges on a SMALL example, just slowly. So this bounds the work.
+(deftest widening_actually_accumulates
+  (build-raw-counted-loop 1)
+  (let [steps (g-analyze!)]
+    ; the loop is 8 nodes; a handful of rounds over them is tens of steps, not thousands. With the
+    ; fuel bug this ran into the millions before the cap fired.
+    (if (< steps 2000) 0
+      (do (let [w (stderr)]
+            (fmt w "\nwidening did not accumulate: g-analyze! took {d} steps on an 8-node loop\n" steps))
+          (abort) 0))))
+
+; ---------------------------------------------------------------------------
+; The printer, eyeballed
+; ---------------------------------------------------------------------------
+(deftest print_a_diamond
+  (graph-reset! 1)
+  (let [arms-iff (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))
+        t (arms-t arms-iff)
+        f (arms-f arms-iff)
+        r   (new-region2 t f)
+        ph  (new-phi2 r (t-dyn) (mk-int 1) (mk-bin OP-ADD (mk-arg (t-int)) (mk-int 2)))]
+    (add-ret r ph)
+    (wl-push! r) (wl-push! ph)
+    (finish)
+    (let [w (stdout)]
+      (ps w "\n--- a diamond with a phi ---\n")
+      (g-print-flat w)
+      0)))

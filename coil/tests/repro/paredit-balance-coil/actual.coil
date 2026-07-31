@@ -1,0 +1,30 @@
+(module paredit-balance-repro)
+
+; The first form has one missing `)` on the `(loop ...)`. The intended repair is
+; local: add one close after the loop body, before `(load found)`.
+(defn locally-broken [(n i64)] (-> i64)
+  (let [(mut i) 0
+        (mut found) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (icmp-eq (load i) 2)
+                      (store! found 1)
+                      (break))
+                (store! i (iadd (load i) 1)))))
+    (load found)))
+
+; This following form is already balanced. Its indentation is normal Coil style:
+; a multiline cond predicate followed by its result expression. `balance` must
+; leave it byte-for-byte unchanged.
+(defn already-valid [(decl i64) (actual i64)] (-> i64)
+  (cond (and (and (icmp-eq decl 5) (icmp-eq actual 4))
+             (not (and (icmp-eq decl 6)
+                       (icmp-eq actual 7)))
+          (iadd decl actual)
+        (and (and (icmp-eq decl 11) (icmp-eq actual 11))
+             (and (icmp-eq decl actual)
+                  (icmp-eq (iadd decl 1)
+                           (iadd actual 1)))
+          (isub decl actual)
+        :else 0))))

@@ -1,0 +1,16 @@
+import Badge from "../components/badge";
+import Counter from "../components/counter";
+
+export const revision = "intro-3";
+
+## Imported, not routed
+
+This file is imported by `app/page.jsx`, and exports a value alongside its content.
+Here is a [link to mdxjs.com](https://mdxjs.com), which the `a` override rewrites.
+
+<Badge>imported {revision}</Badge>
+
+A client component reached from MDX, so the interaction channel has something to drive
+on this route:
+
+<Counter />

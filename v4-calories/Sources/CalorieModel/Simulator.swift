@@ -34,6 +34,24 @@ public struct ScenarioParams: Sendable {
     public var waterAmp: Double = 1.6           // lb scale of hydration swings
     public var pMissWeigh: Double = 0.30        // chance of skipping a weigh-in on a day
     public var pMissLog: Double = 0.08          // chance of not logging that day
+
+    // --- Non-linear reality. A real dieter's loss *rate* is not constant: adherence drifts,
+    // metabolism adapts, holidays and diet breaks happen, and the first week sheds glycogen
+    // (plus its bound water) far faster than energy balance alone. Without these the true
+    // weight curve is a straight line, which lets an over-stiff trend filter look perfect in
+    // simulation while extrapolating below every real scale reading in the field.
+
+    /// Slow drift of the achieved deficit, lb/week of rate wandering over the diet (random walk).
+    public var rateDriftLbPerWeek: Double = 0.5
+    /// Real mass (glycogen + bound water) shed in the first days of a diet, lb. Decays with
+    /// `whooshTauDays`, so the true curve is convex early — fast drop, then flattening.
+    public var whooshLb: Double = 1.8
+    public var whooshTauDays: Double = 5.0
+    /// Chance per day of starting a multi-day diet break (maintenance-ish eating).
+    public var pDietBreak: Double = 0.012
+    public var dietBreakDays: Int = 5
+    /// Occasional long stretch with no weigh-ins at all (travel, broken scale, avoidance).
+    public var maxWeighGapDays: Int = 0
     public var hasHealthKit: Bool = true        // active energy available
     public var hasBasal: Bool = true            // basal energy available (accurate anchor)
     public var hasProfile: Bool = true          // sex/age/height for Mifflin fallback
@@ -71,15 +89,35 @@ public enum Simulator {
         var trueIntake = [Double](repeating: 0, count: n)
         var active = [Double](repeating: 0, count: n)
 
+        // Slow random walk on the intake target: the achieved loss rate wanders by roughly
+        // `rateDriftLbPerWeek` over the diet. This is what gives the slope state something real
+        // to track — with a constant rate, any slope process noise is pure loss.
+        let driftKcalPerDayStep = p.rateDriftLbPerWeek * kcalPerLb / 7.0 / max(1.0, Double(n).squareRoot())
+        var driftKcal = 0.0
+        var breakDaysLeft = 0
+
         var w = p.startWeightLb
         for i in 0..<n {
             let ac = max(100, p.activeMean + rng.gauss() * 120)
             active[i] = ac
             trueTDEE[i] = p.restingTDEE + ac
-            let intake = max(800, meanIntake + rng.gauss() * p.intakeNoise)
+
+            driftKcal += rng.gauss() * driftKcalPerDayStep
+            if breakDaysLeft > 0 {
+                breakDaysLeft -= 1
+            } else if rng.uniform() < p.pDietBreak {
+                breakDaysLeft = p.dietBreakDays
+            }
+            // On a diet break the deficit is given back (eat at ~maintenance).
+            let breakKcal = breakDaysLeft > 0 ? deficitPerDay : 0.0
+
+            let intake = max(800, meanIntake + driftKcal + breakKcal + rng.gauss() * p.intakeNoise)
             trueIntake[i] = intake
             if i > 0 { w += (intake - trueTDEE[i]) / kcalPerLb }
-            trueWeight[i] = w
+            // Glycogen + bound water leaving in the first days: real mass, not measurement
+            // noise, and the reason a real diet's first week looks like a cliff then a plateau.
+            let whoosh = p.whooshLb * (1 - Foundation.exp(-Double(i) / max(0.5, p.whooshTauDays)))
+            trueWeight[i] = w - whoosh
         }
 
         // Observation corruption: water noise (two sinusoids + AR(1) + occasional spike).
@@ -99,11 +137,22 @@ public enum Simulator {
             scaleObs[i] = trueWeight[i] + water
         }
 
+        // One long stretch with no weigh-ins at all, ending shortly before the last reading —
+        // the case where the filter must *project* and then snap back to the scale.
+        var gapRange: Range<Int> = 0..<0
+        if p.maxWeighGapDays > 0, n > p.maxWeighGapDays + 4 {
+            let len = 3 + Int(rng.uniform() * Double(p.maxWeighGapDays - 2))
+            let latest = n - 1 - len
+            let lo = 2 + Int(rng.uniform() * Double(max(1, latest - 2)))
+            gapRange = lo..<min(n - 1, lo + len)
+        }
+
         // Build records: drop weigh-ins/logs at random; force first & last weigh-in present.
         var records: [DailyRecord] = []
         records.reserveCapacity(n)
         for i in 0..<n {
-            let hasWeigh = (i == 0 || i == n - 1) ? true : rng.uniform() > p.pMissWeigh
+            let hasWeigh = (i == 0 || i == n - 1) ? true
+                : (gapRange.contains(i) ? false : rng.uniform() > p.pMissWeigh)
             let hasLog = rng.uniform() > p.pMissLog
             var rec = DailyRecord(date: day(i))
             if hasWeigh { rec.weightLb = (scaleObs[i] * 10).rounded() / 10 }

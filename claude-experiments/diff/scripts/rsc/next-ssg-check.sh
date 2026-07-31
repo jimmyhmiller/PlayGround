@@ -10,6 +10,10 @@
 #   2. FILES ON DISK: index/about/products a+b .html + .rsc exist (full documents +
 #      raw flight); dynamic routes (blog/[slug], go, error-demo) are SKIPPED and
 #      recorded in prerender-manifest.json with a reason (never silently dropped).
+#      Note blog/ is NOT a dynamic-only namespace: blog/post (MDX) is a STATIC
+#      sibling of blog/[slug] and IS prerendered. The skip assertion is therefore
+#      plan-driven (every route classified dynamic has zero files on disk), not a
+#      path glob — a glob goes stale the moment a static route joins the namespace.
 #   3. STRUCTURAL: the dumb server imports NEITHER RSC bundle and spawns NO child.
 #   4. DUMB SERVE: curl byte-equals the on-disk files; ?__rsc=1 is raw flight;
 #      a dynamic path 501s (never index HTML, never a render); its .rsc 404s.
@@ -18,15 +22,14 @@
 #      /about (?__rsc=1 diff-render, #app-shell preserved), history.back restores /.
 # Native build (Rust); the prerender + serve run the app's own React / plain fs (the
 # allowed oracle). Exit 0 = gate PASS.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="${1:-$repo/integration/next-app-router}"
 diffpack="$repo/target/release/diffpack"
 output="$fixture/.diffpack-output"
 static="$output/static"
-
-fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== building diffpack (release) =="
 cargo build --release --manifest-path "$repo/Cargo.toml"
@@ -59,12 +62,19 @@ for f in index about products/a products/b; do
 done
 # Exactly two products files (one per generateStaticParams combo); no literal [id].
 [ -f "$static/products/[id].html" ] && fail "a literal products/[id].html was written (SSG enumeration broken)"
-prod_count="$(ls "$static/products"/*.html | wc -l | tr -d ' ')"
-[ "$prod_count" = "2" ] || fail "expected 2 products html files, found $prod_count"
+prod_count="$(ls "$static/products"/*.html 2>/dev/null | wc -l | tr -d ' ' || true)"
+[ "${prod_count:-0}" = "2" ] || fail "expected 2 products html files, found ${prod_count:-0}"
 # Dynamic routes NOT prerendered.
 [ -e "$static/go.html" ] && fail "go.html was prerendered (force-dynamic must be skipped)"
 [ -e "$static/error-demo.html" ] && fail "error-demo.html was prerendered (force-dynamic must be skipped)"
-ls "$static/blog"/*.html >/dev/null 2>&1 && fail "a blog/*.html was prerendered (dynamic must be skipped)"
+# /blog/[slug] is Dynamic (it reads cookies) and its generateStaticParams enumerates
+# {slug:hello},{slug:world} — a false prerender would land on exactly these names.
+# NOT `ls blog/*.html`: blog/post (MDX) is a legitimately STATIC sibling, so a whole-
+# namespace glob asserts something the gate does not mean. The general form of this
+# assertion — every dynamic route has zero files on disk — is gate 1c below.
+for f in hello world "[slug]"; do
+  [ -e "$static/blog/$f.html" ] && fail "blog/$f.html was prerendered — /blog/[slug] is Dynamic (reads cookies) and must be skipped"
+done
 # Manifest records the skipped dynamic routes with a reason.
 manifest="$static/prerender-manifest.json"
 [ -s "$manifest" ] || fail "prerender-manifest.json missing"
@@ -101,6 +111,64 @@ PY
 sp_err="$(node "$output/rsc-render/server.mjs" staticparams "/blog/[slug]" "$output/client-references-manifest.json" 2>&1 || true)"
 echo "$sp_err" | grep -q "is not an Ssg route" || fail "staticparams op must refuse the non-Ssg /blog/[slug] (precedence), got: $sp_err"
 echo "OK (gate 1b): /blog/[slug] has generateStaticParams yet classifies Dynamic (request-read precedence, matching next build's ƒ) — skipped + reason-recorded, staticparams op refuses it"
+
+# --- Gate 1c: plan vs manifest vs DISK, as sets ----------------------------------
+# The general, non-staleable form of "dynamic routes are skipped": the set of .html on
+# disk equals exactly the set of prerendered manifest entries, and every route the plan
+# classified dynamic contributes nothing. Adding a static route (e.g. the MDX blog/post
+# that a `ls blog/*.html` glob used to mis-flag) can never trip this; prerendering a
+# dynamic one always does, as does silently DROPPING a classified route at prerender.
+python3 - "$static" <<'PY' || fail "prerender plan/manifest/disk set invariant failed"
+import glob, json, os, re, sys
+static = sys.argv[1]
+plan = json.load(open(os.path.join(static, "prerender-plan.json")))
+m = json.load(open(os.path.join(static, "prerender-manifest.json")))
+
+# Nothing classified is silently dropped. Note the counts do NOT match by design: an Ssg
+# route is ONE plan entry but one manifest/static entry PER generateStaticParams combo
+# (/products/[id] -> /products/a + /products/b), so coverage is asserted per route, not by
+# comparing lengths.
+dyn_planned = {e["path"] for e in plan if e["kind"] == "dynamic"}
+assert dyn_planned <= {d["path"] for d in m["dynamic"]}, \
+    f"plan-dynamic routes missing from manifest.dynamic: {sorted(dyn_planned - {d['path'] for d in m['dynamic']})}"
+assert all(d.get("reason") for d in m["dynamic"]), \
+    f"a dynamic manifest entry carries no reason: {[d for d in m['dynamic'] if not d.get('reason')]}"
+
+# Every PRERENDERED plan route contributed at least one real page. A route the classifier
+# accepted but the prerenderer then dropped on the floor shows up here (and nowhere else:
+# it is absent from manifest.dynamic, so the check above cannot see it).
+served = set(m["static"])
+for e in plan:
+    if e["kind"] == "dynamic":
+        continue
+    pat = re.compile("^/" + "/".join(
+        "[^/]+" if s["k"] == "dynamic" else re.escape(s["v"]) for s in e["segments"]) + "$")
+    assert any(pat.match(p) for p in served), \
+        f"{e['path']} was classified {e['kind']} but produced NO page — silently dropped at prerender"
+
+# Disk == manifest entries, as sets of route-relative stems.
+expected = {e["file"] for e in m["entries"]}
+on_disk = {os.path.relpath(p, static)[:-len(".html")]
+           for p in glob.glob(os.path.join(static, "**", "*.html"), recursive=True)}
+assert on_disk == expected, \
+    f"static/*.html on disk != manifest entries; stray={sorted(on_disk - expected)} missing={sorted(expected - on_disk)}"
+
+# No dynamic route produced a file, under any spelling of its path.
+dyn_stems = {p.lstrip("/") or "index" for p in dyn_planned}
+assert not (dyn_stems & on_disk), f"a DYNAMIC route was prerendered: {sorted(dyn_stems & on_disk)}"
+# ...and no literal bracket segment was ever written out.
+assert not [f for f in on_disk if "[" in f or "]" in f], \
+    f"a literal bracket segment was written: {sorted(f for f in on_disk if '[' in f or ']' in f)}"
+
+# The specific pair the old `ls blog/*.html` glob conflated: a static sibling of a
+# dynamic segment IS prerendered, the dynamic one is NOT.
+assert "blog/post" in on_disk, "the STATIC sibling /blog/post (MDX) must be prerendered"
+assert "/blog/[slug]" in dyn_planned, "/blog/[slug] must still be classified dynamic"
+print(f"set invariant OK: {len(on_disk)} prerendered page(s) == manifest entries; "
+      f"{len(dyn_planned)} dynamic route(s) wrote nothing; all {len(plan) - len(dyn_planned)} "
+      f"prerendered route(s) of the {len(plan)}-route plan produced a page")
+PY
+echo "OK (gate 1c): on-disk .html == manifest entries exactly; every DYNAMIC route wrote nothing; no literal [bracket] file; static sibling blog/post prerendered while blog/[slug] is not"
 
 # --- Gate 2: structural — the dumb server is genuinely dumb ----------------------
 serve="$repo/scripts/rsc/next-static-serve.mjs"

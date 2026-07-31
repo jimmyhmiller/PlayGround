@@ -200,13 +200,6 @@
 
 <header>
   <h1>Live &amp; Typed — editing a program while it runs</h1>
-  <p>
-    The animation below is one long-running computation. Every edit you apply lands
-    between two instructions of that computation: it is never restarted, and the canvas
-    it draws to is opened exactly once and then never again. Types are enforced across
-    every edit — a change that breaks something is refused at install or freezes the
-    program at the point the stale assumption would be used, never silently.
-  </p>
 </header>
 
 <main>
@@ -234,7 +227,7 @@
         <dl class="stats">
           <div><dt>Frames</dt><dd id="stat-frames">0</dd></div>
           <div><dt>Canvas opened</dt><dd id="stat-canvas" class="pinned">0</dd></div>
-          <div><dt>Circles drawn</dt><dd id="stat-circles">0</dd></div>
+          <div><dt>Shapes drawn</dt><dd id="stat-shapes">0</dd></div>
           <div><dt>Status</dt><dd id="stat-status">booting</dd></div>
         </dl>
       </div>
@@ -284,7 +277,7 @@
     </div>
 
     <div class="panel" id="walkthrough" style="margin-top:18px">
-    <h2>Walkthrough — six steps, in order</h2>
+    <h2>Walkthrough — seven steps, in order</h2>
     <div class="body">
       <ol class="step-dots" id="step-dots"></ol>
       <h3 class="step-title" id="step-title"></h3>
@@ -319,15 +312,33 @@ await init();
 let demo = new Demo();
 
 // ── painting ───────────────────────────────────────────────────────────────
+// One op is six ints: [tag, x, y, a, b, hue]. The tag is which foreign
+// function the guest called, so which shape appears is the guest's decision,
+// not this painter's — that is the whole point of dispatching on an enum.
+const OP_CIRCLE = 0, OP_RING = 1, OP_BAR = 2;
+
 function paint(ops) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  for (let i = 0; i < ops.length; i += 4) {
-    const [x, y, r, hue] = [ops[i], ops[i + 1], ops[i + 2], ops[i + 3]];
-    const h = ((hue % 360) + 360) % 360;
+  for (let i = 0; i < ops.length; i += 6) {
+    const [tag, x, y, a, b, hue] =
+      [ops[i], ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], ops[i + 5]];
+    const colour = `hsl(${((hue % 360) + 360) % 360} 72% 62% / 0.85)`;
+    if (tag === OP_BAR) {
+      const w = Math.max(1, a), h = Math.max(1, b);
+      ctx.fillStyle = colour;
+      ctx.fillRect(x - w / 2, y - h / 2, w, h);
+      continue;
+    }
     ctx.beginPath();
-    ctx.arc(x, y, Math.max(1, r), 0, Math.PI * 2);
-    ctx.fillStyle = `hsl(${h} 72% 62% / 0.85)`;
-    ctx.fill();
+    ctx.arc(x, y, Math.max(1, a), 0, Math.PI * 2);
+    if (tag === OP_RING) {
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = colour;
+      ctx.fill();
+    }
   }
 }
 
@@ -362,14 +373,14 @@ function advanceOneFrame() {
 
 function refreshStats() {
   if (paused && !demo.frozen) $("stat-status").textContent = "paused";
-  // Resuming is offered only on the repair step. It is available a step
+  // Resuming is offered only on repair steps. It is available a step
   // earlier too — where it would simply re-trap, since nothing is fixed yet —
   // but that is a detour from the walkthrough's one next thing to do.
   $("step-resume").style.display =
-    demo.frozen && step === STEP_COUNT - 1 ? "" : "none";
+    demo.frozen && (step === 3 || step === STEP_COUNT - 1) ? "" : "none";
   $("stat-frames").textContent = demo.frames;
   $("stat-canvas").textContent = demo.canvases_opened;
-  $("stat-circles").textContent = demo.circles_drawn.toLocaleString();
+  $("stat-shapes").textContent = demo.shapes_drawn.toLocaleString();
 
   // The inspector is read out of the engine; only redraw it when it changes.
   const world = demo.world_json();
@@ -412,7 +423,7 @@ const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) =>
 // character offsets so a number can be spliced back into the source when
 // scrubbed.
 const KEYWORDS = new Set([
-  "fn", "let", "letonce", "while", "if", "else", "return", "struct", "enum",
+  "fn", "let", "letonce", "while", "if", "else", "return", "struct", "enum", "migrate",
   "match", "foreign", "type", "emit", "yield", "push", "len", "true", "false",
 ]);
 const TYPES = new Set(["i64", "f64", "bool", "str"]);
@@ -524,7 +535,7 @@ function setSource(text, { keepCaret = false } = {}) {
 // Applying the WHOLE source on every keystroke would reinstall every
 // definition in it — versions climbing 60x/second and a struct migration
 // churn behind them. Only the definition under the caret is applied.
-const ITEM_START = /^(fn|struct|enum|letonce|foreign)\b/;
+const ITEM_START = /^(fn|struct|enum|migrate|letonce|foreign)\b/;
 
 function enclosingItem(src, offset) {
   const lines = src.split("\n");
@@ -815,10 +826,11 @@ $("reset").addEventListener("click", () => {
 const WATCH = [
   "The particles resize on the very next frame. Frames keep climbing and the canvas is never reopened — the loop is not restarted.",
   "The same particles gain colour. `Particle` becomes v2 in the live world and the objects already on screen migrate as they are read. No reseeding.",
-  "The edit is refused and the animation carries on with the last good `tint`. A bad edit cannot take down a running program.",
-  "Particles on the right half become rings: a `match` on `Kind` now chooses the size.",
-  "`radius` is published Broken at install, and it takes `on_frame` and `main` with it. The animation freezes on its last good frame — watch the live world panel go red.",
-  "Only the root cause is repaired, and the whole chain revives. Resume, and the suspended program continues at the instruction that trapped.",
+  "`visible` changes from bool to `Visibility`. The type edit installs; stale functions turn Broken transitively and the animation freezes at the outer call boundary.",
+  "Repair the two root functions and install a typed migration expression. Untouched callers revive; resume and the same Particle objects migrate lazily.",
+  "Particles on the right half become actual rings: a `match` on `Kind` picks which foreign function draws them, so the arms differ in shape, not just in size.",
+  "`draw` is published Broken at install, and it takes `on_frame` and `main` with it. The animation freezes on its last good frame — watch the live world panel go red.",
+  "Only the root cause is repaired, and the whole chain revives. Resume, and the suspended program continues at the instruction that trapped — the far right fills in with bars.",
 ];
 
 const STEP_COUNT = Demo.scenario_count();
@@ -886,8 +898,7 @@ $("step-apply").addEventListener("click", () => {
   const result = JSON.parse(demo.eval(stepSources[step]));
   lastWorld = "";
   if (!result.ok) {
-    // Step 3 is *supposed* to be rejected — that is the lesson, not a failure.
-    stepStatus(`Refused, and the running program is untouched: ${result.error}`, "warn");
+    stepStatus(`Could not apply: ${result.error}`, "warn");
   } else {
     stepStatus(describeResult(result), result.broken.length ? "warn" : "ok");
   }
@@ -897,7 +908,7 @@ $("step-apply").addEventListener("click", () => {
   const kind = $("step-status").className;
   renderStep();
   stepStatus(text, kind);
-  if (wasLast) stepStatus(text + " Now resume the frozen program.", kind);
+  if (step === 3 || wasLast) stepStatus(text + " Now resume the frozen program.", kind);
 });
 
 $("step-next").addEventListener("click", () => {

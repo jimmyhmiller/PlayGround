@@ -1,0 +1,966 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>diffpack vs Turbopack — cal.com, side by side</title>
+    <style>
+      :root {
+        --bg: #07090f;
+        --panel: #0d1119;
+        --panel-2: #121826;
+        --line: #1e2635;
+        --text: #e6ebf5;
+        --dim: #8695ad;
+        --dp: #7cf6c0;
+        --tp: #ff8a7a;
+        --warn: #facc15;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        flex: 0 0 auto;
+      }
+      header h1 { font-size: 15px; margin: 0; letter-spacing: 0.2px; font-weight: 700; }
+      header h1 .vs { color: var(--dim); font-weight: 500; margin: 0 6px; }
+      header h1 .a { color: var(--dp); }
+      header h1 .b { color: var(--tp); }
+      .meta { color: var(--dim); font: 11px/1.4 var(--mono); margin-left: auto; text-align: right; }
+
+      .bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+        flex: 0 0 auto;
+      }
+      .bar .group { display: flex; align-items: center; gap: 6px; }
+      .bar .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 6px; }
+      .bar label.tag { color: var(--dim); font: 10px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.8px; }
+      button {
+        font: 600 12px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+        color: var(--text);
+        background: #1b2436;
+        border: 1px solid #2b3854;
+        border-radius: 7px;
+        padding: 7px 11px;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) { background: #24314a; border-color: #3d5178; }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button.go { background: #16352c; border-color: #2a6c56; color: var(--dp); }
+      button.go:hover:not(:disabled) { background: #1c4839; }
+      button.heavy { background: #3a2016; border-color: #6d3a28; color: #ffb59f; }
+      button.heavy:hover:not(:disabled) { background: #4b291c; }
+      button.chip { font-family: var(--mono); font-size: 11px; padding: 6px 8px; }
+      button.chip .cold { color: var(--warn); }
+      button.chip .warm { color: var(--dim); }
+
+      .panes { flex: 1 1 auto; display: flex; min-height: 0; }
+      .pane { flex: 1 1 50%; display: flex; flex-direction: column; min-width: 0; }
+      .pane + .pane { border-left: 1px solid var(--line); }
+      .pane-head { padding: 8px 12px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+      .pane-title { display: flex; align-items: baseline; gap: 8px; }
+      .pane-title .name { font-size: 15px; font-weight: 800; letter-spacing: 0.2px; }
+      .pane-title .sub { color: var(--dim); font: 11px var(--mono); }
+      .pane-title .status { margin-left: auto; font: 11px var(--mono); color: var(--dim); }
+      .pane[data-side="dp"] .name { color: var(--dp); }
+      .pane[data-side="tp"] .name { color: var(--tp); }
+      .clockrow { display: flex; align-items: flex-end; gap: 12px; margin-top: 4px; }
+      .clock { font: 700 40px/1 var(--mono); letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+      .pane[data-side="dp"] .clock { color: var(--dp); }
+      .pane[data-side="tp"] .clock { color: var(--tp); }
+      .clock.idle { color: #3c4658 !important; }
+      .clock.running { opacity: 0.7; }
+      .clock.bad { color: var(--warn) !important; font-size: 24px; }
+      .verdict { font: 700 13px/1.3 var(--mono); padding-bottom: 6px; }
+      .verdict.win { color: var(--dp); }
+      .pane[data-side="tp"] .verdict.win { color: var(--tp); }
+      .verdict.lose { color: var(--dim); }
+      .stage { color: var(--dim); font: 11px/1.3 var(--mono); padding-bottom: 7px; height: 15px; overflow: hidden; }
+      .frame { flex: 1 1 auto; position: relative; background: #fff; min-height: 0; }
+      .frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+      .frame .curtain {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: #0b0f17;
+        color: var(--dim);
+        font: 12px var(--mono);
+        text-align: center;
+        padding: 20px;
+        z-index: 5;
+      }
+      .frame .curtain[hidden] { display: none; }
+
+      footer { flex: 0 0 auto; border-top: 1px solid var(--line); background: var(--panel); display: flex; min-height: 0; }
+      footer > section { flex: 1 1 50%; min-width: 0; display: flex; flex-direction: column; }
+      footer > section + section { border-left: 1px solid var(--line); }
+      footer h2 {
+        margin: 0;
+        padding: 6px 12px;
+        font: 700 10px/1.4 var(--mono);
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        color: var(--dim);
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      footer h2 .note { text-transform: none; letter-spacing: 0; font-weight: 400; }
+      footer h2 button { margin-left: auto; padding: 2px 7px; font: 700 10px/1 var(--mono); border-radius: 5px; }
+      .scroll { overflow: auto; height: 150px; }
+      footer.tucked .scroll, footer.tucked .caveat { display: none; }
+      table { width: 100%; border-collapse: collapse; font: 11px/1.5 var(--mono); }
+      th, td { text-align: right; padding: 3px 10px; white-space: nowrap; border-bottom: 1px solid #161d29; }
+      th { color: var(--dim); font-weight: 600; position: sticky; top: 0; background: var(--panel); z-index: 1; }
+      td.what, th.what { text-align: left; white-space: normal; }
+      td.dp { color: var(--dp); }
+      td.tp { color: var(--tp); }
+      td.miss { color: var(--warn); }
+      td.adv { color: var(--text); font-weight: 700; }
+      td.adv.slower { color: var(--warn); }
+      /* How the change arrived: patched into the running page, or a document swap that
+         threw away whatever the user had on screen. */
+      .how { font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.85; }
+      .how.hot { color: var(--dim); }
+      .how.reload { color: var(--warn); }
+      tr.summary td { background: #131a27; border-top: 1px solid var(--line); }
+      .log { font: 10.5px/1.45 var(--mono); padding: 4px 10px; }
+      .log div { white-space: pre-wrap; word-break: break-all; }
+      .log .dp { color: #4fd1a1; }
+      .log .tp { color: #ff9b8c; }
+      .log .sys { color: var(--dim); }
+      .badge { font: 10px/1 var(--mono); padding: 3px 6px; border-radius: 5px; border: 1px solid var(--line); color: var(--dim); }
+      .caveat { color: var(--dim); font: 10.5px/1.5 var(--mono); padding: 6px 12px; border-top: 1px solid var(--line); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1><span class="a">diffpack</span><span class="vs">vs</span><span class="b">Turbopack</span></h1>
+      <span class="badge" id="busy" hidden></span>
+      <div class="meta" id="meta">connecting…</div>
+    </header>
+
+    <div class="bar">
+      <div class="group">
+        <label class="tag">edit</label>
+        <span id="scenarios"></span>
+      </div>
+      <div class="sep"></div>
+      <div class="group">
+        <label class="tag">sustained</label>
+        <button id="burst" title="5 island edits, one per second, no settle gap — the contended path">island ×5 @1/s</button>
+      </div>
+      <div class="sep"></div>
+      <div class="group">
+        <label class="tag">navigate</label>
+        <span id="routes"></span>
+      </div>
+      <div class="sep"></div>
+      <div class="group">
+        <label class="tag">cold</label>
+        <button id="restart" class="heavy" title="Wipe both output trees, restart both dev servers, race to first paint">cold start both</button>
+        <button id="build" class="heavy" title="Stop the dev servers, wipe both outputs, race two production builds, then reboot">production build race</button>
+      </div>
+      <div class="sep"></div>
+      <button id="reset" title="Restore every scenario file to pristine cal.com source">reset sources</button>
+    </div>
+
+    <div class="panes" id="panes"></div>
+
+    <footer id="footer">
+      <section>
+        <h2>
+          Results <span class="note" id="resultnote"></span>
+          <button id="tuck" title="Give the frames the whole window">hide</button>
+        </h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th class="what">scenario</th>
+                <th>diffpack</th>
+                <th>Turbopack</th>
+                <th>advantage</th>
+              </tr>
+            </thead>
+            <tbody id="results"></tbody>
+          </table>
+        </div>
+        <div class="caveat" id="caveat"></div>
+      </section>
+      <section>
+        <h2>Dev server output <span class="note">both servers, newest last</span></h2>
+        <div class="scroll" id="logscroll"><div class="log" id="log"></div></div>
+      </section>
+    </footer>
+
+    <script>
+      // ----------------------------------------------------------------------
+      // A race is one event — an edit write, a navigation, a cold boot, a build —
+      // plus one clock per side. The clock starts here, in the page, and stops when
+      // THAT side's frame proves the change is visible, so the number on screen is
+      // the thing a person actually waits for.
+      //
+      // Races can overlap. Sustained edits at 1/sec are exactly the case where they
+      // do: a side still building edit 2 when edit 3 lands never displays edit 2 at
+      // all, because the source only ever holds one token. That outcome is recorded
+      // as "not shown", not quietly dropped and not called a timeout.
+      //
+      // Three rules keep the two clocks comparable:
+      //   * Navigation and editing are separate phases. A route chip only changes
+      //     the two iframe URLs; a scenario may navigate and settle first, then performs
+      //     exactly one source edit.
+      //   * Every landing says HOW it arrived: `hot` (the running page was patched) or
+      //     `reload` (that side replaced the document, losing everything on screen).
+      //     A fast reload is not plainly better than a slower in-place patch.
+      //   * A non-zero exit is FAILED, never a timeout. A crash on one side must not
+      //     be readable as the other side being fast.
+
+      const SIDE_KEYS = ["dp", "tp"];
+      const ui = {};
+      let conf = null;
+      let active = []; // races in flight
+      let raceSeq = 0;
+      let burst = null; // { kind, count, shown: {dp, tp}, closed }
+      const visited = { dp: new Set(), tp: new Set() }; // compiled route patterns each side has served
+      const pendingLoad = { dp: null, tp: null }; // race id a set-src should resolve
+      const loadedPath = { dp: null, tp: null }; // path whose iframe load has completed
+      // The document instance each side's probe last reported from. A reload gives the
+      // probe a new id, which is how a cell can say "patched in place" or "reloaded".
+      const lastDoc = { dp: null, tp: null };
+      // Most recent probe report per side. An extremely fast update can become visible
+      // while `/api/edit` is still returning its token; caching the report lets the
+      // race consume it as soon as the response arms that token.
+      const latestProbe = { dp: null, tp: null };
+      const $ = (id) => document.getElementById(id);
+      const fmt = (ms) =>
+        ms == null ? "—" : ms < 1000 ? `${(ms / 1000).toFixed(3)} s` : `${(ms / 1000).toFixed(2)} s`;
+
+      // Which compiled route a URL belongs to, from the route table the server sent.
+      // An unlisted path counts as its own route rather than silently joining another.
+      function patternFor(path) {
+        return conf?.routes.find((r) => r.path === path)?.pattern ?? path;
+      }
+
+      // ----------------------------------------------------------------------
+      // Layout
+
+      function buildPanes(state) {
+        const panes = $("panes");
+        panes.textContent = "";
+        for (const side of state.sides) {
+          const pane = document.createElement("div");
+          pane.className = "pane";
+          pane.dataset.side = side.key;
+          pane.innerHTML = `
+            <div class="pane-head">
+              <div class="pane-title">
+                <span class="name"></span>
+                <span class="sub"></span>
+                <span class="status">…</span>
+              </div>
+              <div class="clockrow">
+                <span class="clock idle">0.000 s</span>
+                <span class="verdict"></span>
+              </div>
+              <div class="stage"></div>
+            </div>
+            <div class="frame">
+              <div class="curtain">waiting for the dev server…</div>
+              <iframe title="${side.label}" referrerpolicy="no-referrer"></iframe>
+            </div>`;
+          panes.appendChild(pane);
+          pane.querySelector(".name").textContent = side.label;
+          pane.querySelector(".sub").textContent = `localhost:${side.port}`;
+          const iframe = pane.querySelector("iframe");
+          iframe.addEventListener("load", () => onFrameLoad(side.key));
+          ui[side.key] = {
+            side,
+            pane,
+            clock: pane.querySelector(".clock"),
+            verdict: pane.querySelector(".verdict"),
+            stage: pane.querySelector(".stage"),
+            status: pane.querySelector(".status"),
+            statusKey: side.status,
+            iframe,
+            curtain: pane.querySelector(".curtain"),
+          };
+        }
+      }
+
+      function buildBar(state) {
+        const sc = $("scenarios");
+        sc.textContent = "";
+        for (const s of state.scenarios) {
+          const b = document.createElement("button");
+          b.className = "go";
+          b.textContent = s.name.replace(/ edit$/, "");
+          b.title = `${s.detail} — shown on ${s.url}`;
+          b.onclick = () => runEdit(s);
+          sc.appendChild(b);
+        }
+        const rt = $("routes");
+        rt.textContent = "";
+        for (const r of state.routes) {
+          const b = document.createElement("button");
+          b.className = "chip";
+          b.dataset.path = r.path;
+          b.dataset.pattern = r.pattern;
+          b.title =
+            `Navigate both frames to ${r.path} and race the first response. ` +
+            `Cold/warm tracks the compiled route ${r.pattern}, not the URL.`;
+          b.onclick = () => runNavigate(r);
+          rt.appendChild(b);
+          paintRouteChip(b);
+        }
+        $("caveat").textContent =
+          "Both dev servers run at once and contend for this machine; which side is spawned first " +
+          "alternates every race. The in-frame probe polls every 8 ms, identically on both sides. " +
+          "Route chips only navigate; scenarios navigate and settle if needed, then edit exactly once. " +
+          "`hot` / `reload` says whether that side patched the running page or replaced the document. " +
+          "next build runs with --turbopack, and with this checkout's tsc + eslint build checks off " +
+          "(diffpack does no type checking, so neither side pays for tsc). Build memory is the summed " +
+          "RSS of the whole process tree, sampled. For isolated, interleaved, multi-sample numbers: " +
+          "node scripts/bench-calcom.mjs";
+      }
+
+      // The chip is labelled with the URL it navigates to; cold/warm is decided by the
+      // compiled route behind that URL, which is not always the same thing.
+      function paintRouteChip(b) {
+        const pattern = b.dataset.pattern;
+        const cold = !visited.dp.has(pattern) && !visited.tp.has(pattern);
+        b.innerHTML =
+          `${b.dataset.path} <span class="${cold ? "cold" : "warm"}">${cold ? "cold" : "warm"}</span>`;
+      }
+      function repaintRouteChips() {
+        for (const b of $("routes").querySelectorAll("button")) paintRouteChip(b);
+      }
+
+      // ----------------------------------------------------------------------
+      // Races
+
+      function startRace(spec) {
+        const r = {
+          id: ++raceSeq,
+          label: spec.label,
+          detail: spec.detail ?? "",
+          kind: spec.kind ?? null,
+          t0: performance.now(),
+          expect: spec.expect,
+          timeoutMs: spec.timeoutMs ?? 60000,
+          burst: spec.burst ?? null,
+          // Which document instance each side was showing when the clock started, so
+          // the landing report can say whether that document survived the edit.
+          docAtStart: { dp: lastDoc.dp, tp: lastDoc.tp },
+          sides: {
+            dp: { done: false, ms: null, why: null, how: null },
+            tp: { done: false, ms: null, why: null, how: null },
+          },
+        };
+        // A fresh edit of the same class replaces the token the previous one planted,
+        // so any side still building that previous edit will never display it.
+        if (r.kind) {
+          for (const prev of active.filter((x) => x.kind === r.kind && x !== r)) {
+            for (const k of SIDE_KEYS) if (!prev.sides[k].done) settle(prev, k, null, "superseded");
+          }
+        }
+        active.push(r);
+        for (const k of SIDE_KEYS) {
+          ui[k].verdict.textContent = "";
+          ui[k].verdict.className = "verdict";
+          ui[k].stage.textContent = r.detail;
+        }
+        return r;
+      }
+
+      // `why`: null when the change actually landed, else "superseded" (a newer edit
+      // replaced the token this one was waiting for), "timeout", or "failed" (the
+      // process exited non-zero — a crash, which must never read as the other side
+      // being fast). `how`: "hot" or "reload" for edits, null where it makes no sense.
+      const MISSED = { superseded: "not shown", failed: "FAILED", timeout: "TIMEOUT" };
+
+      function settle(race, sideKey, ms, why, how) {
+        const s = race.sides[sideKey];
+        if (s.done) return;
+        s.done = true;
+        s.ms = ms ?? null;
+        s.why = why ?? null;
+        s.how = how ?? null;
+        if (why === null) {
+          ui[sideKey].clock.textContent = fmt(s.ms);
+          ui[sideKey].clock.className = "clock";
+        } else {
+          ui[sideKey].clock.textContent = (MISSED[why] ?? "TIMEOUT").toUpperCase();
+          ui[sideKey].clock.className = "clock bad";
+        }
+        if (race.burst && burst) {
+          if (why === null) burst.shown[sideKey]++;
+          burst.settled[sideKey]++;
+        }
+        if (SIDE_KEYS.every((k) => race.sides[k].done)) closeRace(race);
+      }
+
+      function land(race, sideKey, ms, how) {
+        settle(race, sideKey, ms ?? performance.now() - race.t0, null, how);
+      }
+
+      function closeRace(race) {
+        active = active.filter((x) => x !== race);
+        const a = race.sides.dp.ms;
+        const z = race.sides.tp.ms;
+        if (a != null && z != null) {
+          const faster = a <= z ? "dp" : "tp";
+          const slower = faster === "dp" ? "tp" : "dp";
+          ui[faster].verdict.textContent = `${(Math.max(a, z) / Math.min(a, z)).toFixed(1)}× faster`;
+          ui[faster].verdict.className = "verdict win";
+          ui[slower].verdict.textContent = `+${fmt(Math.abs(z - a))}`;
+          ui[slower].verdict.className = "verdict lose";
+        }
+        addResult(race);
+        // A cold start is two waits, and both are worth showing: the dev server
+        // answering at all, then the page actually painted in the frame.
+        if (race.expect.type === "boot" && race.stage) {
+          addResult(
+            {
+              label: "cold start → dev server ready (first 200)",
+              sides: {
+                dp: { ms: race.stage.dp ?? null, why: race.stage.dp == null ? "timeout" : null },
+                tp: { ms: race.stage.tp ?? null, why: race.stage.tp == null ? "timeout" : null },
+              },
+            },
+            { summary: true },
+          );
+        }
+        maybeCloseBurst();
+      }
+
+      function tickClocks() {
+        for (const k of SIDE_KEYS) {
+          if (!ui[k]) continue;
+          // The clock shows the oldest thing this side is still owing.
+          const pending = active.filter((r) => !r.sides[k].done).sort((x, y) => x.t0 - y.t0)[0];
+          if (pending) {
+            ui[k].clock.textContent = fmt(performance.now() - pending.t0);
+            ui[k].clock.className = "clock running";
+          }
+        }
+        for (const r of [...active]) {
+          if (performance.now() - r.t0 > r.timeoutMs) {
+            for (const k of SIDE_KEYS) settle(r, k, null, "timeout");
+          }
+        }
+        requestAnimationFrame(tickClocks);
+      }
+      requestAnimationFrame(tickClocks);
+
+      // A time alone does not say what the user got. Both bundlers fall back to a full
+      // page reload when a hot update cannot be applied, and a reload throws away
+      // everything on screen — so a fast cell that reloaded is not straightforwardly
+      // better than a slower one that patched the running page. The label says which.
+      function cell(side, cls) {
+        if (side.ms != null) {
+          const how = side.how ? ` <span class="how ${side.how}">${side.how}</span>` : "";
+          return `<td class="${cls}">${fmt(side.ms)}${how}</td>`;
+        }
+        return `<td class="miss">${MISSED[side.why] ?? "TIMEOUT"}</td>`;
+      }
+
+      // One place that writes a row, so the axes that are not times — CPU seconds,
+      // peak RSS, frames displayed — read the same way as the ones that are.
+      function addRow(label, dp, tp, adv, opts) {
+        const tb = $("results");
+        const tr = document.createElement("tr");
+        if (opts?.summary) tr.className = "summary";
+        tr.innerHTML =
+          `<td class="what"></td><td class="dp">${dp}</td><td class="tp">${tp}</td>` +
+          `<td class="${opts?.slower ? "adv slower" : "adv"}">${adv}</td>`;
+        tr.querySelector(".what").textContent = label;
+        tb.prepend(tr);
+        return tr;
+      }
+
+      // What the advantage column says when one side produced no number at all. A
+      // failed process is called a failure: "diffpack timed out" for a build that
+      // exited 1 would read as slowness, and would flatter whichever side survived.
+      function missedText(why, label) {
+        if (why === "superseded") return `${label} never showed it`;
+        if (why === "failed") return `${label} FAILED (non-zero exit), not a time`;
+        return `${label} timed out`;
+      }
+
+      function addResult(race, opts) {
+        const tb = $("results");
+        const tr = document.createElement("tr");
+        if (opts?.summary) tr.className = "summary";
+        const a = race.sides.dp;
+        const z = race.sides.tp;
+        let adv = "—";
+        let cls = "adv";
+        if (a.ms != null && z.ms != null) {
+          if (a.ms <= z.ms) adv = `${(z.ms / a.ms).toFixed(1)}× diffpack`;
+          else {
+            adv = `${(a.ms / z.ms).toFixed(1)}× Turbopack`;
+            cls = "adv slower";
+          }
+        } else if (a.ms != null) adv = missedText(z.why, "Turbopack");
+        else if (z.ms != null) adv = missedText(a.why, "diffpack");
+        else adv = `neither side showed it (${MISSED[a.why] ?? "TIMEOUT"} / ${MISSED[z.why] ?? "TIMEOUT"})`;
+        tr.innerHTML = `<td class="what"></td>${cell(a, "dp")}${cell(z, "tp")}<td class="${cls}">${adv}</td>`;
+        tr.querySelector(".what").textContent = race.label;
+        tb.prepend(tr);
+        const n = tb.querySelectorAll("tr:not(.summary)").length;
+        $("resultnote").textContent = `${n} run${n === 1 ? "" : "s"}, every one kept`;
+      }
+
+      // A sustained burst gets one extra row: how many of its edits each side ever
+      // put on screen. That count is the point of the scenario.
+      function maybeCloseBurst() {
+        if (!burst || burst.closed) return;
+        if (burst.settled.dp < burst.count || burst.settled.tp < burst.count) return;
+        if (!burst.done) return;
+        burst.closed = true;
+        const d = burst.shown.dp;
+        const t = burst.shown.tp;
+        addRow(
+          `sustained ${burst.kind} edits @1/s — how many of the ${burst.count} states each side ever displayed`,
+          `${d}/${burst.count} shown`,
+          `${t}/${burst.count} shown`,
+          d === t ? "same coverage" : `${Math.abs(d - t)} more states on ${d > t ? "diffpack" : "Turbopack"}`,
+          { summary: true, slower: t > d },
+        );
+      }
+
+      // ----------------------------------------------------------------------
+      // Scenario: an edit to a real source file. One write, both watchers.
+
+      // Exactly one write per press. If needed, the button first navigates both frames
+      // and waits for their documents to load and settle; only then does it perform the
+      // one requested edit. Navigation itself never mutates source code.
+      async function runEdit(scenario) {
+        await ensureRoute(scenario.url);
+        const race = startRace({
+          label: scenario.name,
+          detail: `${scenario.detail} → ${scenario.url}`,
+          kind: scenario.key,
+          expect: { type: "token", token: null },
+          timeoutMs: 90000,
+        });
+        let res;
+        try {
+          res = await post("/api/edit", { kind: scenario.key });
+        } catch (err) {
+          for (const k of SIDE_KEYS) settle(race, k, null, "timeout");
+          logLine("sys", `edit failed: ${err.message}`);
+          return;
+        }
+        race.expect.token = res.token;
+        for (const k of SIDE_KEYS) landFromProbe(race, k, latestProbe[k]);
+        // The first edit of a class plants the badge, so it adds new content to the
+        // module instead of changing an attribute in place — a different, usually
+        // slower thing than the steady-state edits after it, so label it explicitly.
+        race.label = res.warmup ? `${scenario.name} — first of this class, plants the badge` : scenario.name;
+        for (const k of SIDE_KEYS) ui[k].stage.textContent = `${race.detail} — token ${res.token}`;
+      }
+
+      // Scenario: sustained edits with no settle gap. The server drives the cadence
+      // and announces each edit over SSE, so both sides share one t0 per edit.
+      async function runBurst() {
+        await ensureRoute("/auth/login");
+        burst = { kind: "island", count: 5, shown: { dp: 0, tp: 0 }, settled: { dp: 0, tp: 0 }, done: false, closed: false };
+        try {
+          await post("/api/burst", { kind: burst.kind, count: burst.count, gapMs: 1000 });
+        } catch (err) {
+          logLine("sys", `burst failed: ${err.message}`);
+          burst = null;
+        }
+      }
+
+      // Scenario: navigate both frames to a route. A route neither side has compiled
+      // yet is the interesting one — the chip says which.
+      async function runNavigate(route) {
+        const cold = !visited.dp.has(route.pattern) && !visited.tp.has(route.pattern);
+        const race = startRace({
+          label: `navigate ${route.path}${cold ? " (cold route compile)" : " (warm)"}`,
+          detail: `first response for ${route.path}`,
+          expect: { type: "load" },
+          timeoutMs: 180000,
+        });
+        for (const k of SIDE_KEYS) navigate(k, route.path, race.id);
+      }
+
+      function navigate(sideKey, path, raceId) {
+        const u = ui[sideKey];
+        // A navigation replaces the document and, for a new route, the module graph
+        // behind it. It never mutates the source tree.
+        const already = u.iframe.dataset.path === path;
+        // Re-visiting the same path needs a distinct URL or the frame will not
+        // reload; an unknown query key does not change which route gets compiled.
+        const src = `${u.side.origin}${path}${already ? `?dpnav=${raceId ?? Date.now()}` : ""}`;
+        u.iframe.dataset.path = path;
+        u.iframe.dataset.pattern = patternFor(path);
+        loadedPath[sideKey] = null;
+        pendingLoad[sideKey] = raceId ?? null;
+        u.curtain.hidden = true;
+        u.iframe.src = src;
+      }
+
+      function onFrameLoad(sideKey) {
+        const u = ui[sideKey];
+        loadedPath[sideKey] = u.iframe.dataset.path || null;
+        if (u.iframe.dataset.pattern) {
+          visited[sideKey].add(u.iframe.dataset.pattern);
+          repaintRouteChips();
+        }
+        const race = active.find((r) => r.id === pendingLoad[sideKey]);
+        if (!race) return;
+        pendingLoad[sideKey] = null;
+        if (race.expect.type === "load" || race.expect.type === "boot") land(race, sideKey);
+      }
+
+      // Bring both frames to the route an edit exercises, then let the freshly loaded
+      // documents hydrate and connect HMR before writing. This is navigation + waiting
+      // only: no warm-up or priming edit occurs here.
+      const POST_LOAD_SETTLE_MS = 1200;
+      function ensureRoute(path) {
+        const pending = [];
+        for (const k of SIDE_KEYS) {
+          const u = ui[k];
+          if (u.iframe.dataset.path === path && loadedPath[k] === path) continue;
+          pending.push(
+            new Promise((resolve) => {
+              const done = () => {
+                u.iframe.removeEventListener("load", done);
+                setTimeout(resolve, POST_LOAD_SETTLE_MS);
+              };
+              u.iframe.addEventListener("load", done);
+              // If an explicit route-chip navigation is already loading this path,
+              // join that load instead of replacing its document a second time.
+              if (u.iframe.dataset.path !== path) navigate(k, path, null);
+            }),
+          );
+        }
+        return Promise.all(pending);
+      }
+
+      // ----------------------------------------------------------------------
+      // Frame -> dashboard. The probe is the only thing that can see inside a
+      // cross-origin frame; it posts the visible token set on every change.
+
+      function landFromProbe(race, sideKey, report) {
+        if (!report || report.receivedAt < race.t0) return;
+        if (!race.expect.token || !report.tokens.includes(race.expect.token)) return;
+        const before = race.docAtStart[sideKey];
+        const how = report.doc && before ? (report.doc === before ? "hot" : "reload") : null;
+        land(race, sideKey, report.receivedAt - race.t0, how);
+      }
+
+      window.addEventListener("message", (ev) => {
+        const msg = ev.data;
+        if (!msg || msg.source !== "diffpack-demo-probe") return;
+        const sideKey = SIDE_KEYS.find((k) => ui[k] && ui[k].side.origin === ev.origin);
+        if (!sideKey || !Array.isArray(msg.tokens)) return;
+        if (msg.doc) lastDoc[sideKey] = msg.doc;
+        const report = { tokens: msg.tokens, doc: msg.doc || null, receivedAt: performance.now() };
+        latestProbe[sideKey] = report;
+        for (const race of [...active]) {
+          if (race.expect.type !== "token" || !race.expect.token) continue;
+          landFromProbe(race, sideKey, report);
+        }
+      });
+
+      // ----------------------------------------------------------------------
+      // Cold start and the production build race, both driven by the server.
+
+      async function runRestart() {
+        startRace({
+          label: "cold start → first paint (both output trees wiped)",
+          detail: "dev server boot, then the page painted in the frame",
+          expect: { type: "boot" },
+          timeoutMs: 300000,
+        });
+        blankFrames("booting…");
+        try {
+          await post("/api/restart", { sides: SIDE_KEYS, wipe: true });
+        } catch (err) {
+          logLine("sys", `restart failed: ${err.message}`);
+        }
+      }
+
+      async function runBuild() {
+        startRace({
+          label: "production build (concurrent race, outputs wiped)",
+          detail: "next build --turbopack vs diffpack build-app production, both from scratch",
+          expect: { type: "build" },
+          timeoutMs: 900000,
+        });
+        blankFrames("dev server stopped for the build race…");
+        try {
+          await post("/api/build", {});
+        } catch (err) {
+          logLine("sys", `build failed: ${err.message}`);
+        }
+      }
+
+      function blankFrames(note) {
+        for (const k of SIDE_KEYS) {
+          ui[k].curtain.hidden = false;
+          ui[k].curtain.textContent = note;
+          ui[k].iframe.src = "about:blank";
+          ui[k].iframe.dataset.path = "";
+          visited[k].clear();
+          lastDoc[k] = null;
+          latestProbe[k] = null;
+          loadedPath[k] = null;
+        }
+        repaintRouteChips();
+      }
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      // ----------------------------------------------------------------------
+      // Server stream
+
+      function connect() {
+        const es = new EventSource("/api/events");
+        es.onmessage = (ev) => handle(JSON.parse(ev.data));
+        es.onerror = () => logLine("sys", "event stream dropped, retrying…");
+      }
+
+      function handle(m) {
+        switch (m.type) {
+          case "state":
+            applyState(m.state);
+            break;
+          case "status":
+            setSideStatus(m.side, m.status, m.note, m.bootMs);
+            break;
+          case "ready": {
+            setSideStatus(m.side, "ready", null, m.ms);
+            const boot = active.find((r) => r.expect.type === "boot");
+            if (boot) {
+              (boot.stage ??= {})[m.side] = m.ms;
+              ui[m.side].stage.textContent = `server ready in ${fmt(m.ms)}, loading the page…`;
+              navigate(m.side, conf.scenarios[0].url, boot.id);
+            } else if (!ui[m.side].iframe.dataset.path) {
+              navigate(m.side, conf.scenarios[0].url, null);
+            }
+            break;
+          }
+          case "edit":
+            if (m.burst && burst) {
+              startRace({
+                label: `sustained ${m.kind} edit ${m.burst.index + 1}/${m.burst.count} @1/s`,
+                detail: `no settle gap — token ${m.token}`,
+                kind: m.kind,
+                expect: { type: "token", token: m.token },
+                timeoutMs: 30000,
+                burst: true,
+              });
+            }
+            logLine("sys", `edit ${m.token}${m.warmup ? " (first of its class, plants the badge)" : ""}`);
+            break;
+          case "burst-done":
+            if (burst) {
+              burst.done = true;
+              maybeCloseBurst();
+            }
+            break;
+          case "restart-begin":
+            logLine(
+              "sys",
+              `restarting ${m.sides.join(" + ")}${m.wipe ? ", every output tree wiped" : ""}` +
+                `${m.order ? `, ${m.order[0]} spawned first (alternates every race)` : ""}`,
+            );
+            setBusy("restart");
+            break;
+          case "build-begin":
+            logLine(
+              "sys",
+              "stopping dev servers, wiping outputs, then racing both builds" +
+                `${m.order ? `, ${m.order[0]} spawned first (alternates every race)` : ""}`,
+            );
+            setBusy("build");
+            break;
+          case "build-end": {
+            logLine("sys", `${m.side} build finished in ${fmt(m.ms)} (exit ${m.code})`);
+            const race = active.find((r) => r.expect.type === "build");
+            if (race) {
+              // A non-zero exit is a FAILURE, not a slow build and not a timeout.
+              if (m.code === 0) land(race, m.side, m.ms);
+              else settle(race, m.side, null, "failed");
+              const extra = [];
+              if (m.cpuUserS != null) extra.push(`${m.cpuUserS.toFixed(1)} s CPU`);
+              if (m.peakRssMb != null) extra.push(`${(m.peakRssMb / 1024).toFixed(2)} GiB peak RSS (tree)`);
+              if (extra.length) ui[m.side].stage.textContent = extra.join(", ");
+              // Wall is not the only thing a build costs; CPU and peak memory go in
+              // the table too rather than scrolling away with the stage line.
+              (race.cost ??= {})[m.side] = {
+                cpuUserS: m.cpuUserS,
+                peakRssMb: m.peakRssMb,
+                peakRssSingleMb: m.peakRssSingleMb,
+                rssSamples: m.rssSamples,
+              };
+              if (SIDE_KEYS.every((k) => race.cost[k])) {
+                const c = race.cost;
+                const ratio = (x, y) => (x && y ? `${(y / x).toFixed(1)}x diffpack` : "—");
+                const gib = (mb) => `${(mb / 1024).toFixed(2)} GiB`;
+                if (c.dp.cpuUserS != null && c.tp.cpuUserS != null) {
+                  addRow(
+                    "production build CPU (user, whole process tree)",
+                    `${c.dp.cpuUserS.toFixed(1)} s`,
+                    `${c.tp.cpuUserS.toFixed(1)} s`,
+                    ratio(c.dp.cpuUserS, c.tp.cpuUserS),
+                    { summary: true },
+                  );
+                }
+                // The comparable memory number. Both sides are process TREES —
+                // diffpack runs client, react-server and ssr at once, next build
+                // spawns workers — so this is the sum over the tree, sampled every
+                // 250 ms and maxed. A spike shorter than the sampling interval is
+                // missed, which is why the sample count is shown.
+                if (c.dp.peakRssMb != null && c.tp.peakRssMb != null) {
+                  addRow(
+                    `production build peak RSS, whole tree (sampled every 250 ms; ` +
+                      `${c.dp.rssSamples ?? 0}/${c.tp.rssSamples ?? 0} samples)`,
+                    gib(c.dp.peakRssMb),
+                    gib(c.tp.peakRssMb),
+                    ratio(c.dp.peakRssMb, c.tp.peakRssMb),
+                    { summary: true },
+                  );
+                }
+                // Kept for continuity with `/usr/bin/time -l`, and labelled for what
+                // it is: ru_maxrss is the largest SINGLE process, so it under-reports
+                // both trees, by different amounts. Never the headline.
+                if (c.dp.peakRssSingleMb != null && c.tp.peakRssSingleMb != null) {
+                  addRow(
+                    "…and its largest single process (ru_maxrss: under-reports both, unequally)",
+                    gib(c.dp.peakRssSingleMb),
+                    gib(c.tp.peakRssSingleMb),
+                    ratio(c.dp.peakRssSingleMb, c.tp.peakRssSingleMb),
+                    { summary: true },
+                  );
+                }
+              }
+            }
+            break;
+          }
+          case "build-done":
+            setBusy(null);
+            break;
+          case "reset":
+            // The badges are gone, so the next explicit edit of every class plants one.
+            logLine("sys", "sources restored to pristine cal.com");
+            break;
+          case "log":
+            logLine(m.side, m.line);
+            break;
+        }
+      }
+
+      function applyState(s) {
+        const first = !conf;
+        conf = s;
+        if (first) {
+          buildPanes(s);
+          buildBar(s);
+        }
+        $("meta").innerHTML =
+          `cal.com @ ${s.appCommit} &nbsp; diffpack @ ${s.diffpackCommit} &nbsp; next ${s.nextVersion}<br>${s.app}`;
+        for (const side of s.sides) setSideStatus(side.key, side.status, side.note, side.bootMs);
+        setBusy(s.busy);
+        // A dashboard opened after the servers came up gets no `ready` frame, so the
+        // frames are pointed at the default route here instead.
+        for (const side of s.sides) {
+          if (side.status === "ready" && !ui[side.key].iframe.dataset.path) {
+            navigate(side.key, s.scenarios[0].url, null);
+          }
+        }
+      }
+
+      function setSideStatus(key, status, note, bootMs) {
+        const u = ui[key];
+        if (!u) return;
+        u.statusKey = status;
+        const bits = [status];
+        if (bootMs) bits.push(`boot ${fmt(bootMs)}`);
+        u.status.textContent = bits.join(" · ");
+        u.status.style.color = status === "ready" ? "var(--dim)" : "var(--warn)";
+        if (status === "ready") u.curtain.hidden = true;
+        else if (status === "error") {
+          u.curtain.hidden = false;
+          u.curtain.textContent = note ?? "dev server error — see the log";
+        }
+        const disabled = !SIDE_KEYS.every((k) => ui[k] && ui[k].statusKey === "ready");
+        for (const b of document.querySelectorAll(".bar button")) b.disabled = disabled;
+      }
+
+      function setBusy(busy) {
+        const el = $("busy");
+        el.hidden = !busy;
+        el.textContent = busy ? `${busy}…` : "";
+      }
+
+      function logLine(side, line) {
+        const box = $("log");
+        const div = document.createElement("div");
+        div.className = side === "dp" || side === "tp" ? side : "sys";
+        div.textContent = `${side === "dp" ? "dp " : side === "tp" ? "tp " : "···"} ${line}`;
+        box.appendChild(div);
+        while (box.children.length > 600) box.removeChild(box.firstChild);
+        const sc = $("logscroll");
+        sc.scrollTop = sc.scrollHeight;
+      }
+
+      async function post(path, body) {
+        const r = await fetch(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body ?? {}),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || data.error) throw new Error(data.error ?? `HTTP ${r.status}`);
+        return data;
+      }
+
+      $("tuck").onclick = () => {
+        const tucked = $("footer").classList.toggle("tucked");
+        $("tuck").textContent = tucked ? "show" : "hide";
+      };
+      $("burst").onclick = runBurst;
+      $("restart").onclick = runRestart;
+      $("build").onclick = runBuild;
+      $("reset").onclick = async () => {
+        try {
+          await post("/api/reset", {});
+        } catch (err) {
+          logLine("sys", `reset failed: ${err.message}`);
+        }
+      };
+
+      connect();
+    </script>
+  </body>
+</html>

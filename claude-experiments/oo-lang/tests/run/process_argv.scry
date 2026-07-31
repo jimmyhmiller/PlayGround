@@ -1,0 +1,29 @@
+fn argv1(a: String) -> List<String> {
+  let xs = List<String>()
+  xs.push(a)
+  xs
+}
+
+fn argv2(a: String, b: String) -> List<String> {
+  let xs = List<String>()
+  xs.push(a)
+  xs.push(b)
+  xs
+}
+
+fn main() {
+  let literal = Process.runArgv("/usr/bin/printf", argv2("%s", "hello; $(not-a-shell)"), "", 2000, 65536)
+  Console.log("literal=${literal.exitCode} stdout=${literal.stdout} stderr=${literal.stderr}")
+
+  let streams = Process.runArgv("/bin/sh", argv2("-c", "printf out; printf err >&2; exit 7"), "", 2000, 65536)
+  Console.log("streams=${streams.exitCode} stdout=${streams.stdout} stderr=${streams.stderr}")
+
+  let input = Process.runArgv("/bin/cat", List<String>(), "stdin-isolated", 2000, 65536)
+  Console.log("stdin=${input.exitCode} stdout=${input.stdout}")
+
+  let timeout = Process.runArgv("/bin/sh", argv2("-c", "sleep 2"), "", 50, 65536)
+  Console.log("timeout=${timeout.exitCode} timedOut=${timeout.timedOut} truncated=${timeout.truncated}")
+
+  let limited = Process.runArgv("/usr/bin/yes", argv1("bounded"), "", 2000, 64)
+  Console.log("limited=${limited.exitCode} bytes=${limited.stdout.len() + limited.stderr.len()} timedOut=${limited.timedOut} truncated=${limited.truncated}")
+}

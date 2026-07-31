@@ -58,6 +58,17 @@ jobs:
           ./selfhost/seed/coil-seed build selfhost/src/main.coil -o /tmp/coil-diag $LF >/dev/null
           ./selfhost/oracle/arm64/gate-run.sh /tmp/coil-diag --verbose 2>&1 | grep -B1 -A8 "FAIL" | head -80 || true
           ./selfhost/oracle/gate-cli.sh /tmp/coil-diag 2>&1 | grep -B1 -A3 "FAIL" | head -40 || true
+          # The per-stage gates run under the same COIL_SELF_ARGS the real step exports,
+          # or the reproduction is not faithful. VERBOSE=1 prints the differing hunk,
+          # which is the only way to tell a real regression from host-toolchain drift
+          # (gate-diag compares the linker's own stderr, which varies by Xcode).
+          REF_TRIPLE=$(grep -m1 -h 'target triple' selfhost/oracle/full/reference/*.dump | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          export COIL_SELF_ARGS="--target $REF_TRIPLE"
+          for g in gate gate-ast gate-load gate-resolved gate-checked gate-expand gate-mono gate-ir gate-diag gate-x86; do
+            VERBOSE=1 ./selfhost/oracle/$g.sh /tmp/coil-diag 2>&1 | grep -A20 "FAIL" | head -40 || true
+          done
+          echo "--- toolchain (gate-diag bakes cc/ld wording into its reference) ---"
+          cc --version | head -2; ld -v 2>&1 | head -2
       - name: meta_stage3 (compiled (meta …) elaboration)
         # exit 42 is the feature test's SUCCESS code; capture it around bash -e
         run: |
@@ -81,3 +92,40 @@ jobs:
         run: |
           rc=0; /tmp/coil-ci-linux run selfhost/oracle/features/meta_stage3.coil || rc=$?
           test "$rc" = 42
+
+      - name: gate-target-os ((target-os) follows --target, not the build host)
+        # Cross-compilation correctness for comptime constants: only visible in
+        # the emitted IR, since a cross-built binary never runs on the builder.
+        run: ./selfhost/oracle/gate-target-os.sh /tmp/coil-ci-linux
+
+      # ---- the native x86-64 backend (docs/X64_BACKEND.md) ----
+      # These run on the compiler the step above just verified, so a failure here
+      # is the x64 backend's fault and not a bad stage0.
+      - name: x64 gate-encode (every encoding vs llvm-mc)
+        # llvm-mc is an INDEPENDENT assembler; this is the only check that the
+        # hand-written encoder emits the bytes it claims to.
+        run: PATH="/usr/lib/llvm-21/bin:$PATH" ./selfhost/oracle/x64/gate-encode.sh /tmp/coil-ci-linux
+      - name: x64 gate-elf (generated object links with cc and runs)
+        run: ./selfhost/oracle/x64/gate-elf.sh /tmp/coil-ci-linux
+      - name: x64 gate-run (54-program corpus, byte-exact vs the LLVM backend)
+        run: ./selfhost/oracle/x64/gate-run.sh /tmp/coil-ci-linux
+      - name: x64 gate-cabi (SysV struct rules vs a gcc-compiled object)
+        # The eightbyte classification is only reachable across the C boundary
+        # (internal calls pass aggregates by pointer), so this is the gate that
+        # actually tests it — and where the bug that broke the first self-host
+        # attempt lived.
+        run: ./selfhost/oracle/x64/gate-cabi.sh /tmp/coil-ci-linux
+      - name: x64 gate-gdb (DWARF actually drives a debugger)
+        run: |
+          sudo apt-get install -y gdb
+          ./selfhost/oracle/x64/gate-gdb.sh /tmp/coil-ci-linux
+      - name: Diagnose x64 gates verbosely (only on failure)
+        if: failure()
+        run: |
+          ./selfhost/oracle/x64/gate-run.sh /tmp/coil-ci-linux --verbose 2>&1 | grep -B1 -A8 "FAIL" | head -80 || true
+      - name: x64 self-host (stage2/stage3 fixpoint + corpus)
+        # The finale: the x64 backend builds the whole compiler, that compiler
+        # rebuilds itself to a BYTE-IDENTICAL object, and it passes the corpus.
+        run: STAGE0=/tmp/coil-ci-linux ./selfhost/bootstrap-x64.sh /tmp/coil-ci-x64
+      - name: x64 LLVM-free build (links no libLLVM, self-hosts, passes the corpus)
+        run: STAGE0=/tmp/coil-ci-linux ./selfhost/rebootstrap-nollvm-linux.sh /tmp/coil-ci-nollvm

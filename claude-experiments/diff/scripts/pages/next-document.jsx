@@ -7,8 +7,16 @@
 import { Fragment, useContext } from "react";
 import { DocumentContext } from "./pages-runtime.jsx";
 
+// With built-in i18n configured, Next fills `<html lang>` with the request's locale
+// unless the app's own `_document` set one explicitly.
 export function Html({ children, ...props }) {
-  return <html {...props}>{children}</html>;
+  const ctx = useContext(DocumentContext);
+  const lang = props.lang !== undefined ? props.lang : ctx && ctx.locale ? ctx.locale : undefined;
+  return (
+    <html {...props} lang={lang}>
+      {children}
+    </html>
+  );
 }
 
 export function Head({ children }) {

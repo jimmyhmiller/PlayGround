@@ -1,0 +1,6 @@
+(module condlinton)
+; Register the nested-if lint. Load it with `--use`, so no source file has to opt in:
+;   coil lint  src/examples/metaprogramming/condlint_test.coil --use src/examples/metaprogramming/condlint-on.coil
+;   coil lint  src/examples/metaprogramming/condlint_test.coil --use src/examples/metaprogramming/condlint-on.coil --fix
+(import "condlint.coil" :use *)
+(checker lint-nested-if)

@@ -345,6 +345,20 @@ struct Idx {
 /// both indexes.
 pub fn build(obj_data: &[u8]) -> Result<(DwarfIndex, LayoutIndex), DynErr> {
     let object = object::File::parse(obj_data)?;
+    // No DWARF at all is an ERROR, not an empty index. An empty index resolves
+    // every site to nothing and reports no reason — the same output as "this
+    // program allocated untyped bytes". Callers (the agent, heap dumps) can say
+    // something useful about a failure; they can't say anything about silence.
+    let has_dwarf = object
+        .section_by_name("__debug_info")
+        .or_else(|| object.section_by_name(".debug_info"))
+        .map(|s| s.size() > 0)
+        .unwrap_or(false);
+    if !has_dwarf {
+        return Err("no non-empty .debug_info in the DWARF-bearing file (build with `debug = true`; \
+                    on macOS check that the .dSYM is not empty)"
+            .into());
+    }
     let endian = if object.is_little_endian() {
         RunTimeEndian::Little
     } else {

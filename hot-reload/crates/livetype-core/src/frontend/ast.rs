@@ -45,6 +45,16 @@ pub struct VariantDef {
     pub fields: Vec<FieldDef>,
 }
 
+/// `migrate Lamp.lit(old) { ... }` computes the new field value from the old
+/// one with an ordinary, pure function body.
+#[derive(Clone, Debug)]
+pub struct MigrationDef {
+    pub struct_name: String,
+    pub field_name: String,
+    pub binding: String,
+    pub body: Vec<Stmt>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Param {
     pub name: String,
@@ -82,6 +92,7 @@ pub struct GlobalDef {
 pub enum Item {
     Struct(StructDef),
     Enum(EnumDef),
+    Migration(MigrationDef),
     Fn(FnDef),
     /// `foreign type Window;` — declares an opaque native resource type.
     ForeignType(String),
@@ -112,11 +123,25 @@ pub enum BinOp {
 pub enum Stmt {
     /// `let x = e;` or `let x: T = e;` — the annotation is optional and only
     /// *required* where nothing else pins the type (an empty array literal).
-    Let { name: String, ty: Option<TypeExpr>, value: Expr },
-    Assign { name: String, value: Expr },
+    Let {
+        name: String,
+        ty: Option<TypeExpr>,
+        value: Expr,
+    },
+    Assign {
+        name: String,
+        value: Expr,
+    },
     Return(Expr),
-    If { cond: Expr, then: Vec<Stmt>, els: Vec<Stmt> },
-    While { cond: Expr, body: Vec<Stmt> },
+    If {
+        cond: Expr,
+        then: Vec<Stmt>,
+        els: Vec<Stmt>,
+    },
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+    },
     Emit(Expr),
     Yield,
     /// `match e { Circle { r } => { … } Point => { … } }` — arms bind the
@@ -128,7 +153,11 @@ pub enum Stmt {
         arms: Vec<MatchArm>,
     },
     /// `a[i] = e;` — element assignment (checked against the element type).
-    IndexAssign { array: Expr, index: Expr, value: Expr },
+    IndexAssign {
+        array: Expr,
+        index: Expr,
+        value: Expr,
+    },
     /// A bare expression evaluated for effect (e.g. a call).
     Expr(Expr),
 }
@@ -158,7 +187,11 @@ pub enum Expr {
     Str(String),
     Unit,
     Var(String),
-    Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+    Binary {
+        op: BinOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
     Not(Box<Expr>),
     /// Unary minus — type-directed sugar for `0 - x` / `0.0 - x`.
     Neg(Box<Expr>),
@@ -166,12 +199,31 @@ pub enum Expr {
     /// `let` annotation.
     ArrayLit(Vec<Expr>),
     /// `a[i]`.
-    Index { array: Box<Expr>, index: Box<Expr> },
+    Index {
+        array: Box<Expr>,
+        index: Box<Expr>,
+    },
     /// `match` in expression position: every arm yields a value of one type.
-    Match { scrutinee: Box<Expr>, arms: Vec<ExprArm> },
-    Field { object: Box<Expr>, field: String },
-    StructLit { name: String, fields: Vec<(String, Expr)> },
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<ExprArm>,
+    },
+    Field {
+        object: Box<Expr>,
+        field: String,
+    },
+    StructLit {
+        name: String,
+        fields: Vec<(String, Expr)>,
+    },
     /// `Shape::Circle { r: 5 }` (or a bare fieldless `Shape::Point`).
-    VariantLit { enum_name: String, variant: String, fields: Vec<(String, Expr)> },
-    Call { name: String, args: Vec<Expr> },
+    VariantLit {
+        enum_name: String,
+        variant: String,
+        fields: Vec<(String, Expr)>,
+    },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
 }

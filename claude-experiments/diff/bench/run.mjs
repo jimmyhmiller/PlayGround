@@ -376,6 +376,12 @@ function collectMeta() {
 }
 
 function printSummary() {
+  // An excluded cell is a MISSING measurement, not a result. Truncated to 80
+  // characters inside the table it read as a footnote and a whole corpus could
+  // vanish from the numbers unnoticed (an ANSI-colorized `console.log` once
+  // dropped every tool at two sizes). They are collected and reported in full,
+  // loudly, after the tables.
+  const excluded = [];
   console.log("\n================ SUMMARY ================");
   console.log(JSON.stringify(results.meta, null, 2));
   for (const [key, cell] of Object.entries(results.corpora)) {
@@ -384,7 +390,8 @@ function printSummary() {
     console.log("| --- | ---: | ---: | ---: | ---: | ---: |");
     for (const [tool, record] of Object.entries(cell.tools)) {
       if (record.error) {
-        console.log(`| ${tool} | EXCLUDED: ${record.error.split("\n")[0].slice(0, 80)} | | | | |`);
+        excluded.push(`${key} / ${tool}: ${record.error.split("\n")[0]}`);
+        console.log(`| ${tool} | EXCLUDED (see below) | | | | |`);
         continue;
       }
       const incremental = record.incremental?.medianMs ?? (record.incremental?.skipped ? "skipped" : "n/a");
@@ -392,6 +399,11 @@ function printSummary() {
         `| ${tool} | ${record.coldMedianMs} | ${incremental} | ${(record.peakRssBytes / 1e6).toFixed(0)} | ${record.outputBytes} | ${record.outputGzipBytes} |`,
       );
     }
+  }
+  if (excluded.length) {
+    console.log(`\n!! ${excluded.length} MEASUREMENT(S) EXCLUDED — the tables above are incomplete:`);
+    for (const line of excluded) console.log(`   - ${line}`);
+    console.log("   An excluded pair is an unmeasured pair. Do not quote these tables as complete.");
   }
   if (Object.keys(results.app).length > 0) {
     console.log("\n## real app (integration/tanstack-start-reference)");

@@ -9,19 +9,31 @@ use std::sync::{Arc, Mutex};
 const INTERFACE: &str = include_str!("../demo/interface.lt");
 const SCENE: &str = include_str!("../demo/scene.lt");
 
+/// One drawing call. `a`/`b` are the radius and an unused 0 for the round
+/// shapes, the width and height for a bar — the same flat encoding the wasm
+/// host hands to its canvas.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Shape {
+    /// Which foreign function the guest called: the shape it chose to draw.
+    kind: &'static str,
+    x: i64,
+    y: i64,
+    a: i64,
+    b: i64,
+    hue: i64,
+}
+
 /// What the guest drew, in order — the browser's canvas in miniature.
 #[derive(Default)]
 struct Toolkit {
     canvases_opened: u64,
     frames_cleared: u64,
-    /// (x, y, r, hue) per circle, most recent frame last.
-    circles: Vec<(i64, i64, i64, i64)>,
+    /// Most recent frame last.
+    shapes: Vec<Shape>,
 }
 
 fn bind(session: &mut Session, tk: &Arc<Mutex<Toolkit>>) {
-    let kind = session
-        .foreign_kind("Canvas")
-        .expect("Canvas declared by the scene");
+    let kind = session.foreign_kind("Canvas").expect("Canvas declared by the scene");
     {
         let tk = Arc::clone(tk);
         session
@@ -30,7 +42,10 @@ fn bind(session: &mut Session, tk: &Arc<Mutex<Toolkit>>) {
                 Box::new(move |_| {
                     let mut t = tk.lock().unwrap();
                     t.canvases_opened += 1;
-                    Value::Foreign { kind, ptr: t.canvases_opened }
+                    Value::Foreign {
+                        kind,
+                        ptr: t.canvases_opened,
+                    }
                 }),
             )
             .unwrap();
@@ -47,17 +62,56 @@ fn bind(session: &mut Session, tk: &Arc<Mutex<Toolkit>>) {
             )
             .unwrap();
     }
+    // `circle` and `ring` share an arity and differ only in what they paint,
+    // which is the point: the guest picks between them by dispatching on an
+    // enum, and this records which one it picked.
+    for name in ["circle", "ring"] {
+        let tk = Arc::clone(tk);
+        session
+            .register_foreign(
+                name,
+                Box::new(move |args| {
+                    let [_, Value::I64(x), Value::I64(y), Value::I64(r), Value::I64(hue)] = args else {
+                        panic!("{name} called with the wrong argument shapes: {args:?}");
+                    };
+                    tk.lock().unwrap().shapes.push(Shape {
+                        kind: name,
+                        x: *x,
+                        y: *y,
+                        a: *r,
+                        b: 0,
+                        hue: *hue,
+                    });
+                    Value::Unit
+                }),
+            )
+            .unwrap();
+    }
     {
         let tk = Arc::clone(tk);
         session
             .register_foreign(
-                "circle",
+                "bar",
                 Box::new(move |args| {
-                    let [_, Value::I64(x), Value::I64(y), Value::I64(r), Value::I64(hue)] = args
+                    let [
+                        _,
+                        Value::I64(x),
+                        Value::I64(y),
+                        Value::I64(w),
+                        Value::I64(h),
+                        Value::I64(hue),
+                    ] = args
                     else {
-                        panic!("circle called with the wrong argument shapes: {args:?}");
+                        panic!("bar called with the wrong argument shapes: {args:?}");
                     };
-                    tk.lock().unwrap().circles.push((*x, *y, *r, *hue));
+                    tk.lock().unwrap().shapes.push(Shape {
+                        kind: "bar",
+                        x: *x,
+                        y: *y,
+                        a: *w,
+                        b: *h,
+                        hue: *hue,
+                    });
                     Value::Unit
                 }),
             )
@@ -100,18 +154,22 @@ fn the_scene_runs_and_draws_every_frame() {
     let t = tk.lock().unwrap();
     assert_eq!(t.canvases_opened, 1, "letonce opened the canvas exactly once");
     assert_eq!(t.frames_cleared, 5);
-    assert_eq!(t.circles.len(), 5 * 18, "18 particles drawn per frame");
-    assert!(t.circles.iter().all(|c| c.2 == 14), "radius() is still 14");
+    assert_eq!(t.shapes.len(), 5 * 18, "18 particles drawn per frame");
+    assert!(t.shapes.iter().all(|s| s.a == 14), "radius() is still 14");
+    assert!(
+        t.shapes.iter().all(|s| s.kind == "circle"),
+        "every particle is a filled disc before any edit"
+    );
 }
 
 #[test]
 fn particles_actually_move() {
     let (mut session, mut actor, tk) = boot();
     frame(&mut session, &mut actor);
-    let first = tk.lock().unwrap().circles[0];
+    let first = tk.lock().unwrap().shapes[0];
     frame(&mut session, &mut actor);
-    let second = tk.lock().unwrap().circles[18];
-    assert_ne!((first.0, first.1), (second.0, second.1), "particle 0 moved");
+    let second = tk.lock().unwrap().shapes[18];
+    assert_ne!((first.x, first.y), (second.x, second.y), "particle 0 moved");
 }
 
 #[test]
@@ -121,9 +179,9 @@ fn particles_stay_on_the_canvas() {
         frame(&mut session, &mut actor);
     }
     let t = tk.lock().unwrap();
-    for &(x, y, _, _) in &t.circles {
-        assert!((14..=626).contains(&x), "x {x} escaped the canvas");
-        assert!((14..=386).contains(&y), "y {y} escaped the canvas");
+    for s in &t.shapes {
+        assert!((14..=626).contains(&s.x), "x {} escaped the canvas", s.x);
+        assert!((14..=386).contains(&s.y), "y {} escaped the canvas", s.y);
     }
 }
 
@@ -146,17 +204,16 @@ fn a_bigger_seed_count_spreads_across_the_canvas() {
     frame(&mut session, &mut actor);
     let first = {
         let t = tk.lock().unwrap();
-        assert_eq!(t.circles.len(), 200, "all 200 particles are drawn");
-        t.circles.clone()
+        assert_eq!(t.shapes.len(), 200, "all 200 particles are drawn");
+        t.shapes.clone()
     };
 
     // Spread, not a pile. Every particle must be individually visible: distinct
     // positions, not merely distinct columns — a coarse grid passed a
     // per-axis check while stacking four particles per slot.
-    let positions: std::collections::BTreeSet<(i64, i64)> =
-        first.iter().map(|c| (c.0, c.1)).collect();
+    let positions: std::collections::BTreeSet<(i64, i64)> = first.iter().map(|s| (s.x, s.y)).collect();
     assert_eq!(positions.len(), 200, "every particle is at its own spot");
-    let cornered = first.iter().filter(|c| c.0 >= 620 && c.1 >= 380).count();
+    let cornered = first.iter().filter(|s| s.x >= 620 && s.y >= 380).count();
     assert!(cornered < 10, "{cornered} particles piled into the corner");
 
     // And they stay individually visible: identical velocities would make
@@ -166,7 +223,7 @@ fn a_bigger_seed_count_spreads_across_the_canvas() {
     }
     let latest: Vec<(i64, i64)> = {
         let t = tk.lock().unwrap();
-        t.circles[t.circles.len() - 200..].iter().map(|c| (c.0, c.1)).collect()
+        t.shapes[t.shapes.len() - 200..].iter().map(|s| (s.x, s.y)).collect()
     };
     let distinct: std::collections::BTreeSet<(i64, i64)> = latest.iter().copied().collect();
     assert!(
@@ -181,11 +238,11 @@ fn scenario_1_redefining_a_function_lands_on_the_next_frame() {
     let (mut session, mut actor, tk) = boot();
     frame(&mut session, &mut actor);
     session.eval(include_str!("../demo/edit_1_radius.lt")).unwrap();
-    let before = tk.lock().unwrap().circles.len();
+    let before = tk.lock().unwrap().shapes.len();
     frame(&mut session, &mut actor);
     let t = tk.lock().unwrap();
-    for &(_, y, r, _) in &t.circles[before..] {
-        assert_eq!(r, 8 + y / 24, "radius() v2 computed from y");
+    for s in &t.shapes[before..] {
+        assert_eq!(s.a, 8 + s.y / 24, "radius() v2 computed from y");
     }
 }
 
@@ -196,82 +253,108 @@ fn scenario_2_live_particles_migrate_to_the_new_struct_version() {
         frame(&mut session, &mut actor);
     }
     // The particles on screen were all built under Particle v1.
-    let before = tk.lock().unwrap().circles.len();
+    let before = tk.lock().unwrap().shapes.len();
     session.eval(include_str!("../demo/edit_2_migrate.lt")).unwrap();
     frame(&mut session, &mut actor);
     let t = tk.lock().unwrap();
     assert_eq!(t.canvases_opened, 1, "no reseed, no reopen");
-    for &(x, _, _, hue) in &t.circles[before..] {
-        assert_eq!(hue, 20 + x / 3, "migrated particle carries the defaulted hue");
+    for s in &t.shapes[before..] {
+        assert_eq!(s.hue, 20 + s.x / 3, "migrated particle carries the defaulted hue");
     }
 }
 
 #[test]
-fn scenario_3_a_breaking_edit_is_rejected_and_the_program_runs_on() {
+fn scenarios_3_and_4_bool_to_enum_freezes_then_repairs_and_migrates() {
     let (mut session, mut actor, tk) = boot();
     frame(&mut session, &mut actor);
-    let err = session
-        .eval(include_str!("../demo/edit_3_rejected.lt"))
-        .expect_err("a str-returning tint must not install");
-    assert!(!err.is_empty());
-    let before = tk.lock().unwrap().circles.len();
+    session.eval(include_str!("../demo/edit_2_migrate.lt")).unwrap();
     frame(&mut session, &mut actor);
+
+    session
+        .eval(include_str!("../demo/edit_3_non_preserving.lt"))
+        .expect("the inconsistent type edit installs");
+    let (drawn_at_break, cleared_at_break) = {
+        let t = tk.lock().unwrap();
+        (t.shapes.len(), t.frames_cleared)
+    };
+    assert_eq!(frame(&mut session, &mut actor), Turn::Paused);
+    assert!(matches!(
+        &actor.status,
+        ActorStatus::Paused(livetype_core::Condition::BrokenFunction { .. })
+    ));
+    {
+        let t = tk.lock().unwrap();
+        assert_eq!((t.shapes.len(), t.frames_cleared), (drawn_at_break, cleared_at_break));
+    }
+
+    session
+        .eval(include_str!("../demo/edit_3_repair.lt"))
+        .expect("code repair and typed migration expression install");
+    session.engine.thaw(&mut actor);
+    assert_eq!(frame(&mut session, &mut actor), Turn::Yielded);
     let t = tk.lock().unwrap();
-    assert!(t.circles.len() > before, "the animation kept running");
-    assert!(
-        t.circles[before..].iter().all(|c| c.3 == 205),
-        "still drawing with the last good tint"
-    );
+    assert_eq!(t.canvases_opened, 1);
+    assert_eq!(t.frames_cleared - cleared_at_break, 1);
+    assert_eq!(t.shapes.len() - drawn_at_break, 18);
+    assert!(t.shapes[drawn_at_break..].iter().all(|shape| shape.hue > 0));
 }
 
 #[test]
-fn scenarios_4_to_6_break_freeze_and_resume_in_place() {
+fn scenarios_5_to_7_break_freeze_and_resume_in_place() {
     let (mut session, mut actor, tk) = boot();
     frame(&mut session, &mut actor);
 
-    // 4 — introduce the enum and dispatch on it.
+    // 5 — introduce the enum and dispatch on it.
     session.eval(include_str!("../demo/edit_4_enum.lt")).unwrap();
-    let before = tk.lock().unwrap().circles.len();
+    let before = tk.lock().unwrap().shapes.len();
     frame(&mut session, &mut actor);
     {
         let t = tk.lock().unwrap();
-        for &(x, _, r, _) in &t.circles[before..] {
-            assert_eq!(r, if x > 320 { 24 } else { 10 }, "match dispatched on Kind");
+        let drawn = &t.shapes[before..];
+        // The arms differ in which foreign function they call, so the enum is
+        // visible as a shape and not merely as a size. `radius` is untouched at
+        // 14 and still sizes both arms.
+        for s in drawn {
+            let expected = if s.x > 320 { ("ring", 20) } else { ("circle", 14) };
+            assert_eq!((s.kind, s.a), expected, "match dispatched on Kind");
         }
+        // Both arms have to be exercised, or the check above passes vacuously.
+        assert!(drawn.iter().any(|s| s.kind == "ring"), "some particle is a ring");
+        assert!(drawn.iter().any(|s| s.kind == "circle"), "some particle is a disc");
     }
 
-    // 5 — adding a variant marks the stale match Broken at install, and the
+    // 6 — adding a variant marks the stale match Broken at install, and the
     //     running animation freezes at its next call to it.
     session.eval(include_str!("../demo/edit_5_break.lt")).unwrap();
     let (drawn_at_break, cleared_at_break) = {
         let t = tk.lock().unwrap();
-        (t.circles.len(), t.frames_cleared)
+        (t.shapes.len(), t.frames_cleared)
     };
     let turn = frame(&mut session, &mut actor);
     assert_eq!(turn, Turn::Paused, "the running program froze");
     let ActorStatus::Paused(_) = &actor.status else {
         panic!("expected a paused actor, got {:?}", actor.status);
     };
-    // Brokenness propagated from `radius` to `on_frame`, so `main` trapped at
+    // Brokenness propagated from `draw` to `on_frame`, so `main` trapped at
     // the call boundary — before the frame performed a single effect. Nothing
     // was drawn half-way; the canvas still holds the last good frame.
     {
         let t = tk.lock().unwrap();
         assert_eq!(t.frames_cleared, cleared_at_break, "no half-executed frame");
-        assert_eq!(t.circles.len(), drawn_at_break, "nothing drawn while broken");
+        assert_eq!(t.shapes.len(), drawn_at_break, "nothing drawn while broken");
     }
     // Frozen means frozen: stepping again makes no further progress.
     session.engine.step(&mut actor);
     {
         let t = tk.lock().unwrap();
         assert_eq!(
-            (t.frames_cleared, t.circles.len()),
+            (t.frames_cleared, t.shapes.len()),
             (cleared_at_break, drawn_at_break),
             "a frozen program performs no further effects"
         );
     }
 
-    // 6 — install the missing arm and thaw. It resumes at the trapping
+    // 7 — install the missing arm and thaw. It resumes at the trapping
     //     instruction: the particles it already drew this frame are not redrawn.
     session.eval(include_str!("../demo/edit_6_repair.lt")).unwrap();
     session.engine.thaw(&mut actor);
@@ -282,12 +365,16 @@ fn scenarios_4_to_6_break_freeze_and_resume_in_place() {
     // The suspended `main` made the call it had been unable to make: exactly
     // one frame's worth of effects, from the same actor, with no restart.
     assert_eq!(
-        (t.frames_cleared - cleared_at_break, t.circles.len() - drawn_at_break),
+        (t.frames_cleared - cleared_at_break, t.shapes.len() - drawn_at_break),
         (1, 18),
         "resumed into exactly one frame — not restarted, not replayed"
     );
+    // The repaired arm calls a third foreign function, so the repair shows up
+    // as bars appearing rather than as a size change.
     assert!(
-        t.circles.iter().rev().take(18).any(|&(x, _, r, _)| x > 430 && r == 34),
+        t.shapes[drawn_at_break..]
+            .iter()
+            .any(|s| s.x > 430 && s.kind == "bar" && (s.a, s.b) == (42, 14)),
         "the repaired arm is live"
     );
 }
@@ -298,7 +385,7 @@ fn the_actor_survives_a_live_edit_and_never_restarts() {
     for _ in 0..3 {
         frame(&mut session, &mut actor);
     }
-    let before = tk.lock().unwrap().circles.len();
+    let before = tk.lock().unwrap().shapes.len();
     session
         .eval("fn radius(p: Particle) -> i64 { 30 }")
         .expect("edit installs");
@@ -307,7 +394,7 @@ fn the_actor_survives_a_live_edit_and_never_restarts() {
     assert_eq!(t.canvases_opened, 1, "the canvas was never reopened");
     assert!(matches!(actor.status, ActorStatus::Runnable), "same running actor");
     assert!(
-        t.circles[before..].iter().all(|c| c.2 == 30),
+        t.shapes[before..].iter().all(|s| s.a == 30),
         "the new radius took effect on the very next frame"
     );
 }

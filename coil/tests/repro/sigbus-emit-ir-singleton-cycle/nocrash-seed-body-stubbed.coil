@@ -1,0 +1,534 @@
+;; The type lattice.
+;;
+;; Types form a symmetric bounded lattice with `meet` (greatest lower bound) and an
+;; involutive `dual`. `join` is the dual of the meet of the duals; `isa` is defined by
+;; `meet`. Types are INTERNED, so a type is a dense integer id and structural equality is
+;; id equality.
+;;
+;; THE UNIFORM RULE. Every axis of every type is stored so that `meet` is the *widening*
+;; or *union* operation on the stored representation and `dual` is the *complementing*
+;; operation, with "high" (optimistic, above the centreline) showing up as a stored form
+;; that is inverted or empty. Bitsets meet by OR and dual by complement; ranges meet by
+;; widening the interval and dual by swapping the ends, so an inverted range under a
+;; widening meet computes exactly the intersection of the high elements. One rule for
+;; every axis is what keeps the lattice laws provable instead of hoped for.
+;;
+;; TERMINATION. Bitset axes are finite and converge on their own. Interval axes do not: a
+;; loop induction variable could widen forever. The int axis therefore carries a small
+;; widening counter; after a few widenings it falls straight to the axis bottom.
+(module vara)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "hashmap.coil"   :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+
+; ============================================================================
+; Ids
+; ============================================================================
+;; A type id (`TyId` by convention) is a plain `i64`: an index into the interned table.
+;; It is deliberately NOT a one-field struct. Coil passes an aggregate by reference, so a
+;; wrapper would turn the compiler's hottest handle into a pointer to a stack slot. The
+;; discipline is naming instead: type ids are `tid`/`t`, node ids will be `nid`/`n`.
+
+(const TY-NO-ID i64 -1)          ; "no id yet", used while installing duals
+
+; ============================================================================
+; Value kinds
+; ============================================================================
+;; A dynamic value's coarse shape, as a bitset. `meet` unions the set, so the empty set is
+;; the TOP of this axis and the full set is its BOTTOM. Unions are therefore first class:
+;; `number | undefined` is a different lattice element from `dyn`, which is the difference
+;; between a load and a load plus a branch.
+;;
+;; `int` is split out from `flt` even though the source language has one number type. That
+;; split is the single highest-value refinement in the lattice: it is what turns `a + b`
+;; into an integer add. `number` is just `int | flt`.
+(const VK-UNDEF i64 1)
+(const VK-NULL  i64 2)
+(const VK-BOOL  i64 4)
+(const VK-INT   i64 8)
+(const VK-FLT   i64 16)
+(const VK-STR   i64 32)
+(const VK-SYM   i64 64)
+(const VK-BIG   i64 128)         ; bigint
+(const VK-OBJ   i64 256)
+(const VK-FUN   i64 512)
+(const VK-MASK  i64 1023)        ; every kind: the bottom of this axis
+(const VK-NONE  i64 0)           ; no kind: the top of this axis
+(const VK-NUM   i64 24)          ; VK-INT | VK-FLT
+
+; ============================================================================
+; Axis bounds
+; ============================================================================
+(const TY-IMIN  i64 (<< 1 63))            ; INT64_MIN
+(const TY-IMAX  i64 (^ (<< 1 63) -1))     ; INT64_MAX
+(const TY-WIDEN-MAX i64 3)                ; widenings before the int axis falls to bottom
+
+;; The float axis is a three-element chain: high, a constant, low. Sizes are the marker,
+;; as in Simple's `TypeFloat._sz`: the sign carries high/low and 0 means "a constant".
+;; Only f64 exists here on purpose; the source language's numbers are doubles, and f32
+;; arrives with typed arrays or not at all.
+(const FSZ-HIGH i64 -64)
+(const FSZ-CON  i64 0)
+(const FSZ-LOW  i64 64)
+
+; ============================================================================
+; Val: the value sublattice
+; ============================================================================
+;; A product of independent axes. Meet and dual are componentwise, which is what makes the
+;; lattice laws hold by construction: a product of lattices is a lattice.
+;;
+;; A refinement is only *meaningful* when its kind bit is present, but it is still carried
+;; and still met when the bit is absent. That is deliberate. Canonicalising an unused
+;; refinement would not survive `dual` (dual maps an axis bottom to an axis top), so the
+;; redundancy is the price of an involutive dual. It costs a little interning space and
+;; never costs precision, because every decision consults `kinds` first.
+(defstruct Val
+  [(kinds  i64)     ; VK-* bitset;  meet = OR,  dual = complement within VK-MASK
+   (ilo    i64)     ; int axis: inclusive range. ilo > ihi means high (an inverted range)
+   (ihi    i64)
+   (iwide  i64)     ; widening counter, -3..3;  meet = max,  dual = negate
+   (fsz    i64)     ; float axis: FSZ-HIGH / FSZ-CON / FSZ-LOW
+   (fbits  i64)     ; the f64 constant as its BIT PATTERN when fsz = FSZ-CON, else 0.
+                    ; Bits, not an f64: NaN is not reflexive under fcmp, and interning
+                    ; needs exact identity. Bit patterns are also what NaN-boxing wants.
+   (fidxs  i64)     ; function-set bitset; meet = OR, dual = complement
+   (shapes i64)])   ; object-shape-set bitset; meet = OR, dual = complement
+
+(defn val-make [(kinds i64) (ilo i64) (ihi i64) (iwide i64)
+                (fsz i64) (fbits i64) (fidxs i64) (shapes i64)] (-> Val)
+  (let [(mut v) (zeroed Val)]
+    (store! (field v kinds)  kinds)
+    (store! (field v ilo)    ilo)
+    (store! (field v ihi)    ihi)
+    (store! (field v iwide)  iwide)
+    (store! (field v fsz)    fsz)
+    ; Canonical: a non-constant float carries no bits. Safe to normalise because `dual`
+    ; only flips the sign of fsz and never turns a non-constant into a constant.
+    (store! (field v fbits)  (if (= fsz FSZ-CON) fbits 0))
+    (store! (field v fidxs)  fidxs)
+    (store! (field v shapes) shapes)
+    (load v)))
+
+(defn val-eq [(x Val) (y Val)] (-> bool)
+  (and (= (load (field x kinds))  (load (field y kinds)))
+   (and (= (load (field x ilo))   (load (field y ilo)))
+    (and (= (load (field x ihi))  (load (field y ihi)))
+     (and (= (load (field x iwide)) (load (field y iwide)))
+      (and (= (load (field x fsz))  (load (field y fsz)))
+       (and (= (load (field x fbits))  (load (field y fbits)))
+        (and (= (load (field x fidxs))  (load (field y fidxs)))
+             (= (load (field x shapes)) (load (field y shapes)))))))))))
+
+(defn hash-step [(h i64) (x i64)] (-> i64) (* (^ h x) 1099511628211))
+
+(defn val-hash [(x Val)] (-> i64)
+  (hash-step
+   (hash-step
+    (hash-step
+     (hash-step
+      (hash-step
+       (hash-step
+        (hash-step
+         (hash-step -3750763034362895579 (load (field x kinds)))
+         (load (field x ilo)))
+        (load (field x ihi)))
+       (load (field x iwide)))
+      (load (field x fsz)))
+     (load (field x fbits)))
+    (load (field x fidxs)))
+   (load (field x shapes))))
+
+(impl Eq Val (= [(x Val) (y Val)] (-> bool) (val-eq x y)))
+
+; ---------------------------------------------------------------------------
+; Axis operations. Each is meet + dual, named so the uniform rule is visible.
+; ---------------------------------------------------------------------------
+
+;; A bitset axis. Union to meet, complement to dual. `mask` bounds the complement so that
+;; dual stays involutive on a narrower-than-64-bit set.
+(defn bits-meet [(a i64) (b i64)] (-> i64) (| a b))
+(defn bits-dual [(a i64) (mask i64)] (-> i64) (& (^ a -1) mask))
+
+(defn imin2 [(a i64) (b i64)] (-> i64) (if (< a b) a b))
+(defn imax2 [(a i64) (b i64)] (-> i64) (if (> a b) a b))
+
+;; The float chain. `meet` walks down {high, constant, low}: two equal constants stay that
+;; constant, two unequal constants fall to low, and high is the identity.
+(defn fsz-meet [(asz i64) (abits i64) (bsz i64) (bbits i64)] (-> i64)
+  (if (= asz bsz)
+      (if (= asz FSZ-CON) (if (= abits bbits) FSZ-CON FSZ-LOW) asz)
+    (if (or (= asz FSZ-LOW) (= bsz FSZ-LOW)) FSZ-LOW
+      ; one side is high, which is the identity, so the result is the other side's size
+      (if (= asz FSZ-HIGH) bsz asz))))
+
+(defn fbits-meet [(asz i64) (abits i64) (bsz i64) (bbits i64)] (-> i64)
+  (if (= (fsz-meet asz abits bsz bbits) FSZ-CON)
+      (if (= asz FSZ-CON) abits bbits)
+    0))
+
+;; Constants are self-dual: they sit on the lattice centreline. Everything else flips.
+(defn fsz-dual [(sz i64)] (-> i64) (if (= sz FSZ-CON) FSZ-CON (- 0 sz)))
+
+; ---------------------------------------------------------------------------
+; Val meet / dual / predicates
+; ---------------------------------------------------------------------------
+(defn val-meet [(x Val) (y Val)] (-> Val)
+  (val-make
+   (bits-meet (load (field x kinds)) (load (field y kinds)))
+   (imin2 (load (field x ilo))   (load (field y ilo)))
+   (imax2 (load (field x ihi))   (load (field y ihi)))
+   (imax2 (load (field x iwide)) (load (field y iwide)))
+   (fsz-meet   (load (field x fsz)) (load (field x fbits))
+               (load (field y fsz)) (load (field y fbits)))
+   (fbits-meet (load (field x fsz)) (load (field x fbits))
+               (load (field y fsz)) (load (field y fbits)))
+   (bits-meet (load (field x fidxs))  (load (field y fidxs)))
+   (bits-meet (load (field x shapes)) (load (field y shapes)))))
+
+(defn val-dual [(x Val)] (-> Val)
+  (let [lo  (load (field x ilo))
+        hi  (load (field x ihi))
+        con (= lo hi)]      ; an integer constant is self-dual, like a float constant
+    (val-make
+     (bits-dual (load (field x kinds)) VK-MASK)
+     (if con lo hi)
+     (if con hi lo)
+     (if con (load (field x iwide)) (- 0 (load (field x iwide))))
+     (fsz-dual (load (field x fsz)))
+     (load (field x fbits))
+     (bits-dual (load (field x fidxs))  -1)
+     (bits-dual (load (field x shapes)) -1))))
+
+;; High means "no value can be here": the optimistic pass uses it to spot dead code, and
+;; constant folding refuses to fire on it. Reporting `false` where `true` was possible
+;; loses an optimisation and never breaks correctness, so this errs toward `false`.
+(defn val-high? [(x Val)] (-> bool) (= (load (field x kinds)) VK-NONE))
+
+;; Exactly one kind, pinned to one inhabitant. `undefined` and `null` are single-inhabitant
+;; kinds, so naming the kind is naming the value. Booleans reuse the int axis (0 or 1).
+(defn val-const? [(x Val)] (-> bool)
+  (let [k (load (field x kinds))]
+    (if (= k VK-UNDEF) true
+      (if (= k VK-NULL) true
+        (if (or (= k VK-INT) (= k VK-BOOL)) (= (load (field x ilo)) (load (field x ihi)))
+          (if (= k VK-FLT) (= (load (field x fsz)) FSZ-CON)
+            (if (= k VK-FUN) (= (popcount64 (load (field x fidxs))) 1)
+              false)))))))
+
+;; Bit population count. Used for "is this a single function" and for printing.
+(defn popcount64 [(x i64)] (-> i64)
+  (let [(mut v) x (mut n) 0]
+    (loop
+      (if (= (load v) 0) (break)
+        (do (store! v (& (load v) (- (load v) 1)))
+            (store! n (+ (load n) 1))
+            0)))
+    (load n)))
+
+; ============================================================================
+; Ty: the full type
+; ============================================================================
+;; A closed set of mutually exclusive shapes, so `match` is exhaustive and forgetting a
+;; kind in `meet` is a compile error rather than a silent miscompile. Children of a tuple
+;; are type *ids* in a side array, which keeps this sum small and non-recursive.
+(defsum Ty
+  (TBot)                              ; ALL: the bottom of everything, "mixed unrelated"
+  (TTop)                              ; ANY: the top
+  (TCtrl)                             ; control, reachable
+  (TXCtrl)                            ; control, unreachable (the dual of TCtrl)
+  (TVal   [(v Val)])                  ; a dynamic value
+  (TTuple [(off i64) (len i64)]))     ; parallel types; members live in the kid array
+
+(defn ty-tag [(t Ty)] (-> i64)
+  (match t (TBot [] 0) (TTop [] 1) (TCtrl [] 2) (TXCtrl [] 3) (TVal [v] 4) (TTuple [o l] 5)))
+
+; ============================================================================
+; The interning table
+; ============================================================================
+(defstruct Types
+  [(tab    (ArrayList Ty))       ; id -> Ty
+   (duals  (ArrayList i64))      ; id -> the id of its dual
+   (kids   (ArrayList i64))      ; tuple members, addressed by (off, len)
+   (intern (HashMap Ty i64))     ; Ty -> id
+   (inited bool)])
+
+;; The one global. Coil has no top-level mutable binding; `alloc-static` in a zero-arg
+;; accessor returns the same cell every call, which is the idiom for a singleton.
+(defn types [] (-> (ptr Types))
+  (let [p (alloc-static Types)]
+    (if (load (field p inited)) 0
+      (do (store! (field p inited) true)   ; set FIRST: seeding re-enters through `types`
+          (store! (field p tab)    (al-new [Ty] (malloc-allocator)))
+          (store! (field p duals)  (al-new [i64] (malloc-allocator)))
+          (store! (field p kids)   (al-new [i64] (malloc-allocator)))
+          (store! (field p intern) (hm-new [Ty i64] (malloc-allocator) (ty-keyops)))
+          (ty-seed p)
+          0))
+    p))
+
+(defn ty-kid [(off i64) (i i64)] (-> i64)
+  (al-get (load (field (types) kids)) (+ off i)))
+
+;; Structural equality. Tuples compare by their MEMBERS, not by where those members happen
+;; to sit in the kid array, or two structurally identical tuples would intern separately.
+(defn ty-eq [(p Ty) (q Ty)] (-> bool)
+  (if (!= (ty-tag p) (ty-tag q)) false
+    (match p
+      (TBot   [] true)
+      (TTop   [] true)
+      (TCtrl  [] true)
+      (TXCtrl [] true)
+      (TVal [vp] (match q
+                   (TVal [vq] (val-eq vp vq))
+                   (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+                   (TTuple [o l] false)))
+      (TTuple [op lp] (match q
+                        (TTuple [oq lq] (and (= lp lq) (ty-kids-eq op oq lp)))
+                        (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+                        (TVal [v] false))))))
+
+(defn ty-kids-eq [(oa i64) (ob i64) (n i64)] (-> bool)
+  (let [(mut i) 0 (mut same) true]
+    (loop
+      (if (or (>= (load i) n) (not (load same))) (break)
+        (do (if (!= (ty-kid oa (load i)) (ty-kid ob (load i))) (store! same false) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load same)))
+
+(defn ty-hash [(p Ty)] (-> i64)
+  (match p
+    (TBot   [] 1099511628211)
+    (TTop   [] 2199023255551)
+    (TCtrl  [] 3331113965338635107)
+    (TXCtrl [] 8493516592567629853)
+    (TVal [v] (hash-step (val-hash v) 4))
+    (TTuple [o l] (ty-kids-hash o l 0 (hash-step 5 l)))))
+
+(defn ty-kids-hash [(off i64) (n i64) (i i64) (h i64)] (-> i64)
+  (if (>= i n) h (ty-kids-hash off n (+ i 1) (hash-step h (ty-kid off i)))))
+
+(impl Eq Ty (= [(x Ty) (y Ty)] (-> bool) (ty-eq x y)))
+
+;; HashMap keys are compared through a KeyOps vtable of byte-pointer callbacks. These two
+;; wrappers load the slot and hand off to the value-level functions above, so the
+;; structural definition of equality lives in exactly one place.
+(defn ty-keyhash [(slot (ptr i8)) (n i64)] (-> i64)
+  (ty-hash (load (cast (ptr Ty) slot))))
+(defn ty-keyeq [(ka (ptr i8)) (kb (ptr i8)) (n i64)] (-> bool)
+  (ty-eq (load (cast (ptr Ty) ka)) (load (cast (ptr Ty) kb))))
+(defn ty-keyops [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of ty-keyhash))
+    (store! (field o eq)   (fnptr-of ty-keyeq))
+    (store! (field o size) (sizeof Ty))
+    o))
+
+; ---------------------------------------------------------------------------
+; Interning, with duals installed in pairs
+; ---------------------------------------------------------------------------
+(defn ty-get [(t i64)] (-> Ty) (al-get (load (field (types) tab)) t))
+(defn ty-count [] (-> i64) (al-len [Ty] (load (field (types) tab))))
+
+(defn ty-push [(p (ptr Types)) (t Ty)] (-> i64)
+  (let [id (al-len [Ty] (load (field p tab)))]
+    (al-push! [Ty]  (field p tab)   t)
+    (al-push! [i64] (field p duals) TY-NO-ID)
+    (hm-put! [Ty i64] (field p intern) t id)
+    id))
+
+(defn ty-lookup [(p (ptr Types)) (t Ty)] (-> i64)
+  (match (hm-get (load (field p intern)) t) (Some [id] id) (None [] TY-NO-ID)))
+
+;; Intern a type and return its id. A type and its dual are installed together, so
+;; `ty-dual` is a table read rather than a computation, and `dual(dual(x)) == x` holds by
+;; construction instead of by luck.
+(defn ty-intern [(t Ty)] (-> i64)
+  (let [p (types) found (ty-lookup p t)]
+    (if (!= found TY-NO-ID) found
+      (let [id (ty-push p t)
+            d  (ty-xdual t)]
+        (if (ty-eq d t)
+            (al-set! [i64] (field p duals) id id)          ; self-dual: on the centreline
+          (let [did0 (ty-lookup p d)
+                did  (if (= did0 TY-NO-ID) (ty-push p d) did0)]
+            (al-set! [i64] (field p duals) id did)
+            (al-set! [i64] (field p duals) did id)))
+        id))))
+
+(defn ty-dual [(t i64)] (-> i64)
+  (al-get (load (field (types) duals)) t))
+
+;; The structural dual, used only while interning. Tuple members are already interned, so
+;; their duals are a table read and this does not recurse indefinitely.
+(defn ty-xdual [(t Ty)] (-> Ty)
+  (match t
+    (TBot   [] (TTop))
+    (TTop   [] (TBot))
+    (TCtrl  [] (TXCtrl))
+    (TXCtrl [] (TCtrl))
+    (TVal [v] (TVal (val-dual v)))
+    (TTuple [off len] (ty-tuple-of-duals off len))))
+
+(defn ty-tuple-of-duals [(off i64) (len i64)] (-> Ty)
+  (let [p (types)
+        noff (al-len [i64] (load (field p kids)))
+        (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (al-push! [i64] (field p kids) (ty-dual (ty-kid off (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (TTuple noff len)))
+
+; ============================================================================
+; meet / join / isa
+; ============================================================================
+(defn ty-meet [(a i64) (b i64)] (-> i64)
+  (if (= a b) a
+    (let [ta (ty-get a) tb (ty-get b)]
+      (match ta
+        (TBot   [] (t-bot))
+        (TTop   [] b)
+        (TCtrl  [] (ty-meet-ctrl b true))
+        (TXCtrl [] (ty-meet-ctrl b false))
+        (TVal [va] (match tb
+                     (TBot   [] (t-bot))
+                     (TTop   [] a)
+                     (TCtrl  [] (t-bot))
+                     (TXCtrl [] (t-bot))
+                     (TVal [vb] (ty-intern (TVal (val-meet va vb))))
+                     (TTuple [o l] (t-bot))))
+        (TTuple [oa la] (match tb
+                          (TBot   [] (t-bot))
+                          (TTop   [] a)
+                          (TCtrl  [] (t-bot))
+                          (TXCtrl [] (t-bot))
+                          (TVal [v] (t-bot))
+                          (TTuple [ob lb] (if (!= la lb) (t-bot)
+                                            (ty-meet-tuples oa ob la)))))))))
+
+;; Control against anything: control meets control (reachable wins, since reachable is the
+;; low element), and control mixed with a value or a tuple is genuinely unrelated.
+(defn ty-meet-ctrl [(b i64) (a-reachable bool)] (-> i64)
+  (match (ty-get b)
+    (TBot   [] (t-bot))
+    (TTop   [] (if a-reachable (t-ctrl) (t-xctrl)))
+    (TCtrl  [] (t-ctrl))
+    (TXCtrl [] (if a-reachable (t-ctrl) (t-xctrl)))
+    (TVal [v]      (t-bot))
+    (TTuple [o l]  (t-bot))))
+
+(defn ty-meet-tuples [(oa i64) (ob i64) (n i64)] (-> i64)
+  (let [p (types)
+        noff (al-len [i64] (load (field p kids)))
+        (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (al-push! [i64] (field p kids) (ty-meet (ty-kid oa (load i)) (ty-kid ob (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (ty-intern (TTuple noff n))))
+
+;; join(a,b) = ~(~a meet ~b). Defined, not implemented: the lattice has one primitive.
+(defn ty-join [(a i64) (b i64)] (-> i64)
+  (ty-dual (ty-meet (ty-dual a) (ty-dual b))))
+
+;; `a isa b` iff meeting them lands on b, i.e. b is at or above a.
+(defn ty-isa [(a i64) (b i64)] (-> bool) (= (ty-meet a b) b))
+
+(defn ty-high? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TBot   [] false)
+    (TTop   [] true)
+    (TCtrl  [] false)
+    (TXCtrl [] true)
+    (TVal [v] (val-high? v))
+    (TTuple [o l] false)))
+
+(defn ty-const? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TBot   [] false)
+    (TTop   [] false)
+    (TCtrl  [] false)
+    (TXCtrl [] false)
+    (TVal [v] (val-const? v))
+    (TTuple [o l] false)))
+
+; ============================================================================
+; Well-known types
+; ============================================================================
+;; Seeded in a fixed order so the ids are stable, which is what makes printed IR and
+;; golden tests comparable across runs.
+(defn ty-seed [(p (ptr Types))] (-> i64) 0)
+
+(defn t-bot   [] (-> i64) 0)
+(defn t-top   [] (-> i64) 1)
+(defn t-ctrl  [] (-> i64) 2)
+(defn t-xctrl [] (-> i64) 3)
+
+;; A value of a given kind set, with every refinement at the BOTTOM of its axis: the least
+;; type with those kinds. The int axis is fully widened, since this is already the widest
+;; integer range and cannot usefully widen further.
+(defn t-kinds [(kinds i64)] (-> i64)
+  (ty-intern (TVal (val-make kinds TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-LOW 0 -1 -1))))
+
+(defn t-dyn    [] (-> i64) (t-kinds VK-MASK))    ; any value at all
+(defn t-nodyn  [] (-> i64) (ty-dual (t-dyn)))    ; ~dyn: a value slot, but no value fits
+(defn t-num    [] (-> i64) (t-kinds VK-NUM))
+(defn t-int    [] (-> i64) (t-kinds VK-INT))
+(defn t-flt    [] (-> i64) (t-kinds VK-FLT))
+(defn t-str    [] (-> i64) (t-kinds VK-STR))
+(defn t-bool   [] (-> i64) (t-kinds VK-BOOL))
+(defn t-undef  [] (-> i64) (t-kinds VK-UNDEF))
+(defn t-null   [] (-> i64) (t-kinds VK-NULL))
+(defn t-obj    [] (-> i64) (t-kinds VK-OBJ))
+(defn t-fun    [] (-> i64) (t-kinds VK-FUN))
+
+;; A narrow value: refinements pinned on the named axis, every other axis at its bottom so
+;; that meeting with a wider type of the same kind behaves.
+(defn t-int-range [(lo i64) (hi i64)] (-> i64)
+  (ty-intern (TVal (val-make VK-INT lo hi 0 FSZ-LOW 0 -1 -1))))
+(defn t-int-con [(v i64)] (-> i64) (t-int-range v v))
+
+(defn t-bool-con [(b bool)] (-> i64)
+  (let [n (if b 1 0)]
+    (ty-intern (TVal (val-make VK-BOOL n n 0 FSZ-LOW 0 -1 -1)))))
+
+(defn t-flt-bits [(bits i64)] (-> i64)
+  (ty-intern (TVal (val-make VK-FLT TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-CON bits -1 -1))))
+(defn t-flt-con [(x f64)] (-> i64) (t-flt-bits (f64-bits x)))
+
+(defn t-fun-set [(fidxs i64)] (-> i64)
+  (ty-intern (TVal (val-make VK-FUN TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-LOW 0 fidxs -1))))
+(defn t-fun-con [(fidx i64)] (-> i64) (t-fun-set (<< 1 fidx)))
+
+(defn t-obj-shapes [(shapes i64)] (-> i64)
+  (ty-intern (TVal (val-make VK-OBJ TY-IMIN TY-IMAX TY-WIDEN-MAX FSZ-LOW 0 -1 shapes))))
+(defn t-obj-shape [(shape i64)] (-> i64) (t-obj-shapes (<< 1 shape)))
+
+(defn t-tuple2 [(a i64) (b i64)] (-> i64)
+  (let [p (types) off (al-len [i64] (load (field p kids)))]
+    (al-push! [i64] (field p kids) a)
+    (al-push! [i64] (field p kids) b)
+    (ty-intern (TTuple off 2))))
+
+(defn t-tuple3 [(a i64) (b i64) (c i64)] (-> i64)
+  (let [p (types) off (al-len [i64] (load (field p kids)))]
+    (al-push! [i64] (field p kids) a)
+    (al-push! [i64] (field p kids) b)
+    (al-push! [i64] (field p kids) c)
+    (ty-intern (TTuple off 3))))
+
+; ---------------------------------------------------------------------------
+; Widening: how an interval axis is forced to converge
+; ---------------------------------------------------------------------------
+;; Bump the widening counter; once it is spent, fall to the bottom of the int axis. A loop
+;; induction variable's range would otherwise creep upward forever and the optimistic pass
+(defn f64-bits [(x f64)] (-> i64) (let [p (alloc-stack f64)] (store! p x) (load (cast (ptr i64) p))))
+(defn bits-f64 [(b i64)] (-> f64) (let [p (alloc-stack i64)] (store! p b) (load (cast (ptr f64) p))))
+(defn main [] (-> i64) 0)

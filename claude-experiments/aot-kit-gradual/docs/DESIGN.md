@@ -1,0 +1,550 @@
+# Design
+
+An ahead-of-time compiler toolkit built on a sea-of-nodes IR, aimed at dynamic languages and
+at languages that layer types over a dynamic base. Written in [Coil](https://github.com/jimmyhmiller/PlayGround/tree/master/coil).
+
+The performance target is "as good as V8, without a JIT". The decisions that make that
+plausible are recorded in [DECISIONS.md](DECISIONS.md); this document is the architecture.
+
+**This document describes the whole intended architecture, including parts that do not exist yet.**
+That is deliberate, because several of the choices in the built parts only make sense against the
+unbuilt ones: the GC contract shapes the IR before there is a collector, and the backend's narrow
+`MachNode` interface is why the node set looks the way it does. But it means you cannot read this as
+a map of the source tree, so each section is marked:
+
+| | |
+|---|---|
+| **BUILT** | in the tree, with a gate behind it |
+| **PARTIAL** | some of it exists; the section says which |
+| **DESIGNED** | not written yet; this is the intended shape |
+
+For what actually exists today, see the status table in [ROADMAP.md](ROADMAP.md) and the module map
+in [../README.md](../README.md).
+
+---
+
+## 1. Shape of the pipeline
+
+**PARTIAL.** Parse, Specialise, Select, GCM, LocalSched, RegAlloc, Encode and Export do not exist. Opto exists as peepholes plus `g-analyze!`; the interprocedural pass is M7. Verify and LoopTree are built.
+
+```
+  source (dyn, later TypeScript)
+      |
+      v
+  [Parse]        s-expressions -> AST -> sea-of-nodes IR, with peepholes running during build
+      |
+      v
+  [Opto]         pessimistic peepholes to fixpoint, then OPTIMISTIC INTERPROCEDURAL dataflow
+      |          (this is the type inference engine; it also builds the call graph)
+      v
+  [Specialise]   clone monomorphic versions per observed argument shape; insert guards;
+      |          keep the generic version as the fallback
+      v
+  [Verify]       graph well-formedness + GC invariants R1/R2 + lattice sanity
+      |
+      v
+  [LoopTree]     loop nesting, break never-exit loops, place loop-back safepoints
+      |
+      v
+  [Select]       ideal nodes -> machine nodes (arm64 first)
+      |
+      v
+  [GCM]          global code motion: build the CFG, place each node in its best block
+      |
+      v
+  [LocalSched]   list-schedule within each block
+      |
+      v
+  [RegAlloc]     graph-colouring allocation with live-range splitting
+      |
+      v
+  [Encode]       instruction encoding, cold-block outlining, STACK MAP emission
+      |
+      v
+  [Export]       Mach-O object (ELF later), linked with cc
+```
+
+Phases are re-runnable and each has a dump. `Verify` is not a single phase in practice: it is
+a function called after every phase when assertions are on.
+
+The pipeline order is Simple's, and deliberately so: instruction selection *before* global
+code motion is what lets the scheduler see real machine costs. The phases that do not exist
+in Simple at all are `Specialise`, `Verify` and stack-map emission, plus safepoint placement
+inside `LoopTree`.
+
+---
+
+## 2. The IR core
+
+**BUILT.** `src/node.coil`.
+
+### Nodes
+
+A node is `(op, type, inputs, outputs)`. Inputs are use-def edges, ordered and possibly null,
+with input 0 conventionally the controlling `CFG` node. Outputs are the def-use direction,
+unordered, maintained automatically so the graph is walkable both ways.
+
+Nodes are addressed by dense `NodeId` integers into an arena. See
+[D5](DECISIONS.md#d5-written-in-coil-node-and-type-handles-are-integer-ids).
+
+Three behaviours define an op, and they are the whole optimiser:
+
+- **`compute()`**: the node's type, from its inputs' types. Must be **monotone**: given
+  inputs that only fall in the lattice, the output only falls. This is what makes the
+  optimistic dataflow pass terminate and be correct.
+- **`idealize()`**: a local graph rewrite returning a better node, or nothing. Algebraic
+  identities, control-flow collapse, load-after-store forwarding.
+- **`hash()`/`eq()`**: structural identity, for global value numbering.
+
+`peephole()` = `compute()`, then replace with a constant if the type is a constant, then
+`idealize()`, then GVN. Running it during parsing means the graph is never much larger than
+it needs to be.
+
+### The worklist
+
+Iterative peepholes run to a fixpoint on a worklist. A node goes back on the worklist when
+any input changes, and additionally when a node it *depends on* changes, where "depends on" is
+recorded explicitly by any peephole that inspected a non-input node. Missing dependency
+tracking is the classic source of a stale graph that is wrong only under some visit orders,
+so the worklist is seeded with a **deterministic pseudo-random order** in tests: the same
+program must optimise identically regardless of the seed, and we test several seeds.
+
+The dependency is recorded on the node whose TYPE was inspected, which for `phi-compute` is the
+region's control INPUT and not the region: a region already reachable does not change type when a
+second path goes live, so a dep recorded on it is never flushed. That one lost `.in(i)` relative to
+Simple's `PhiNode.compute` published a phi type that excluded a value the program produces.
+
+### Proven, versus the optimistic answer so far
+
+An analysis may act on a high type; an irreversible rewrite may not. The distinction the IR needs is
+sharper than high versus low, and getting it wrong produced seven separate miscompiles:
+
+- **ANY is the absence of information.** It is what `n-new` seeds a type to and what a missing input
+  reads as. Every OTHER high type is a CLAIM someone computed: XCtrl says a control edge is dead,
+  `~dyn` and `int=~[5..8]` say no value fits. `ty-unanalysed?` is the test; `ty-high?` cannot make
+  that distinction and must not be used for it.
+- **XCtrl is the HIGH element of the control axis**, so `meet(~ctrl, ctrl)` is `ctrl` and "exactly
+  `~ctrl`" is not proof of anything on its own. It is proof only once nothing its type depends on can
+  still move.
+- **A type is PROVEN when its whole input cone is at a fixpoint**, which is what `n-ty-proven?`
+  answers, and every irreversible rewrite asks it. It has to be transitive because `phi-compute`
+  skips region paths whose control is still high (which is load-bearing for loops: a loop phi must
+  report its entry value while the back edge is unanalysed, or phi, exit test and back edge all wait
+  on each other at ANY). A Phi's type is therefore provisional while its own type and its inputs'
+  types are all low, which no local check can see. And "not ANY" is not enough either: a stale LOW
+  type is exactly as provisional, so the test is the fixpoint condition itself.
+- **A refused rewrite is DEFERRED, not declined**, so `iterate!` sweeps: drain the worklist, and if
+  that drain changed anything, push every live node and drain again. Nothing else re-queues a node
+  whose blocker's type never changes again.
+
+`compute` correspondingly never manufactures a claim from an absence: `region-compute` and
+`if-compute` report ANY while an input they would draw a conclusion from is unanalysed.
+
+### Op definitions in one place
+
+Each op needs a label, an arity contract, `compute`, `idealize`, hash/eq, a printer, and later
+a register mask and an encoder. Hand-writing seven parallel `case` arms per op is how the
+tables drift apart. Once the required set of per-op behaviours has stabilised (roughly after
+the first dozen ops), a `defnode` metaprogram generates the enum, the tables and the dispatch
+skeletons from a single declaration. Until then they are hand-written, because generating from
+a shape we have not yet validated is worse than a little duplication.
+
+---
+
+## 3. The type lattice
+
+**BUILT.** `src/ty.coil`, gated by `tests/ty-test.coil`.
+
+This is where the design departs from Simple most, and it is the piece most worth getting
+right first: `compute()` for every op is a function into this lattice, so an error here is an
+error everywhere.
+
+### The construction, and why it is uniform
+
+Types form a symmetric bounded lattice with `meet` (greatest lower bound) and an involutive
+`dual` (`~`). `join(a,b) = ~(~a meet ~b)`. `a isa b` iff `meet(a,b) == b`. Types are
+**interned**, so structural equality is pointer/id equality and cyclic types do not require
+exponential comparisons.
+
+**Orientation, because it reads backwards.** `ANY` is the top and means "nothing is known
+yet, no value is possible"; `ALL` is the bottom and means "any value at all". Analysis starts
+at `ANY` and *falls* toward `ALL` as it learns. So a more specific type is **higher**, and
+`a isa b` means "a is at least as specific as b". That makes `x isa ALL` true for every `x`,
+and `ANY isa x` true for every `x`, which is the opposite of the reflex most people bring
+from subtyping. It is Simple's convention, it is what makes the optimistic pass a monotone
+fall, and it is pinned by an explicit test so it cannot quietly flip.
+
+Every axis of every type is stored so that:
+
+- **`meet` is the widening or union operation on the stored representation**, and
+- **`dual` is the complementing operation on the stored representation**,
+
+with "high" (optimistic, above the centreline) detected by the stored form being *inverted*
+or *empty*. Simple establishes this twice, and both are reused verbatim:
+
+- integer ranges store `(min, max)`; `meet` is `(min(min), max(max))`, `dual` swaps them, and
+  `min > max` means high. An inverted range under a widening meet computes exactly the
+  semantic intersection of the high elements.
+- function-pointer sets store a `fidx` bitset; `meet` is bitwise OR, `dual` is bitwise NOT,
+  and the empty set is the top of that axis.
+
+Adopting one rule for every axis is what keeps the lattice laws provable rather than hoped
+for.
+
+### Termination
+
+Bitset axes are finite and converge on their own. Interval axes do not: a loop induction
+variable can widen forever. Simple's answer is a small **widening counter** carried in the
+type; after a few widenings on the same axis the type falls straight to that axis' bottom.
+We keep it, and the lattice test suite includes "every ascending chain terminates" as a
+property.
+
+### The value axis: what a dynamic value is
+
+The bottom of the value sublattice is `Dyn`, the union of every value kind. It sits strictly
+above `BOTTOM`, which remains reserved for "unrelated types were mixed" and for the non-value
+types (control, memory, RPC, tuples).
+
+A value type is a **kind bitset** plus per-kind refinements:
+
+```
+  kinds : bitset of { undefined, null, bool, int, flt, str, sym, bigint, obj, fun }
+  int   : (lo, hi, widen)          when int   is present
+  flt   : (lo, hi) or a constant   when flt   is present
+  obj   : a set of shape ids       when obj   is present
+  fun   : a fidx bitset            when fun   is present
+```
+
+`meet` unions the kinds and meets each refinement; `dual` complements the kinds and duals each
+refinement. Unions are therefore first class, which matters far more than it sounds: the
+difference between `number` and `number | undefined` is the difference between a load and a
+load plus a branch, and TypeScript code is full of the latter.
+
+`int` is a separate kind from `flt` even though JavaScript has one number type. That split is
+the single highest-value refinement in the lattice: it is what turns `a + b` into an integer
+add. `number` is simply `int | flt`.
+
+### Where TypeScript types enter
+
+An annotation becomes a `Cast` at the boundary where the value enters annotated code. The
+optimistic interprocedural pass then computes what actually flows there. If the computed type
+`isa` the annotation, `Cast.idealize` folds the cast away and the annotation cost nothing. If
+not, the cast stays as a guard, and the code behind it is entered conditionally. This is
+[D1](DECISIONS.md#d1-closed-world-verified-types-speculative-monomorphisation-with-generic-backups)
+made mechanical: annotations are discharged, never assumed.
+
+### Shapes
+
+An object's layout is a **shape** (a hidden class): an ordered list of `(name, type, offset)`
+fields plus a shape id. Shape ids are lattice elements in their own right, so "this is an
+object with shape #7" is a type, and a field load through a known shape is a fixed-offset
+load. Shape *sets* let a polymorphic site stay precise (two shapes, two inline paths) instead
+of collapsing to a dictionary lookup. Shape transitions (adding a field) are edges in a shape
+graph built at compile time from the whole program.
+
+**The table**, `src/shape.coil`. Shape 0 is the field-less root. `shape-transition s name ty`
+returns the shape with that field added, and is **memoised on `(s, name)`**, so the transition
+graph a whole-program build produces is a function of the program and not of visit order, and
+re-adding a field is the same edge. Fields live in a reserved window of one side array addressed
+by `(off, len)`, exactly as tuple members do and for exactly the reason recorded at
+`ty-tuple-open`: a producer that interns while filling a window corrupts it, so windows are
+reserved and then written in place, and a slot nobody filled is a named panic.
+
+**Layout is stated once.** Field `i` of any shape sits at `8 * (SHAPE-HEADER-WORDS + i)` with
+`SHAPE-HEADER-WORDS = 1`, which is the only statement anywhere of where the hidden-class word
+sits. The stride is 8 because [D3](DECISIONS.md#d3-nan-boxing-with-boxunbox-as-real-ir-nodes)
+makes a dynamic value one 64-bit word, so there is no per-field size and no alignment arithmetic.
+
+**Bounds, with named failures.** `SHAPE-MAX` and `ALIAS-MAX` are both 64 and both live in
+`src/ty.coil`, because both are the width of a single-word bitset *in the lattice*: `Val.shapes`
+and `TMem.aliases`. They are not policy numbers. Allocating the 65th aborts by name at the site
+that turns a number into a bit (`t-obj-shape`, `t-mem-alias`, and `shape-transition`), because
+`1 << 64` is not "shape 64", it is the EMPTY set, which is the *top* of that axis and reads as
+"no object fits" — an optimistic analysis handed that would delete live code. Given that a
+transition is 4a's only alias allocator and the transition graph is a tree, aliases always equal
+shapes − 1, so `SHAPE-MAX` is reached one edge before `ALIAS-MAX` can be; that relation is
+asserted rather than assumed (`shape-alias-invariant-ok?`) precisely because 4b adds a second
+alias allocator (the header word) and it stops holding then.
+
+**Two things a shape id does not do.** It is opaque to `meet`, exactly as a `fidx` is, so the
+lattice never asks whether a shape exists and "is this a defined shape" is answerable only by the
+table. And a shape never appears *in* a type; only its id does. So the shape table has no
+round-trippable textual form yet, and `shape-print` is deliberately a debug form only.
+
+**"This shape does not carry that field" is a legitimate answer, not a stub.** `shape-find-field`
+returns absent, and Simple's `Load.compute` depends on that: a field missing from the pointer's
+shape lifts to TOP on a high pointer and falls to the declared type on a low one, which is how a
+two-shape site keeps two inline paths. Every other refusal in the table is a named hard error: a
+duplicate field on a chain, an existing edge whose declared type disagrees, a field declared to
+hold something a memory word cannot hold, an undefined shape id, and both bounds.
+
+---
+
+## 4. Memory, effects, and objects
+
+**PARTIAL.** Shapes, their alias classes, the memory type and all four memory ops are built and run
+(`src/shape.coil`, `src/ty.coil`, `src/node.coil`, `src/eval.coil`). What is not built is the
+REWRITING: load-after-store forwarding, store-after-store elimination and dead-store removal are
+M4's remaining work (slice 4c).
+
+Memory is in SSA form, split into **alias classes**. Each field of each shape gets an alias
+number; a `Store` produces a new memory value for exactly its alias, and a `Load` consumes
+the memory of exactly its alias. `MemMerge` and memory `Phi`s join them at control flow
+merges.
+
+The payoff is that load-after-store forwarding, store elimination and code motion all fall
+out of ordinary dataflow on the memory edges, with no separate alias analysis pass. The cost
+is that allocation must name every alias it touches: a `New` node takes the memory of every
+alias it initialises and produces a projection per alias, which is what makes a freshly
+allocated object's fields provably not aliased with anything else.
+
+### The four ops, and what their inputs mean
+
+```
+  New      (ctrl, mem-of-field-0, ...)   aux = the shape.  A MULTI node: tuple slot 0 is the
+                                         object, slot 1+i is field i's new memory. Input slot
+                                         1+i and output slot 1+i are the same alias class.
+  Load     (_, mem, ptr)                 aux = the alias
+  Store    (_, mem, ptr, val)            aux = the alias
+  MemMerge (_, mem, mem, ...)            one memory over the union of theirs
+  Return   (ctrl, val, mem?)             the exit carries the program's final memory
+```
+
+Three decisions here are not forced by the design above and are worth stating.
+
+**Only `New` has a real control input.** A memory op is ordered by its memory edge and by nothing
+else, which is the property that makes forwarding ordinary dataflow; slot 0 of a Load, a Store and a
+MemMerge is the same unconstrained anchor an `Add` has. An allocation is the exception because two
+executions of it are two objects, so its identity is a function of the block it is in and it cannot
+float. That is also why `op-gvn?` excludes `New`: two structurally identical allocations are two
+objects, and merging them produces a graph that is internally consistent, verifies clean, and has
+lost an object.
+
+**A Store MEETS the incoming contents rather than replacing it.** `TMem(aliases, contents)` says
+that every value in any of those classes is described by `contents`, so `o.x = 5` leaves every other
+object in class x holding what it held and the new state's contents is `meet(old, 5)`. Taking `5`
+would be the precise answer for `o` and a lie about the class, and a Load reading it would fold a
+different object's field to a constant it never held. The consequence is that a load in 4b reports
+the union of everything its class holds — `undefined|int`, not `int=5` — and 4c's forwarding is
+therefore STRUCTURAL, by pointer identity, which is a fact about the graph that no alias-level type
+could have recovered. The exact union is pinned in `tests/mem-test.coil` so that 4c is measured
+against what 4b earned.
+
+**The field's declared type is not joined into a Load.** `shape-alias-ty` records what the front end
+SAID; the contents is what the analysis PROVED. In a dynamic language the two disagree routinely, so
+joining them would either mint a high type for the disagreement (which reads as dead code) or make
+the annotation load-bearing for correctness. D4 says a narrowing needs a guard, and a declared type
+is not one.
+
+**A memory `Phi` is an ordinary `Phi`,** which is why Law 5 needed no new code: `region-remove-path!`
+drops a memory phi's arm with the region path because a memory phi IS a Phi. The same is true in the
+interpreter, where a memory state is a value and is committed at a merge with everything else.
+
+### The memory type
+
+A memory state is a lattice element in its own right: `TMem(aliases, contents)`, a separate
+production of `Ty` rather than an axis of `Val`, because memory is not a value — it never boxes,
+never flows through arithmetic, and `meet`ing it with a value is a genuine "unrelated types were
+mixed" and falls to `ALL`. It prints as `mem#<alias-bits> <contents>`. The contents is restricted
+to a value, `ANY` or `ALL`, since a field holds one NaN-boxed word.
+
+**The alias axis is a bitset, and Simple's collapse rule is deliberately not adopted.** Simple's
+`TypeMem.xmeet` reads `alias == that._alias ? alias : 1`: two unequal aliases collapse to its
+"all of memory" alias. Here `meet` is bitwise OR and `dual` is complement, which is what §3's
+uniformity rule already demands of *every* axis, and the reason is arithmetic rather than taste:
+
+```
+  meet(mem#1 dyn, mem#2 dyn) = mem#3 dyn        (bitwise OR: alias classes {0} and {1})
+  mem#3 dyn  isa  mem#-1 dyn   and   mem#3 dyn != mem#-1 dyn
+```
+
+so `mem#3 dyn` is a lower bound of both inputs and lies **strictly above** the collapse rule's
+answer. The collapse rule therefore returns a lower bound that is not the *greatest* one, and it
+is not self-dual, so `dual-reverses-isa` fails on the pair. Note which law does *not* catch it:
+`meet-is-a-lower-bound` still passes, because the collapse answer is still a lower bound. And note
+the failure mode that matters more: with no memory type in `ty-sample`, **nothing** fails, which is
+exactly how M3's `ty-meet-tuples` bug sat behind a green suite because no tuple in the sample had a
+tuple member. The axis choice and the sample entries are therefore one change, not a change and a
+follow-up.
+
+**Widening reaches the contents.** `ty-iwide`, `ty-with-iwide`, `ty-widen` and `ty-widen-from` all
+delegate through `TMem` into its contents. They used to answer 0 / identity for every non-`TVal`,
+and a memory `Phi` on a loop back edge meets a fresh memory type every iteration: with the counter
+invisible, no widening ever lands and the interval creeps by one step per round for ever. The
+symptom is a hang inside a loop-phi fixpoint with nothing reported, which is the worst class of bug
+this project has hit, and the fix is three match arms.
+
+**The delimiter constraint on the printed form is hard, not cosmetic.** `mem#…` contains neither
+`:` nor `<`, because `src/gtext.coil` splits a graph line by scanning for the first `<` after the
+head and the first `:` after ` <- `. A type that printed `mem#2:int` would make every graph line
+carrying memory report `GERR-NO-SEP`. `mem@2` and `mem<2>` were both rejected for that reason, and
+the constraint is asserted byte-wise by a gate rather than left as a comment.
+
+---
+
+## 5. The GC contract
+
+**DESIGNED.** No safepoints, barriers or stack maps exist. The IR is built so they can be added without touching every pass, which is the whole point of [D2](DECISIONS.md#d2-gc-abstract-ir-nodes-collector-policy-chosen-at-lowering), and the verifier is where R1 and R2 will land.
+
+Per [D2](DECISIONS.md#d2-gc-abstract-ir-nodes-collector-policy-chosen-at-lowering) the IR is
+built for a moving collector even before one exists.
+
+### Reference vs raw
+
+`ref` (managed, may move) and `ptr` (raw, never moves) are distinct types. Only `ref` values
+are traced and relocated. Only `ref` values may be safepoint operands.
+
+### Safepoints
+
+A `Safepoint` node takes control, memory, and **every live reference**, and produces a
+relocated projection for each of those references. Uses dominated by the safepoint read the
+projections. Safepoints are placed at:
+
+- every `New` (allocation can trigger a collection),
+- every `Call` (the callee may allocate; a call is a safepoint at its return point),
+- every loop back edge (so a counted loop with no allocation is still interruptible).
+
+Because live refs are real inputs, they are naturally kept alive through code motion and get
+real locations from the register allocator, which is precisely what the stack map needs. And
+because uses read the projections, a collector that moved the object is correct by
+construction.
+
+### Barriers
+
+`Barrier(mem, obj, field, val)` is abstract. Lowering expands it to nothing, to card marking,
+or to a snapshot-at-the-beginning sequence, according to the selected collector. Keeping it
+abstract in the IR means the optimiser can eliminate redundant barriers (same object, same
+block, no intervening safepoint) without knowing which collector will be used.
+
+### Stack maps
+
+At `Encode`, each safepoint emits a stack map: for every live location, whether it holds a
+raw reference, a NaN-boxed word that may contain a reference, or a scalar. Boxed words need
+the distinction because of
+[D3](DECISIONS.md#d3-nan-boxing-with-boxunbox-as-real-ir-nodes).
+
+### The verifier
+
+R1 and R2 are checked mechanically:
+
+- **R1**: no value of raw-pointer type derived from a `ref` is live across a safepoint.
+- **R2**: no use of a reference is dominated by a safepoint that took that reference as an
+  operand, unless it reads the projection.
+
+The verifier runs after every phase in tests. This is what "accounting for the GC from day
+one" means operationally: not a plan to add GC support later, but an invariant that fails the
+build the moment a pass breaks it.
+
+---
+
+## 6. Specialisation
+
+**DESIGNED.** M9. The mechanism it needs, a guard as ordinary control flow with a `Cast` on the taken edge, is built and is a diagram fixture.
+
+After the optimistic interprocedural pass there is a call graph and, for each function, the
+set of argument types that actually reach it.
+
+For each `(callee, argument type tuple)` worth specialising, clone the callee with the
+arguments pinned to that tuple and re-run peepholes; the clone monomorphises. The call site
+becomes a `TypeTest` chain choosing between clones, falling through to the generic version.
+Guard-and-fallback is plain control flow
+([D4](DECISIONS.md#d4-guards-are-control-flow-not-a-node-kind)), so inlining, code motion and
+register allocation need no changes.
+
+Which specialisations exist is a cost model over call-site counts, loop depth and clone size,
+with an optional offline profile as an input. Nothing about correctness depends on the model
+being good; a bad model makes slow code, not wrong code.
+
+---
+
+## 7. Backend
+
+**DESIGNED.** M10. Nothing here exists yet.
+
+Target arm64 (Apple silicon) first, since that is the development machine.
+
+`Select` rewrites ideal nodes into machine nodes. A machine node declares an input register
+mask per input, an output mask, a kill mask, whether it is two-address, whether it commutes,
+whether it is cheaper to rematerialise than to spill, and how to encode itself. That interface
+(Simple's `MachNode`) is the entire porting surface for a new CPU, and keeping it narrow is
+what will make an x86-64 or RISC-V port a contained job rather than a rewrite.
+
+Register allocation is graph colouring: build live ranges, build the interference graph,
+coalesce copies, colour, and on failure split live ranges and repeat. Cold blocks from
+guard fallbacks get high spill preference, which is the main way profile information reaches
+the machine code.
+
+**What we do not write from scratch.** Coil's self-hosted compiler already contains, in Coil:
+`a64.coil` (an AArch64 instruction encoder with label and fixup handling), `macho.coil` (a
+Mach-O object writer with relocations and symbol tables), and `dwarf.coil` (line tables and
+subprogram info). Those solve the mechanical half of a backend and are adapted rather than
+rewritten. What we write is the interesting half: selection, scheduling, allocation, stack
+maps.
+
+---
+
+## 8. Development tooling
+
+**PARTIAL.** The verifier, the interpreter, both textual forms and the Graphviz output are built. `--dump-after`, per-phase timing and the live graph viewer are not.
+
+Tooling is a day-one deliverable, not a follow-up, because a sea-of-nodes graph is
+unreadable without it.
+
+- **Textual IR, printed and parsed**, round-trip tested as an identity
+  ([D7](DECISIONS.md#d7-textual-ir-is-a-first-class-round-trippable-format)). Hand-written
+  graphs are the reduced test cases for optimiser bugs.
+- **`--dump-after=PHASE`** for every phase, in textual IR.
+- **Graphviz output**, with control edges, data edges and memory edges visually distinct.
+- **A verifier** runnable after any phase, checking graph well-formedness, type monotonicity,
+  and the GC invariants.
+- **Deterministic ids and stable printing**, so a golden test diff means something.
+- **Per-phase timing and node counts**, printed on request, so a compile-time regression is
+  visible rather than discovered later.
+- **Lattice property tests**: commutativity, associativity and idempotence of `meet`,
+  involutivity of `dual`, `join`/`meet` duality, reflexivity and transitivity of `isa`,
+  monotonicity of every `compute`, and termination of ascending chains. These run over
+  exhaustively generated small types plus randomly generated large ones.
+
+**The graph text's identity, stated exactly**, because the claim above is the one a reader will
+lean on. Printing a graph and parsing it back is an identity **up to a dense renumbering of the
+live nodes**: `n<k>` in a line is a print INDEX, the node's position in the listing, not its arena
+id, because the arena ids of dead nodes cannot be recreated. Everything else is exact, and every
+field is mandatory: a Const's aux type equals its computed type and is printed anyway, a Region's
+unused slot 0 is always `_` and is printed anyway. An optional field would give two texts for one
+graph, which is the same defect the type format refuses with `TERR-DUP-KIND`, and the one wart the
+type format still has (`int=[min..max]` versus `w0`) is what tolerating a second spelling costs.
+Types are restored from the text rather than recomputed, so a text that lies about a type is a
+verifier violation and not a silently corrected one. What the format does not carry is `outs`
+order, the GVN table, `deps` and `hash`, all of which a parse rebuilds or does not need; a pin
+outside the two roots is refused rather than dropped, since it means a construction window is
+still open. A failed parse leaves the graph in an **unspecified partial state** that the caller
+must not use — the strict entry point reports the failing check by name and stops, precisely so
+that a partial graph is never handed on.
+
+Later, a live graph viewer. Simple drives one over a websocket; the jim editor's widget bus
+is the natural host here.
+
+---
+
+## 9. Deviations from Simple, summarised
+
+| Area | Simple | Here |
+|---|---|---|
+| Source language | statically typed, safe | dynamic, with optional types layered on |
+| Value lattice | int / float / pointer / struct | kind bitset with per-kind refinements; `Dyn` is a real element; unions first class |
+| Numbers | separate int and float types | `int` and `flt` kinds unified as `number`, split back apart by inference |
+| Objects | declared structs, fixed layout | shapes (hidden classes) with a compile-time transition graph, and shape sets |
+| Memory type's alias axis | `alias == that.alias ? alias : 1` collapses to "all of memory" | a bitset: `meet` is OR, `dual` is complement. The collapse rule is not a greatest lower bound and is not self-dual; see §4 for the two-line counterexample |
+| Type annotations | checked by the front end | discharged by whole-program inference, guarded where not provable |
+| Polymorphism | monomorphic by construction | speculative specialisation with a retained generic version |
+| GC | `calloc`, never freed | safepoints with relocating projections, abstract barriers, stack maps, verified invariants |
+| Allocation | `New` per struct | `New` is a safepoint; bump allocation with a slow-path call after lowering |
+| Exceptions | none | planned: calls get exception edges, landing pads are ordinary CFG (see ROADMAP) |
+| Textual IR | printer only | printer and parser, round-trip tested |
+| Backend | x86-64, arm64, RISC-V, ELF | arm64 and Mach-O first, reusing Coil's encoder and object writer |
+
+The two things Simple has that we take almost unchanged are the ones that took it 24 chapters
+to get right: the peephole-plus-worklist engine, and the optimistic interprocedural dataflow
+pass in `Opto` (which already carries an explicit whole-world assumption, builds its own call
+graph as function-pointer types stabilise, and is therefore the closed-world inference engine
+this project needs).

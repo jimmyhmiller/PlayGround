@@ -48,6 +48,7 @@ if cond { ... } else { ... }                    while cond { ... }
 emit(expr);              yield;                 f(a, b)
 a.field                  Account { balance: 100 }
 Shape::Circle { r: 5 }   Shape::Point
+migrate Lamp.lit(old) { if old { return Switch::On; } Switch::Off }
 match s {
     Circle { r } => { ... }                     // binds the variant's fields
     Rect { w, h } => { ... }
@@ -72,6 +73,42 @@ let f = double;          f(21)           // a function VALUE; calls late-bind
   tests and the REPL display.
 
 ## What editing live means, per feature
+
+**Non-type-preserving edits.** An edit does not have to leave the whole program
+well-typed. For example, this is a valid live edit:
+
+```text
+enum Switch { Off, On }
+
+// before                          // after
+struct Lamp { lit: bool }          struct Lamp { lit: Switch }
+```
+
+The same contract applies when a function parameter or result changes from
+`bool` to `Switch`: its callers are dependents and must be rechecked.
+
+The new type version is installed immediately. The runtime then applies these
+rules:
+
+1. Every current function that depends on `Lamp` is rechecked. A function that
+   still treats `lit` as a `bool` is published Broken, and brokenness propagates
+   transitively to its callers. Unaffected functions remain callable.
+2. Entering a Broken function freezes before any instruction in that call runs.
+   Definitions may be repaired in any order and over multiple edits; installing
+   a valid repair rechecks the dependency graph to a fixpoint, so untouched
+   callers revive automatically when their callees become valid again.
+3. Existing `Lamp` values retain their old version until first field access.
+   Because `bool` cannot be copied into `Switch`, that access freezes with
+   `MissingMigration`. Installing a `bool -> Switch` transformer migrates each
+   old value lazily and preserves its object identity.
+4. Code repair and value migration are independent obligations. Either may be
+   supplied first; execution resumes as far as the next unmet obligation and
+   freezes again if necessary. No ill-typed value is published between edits.
+
+Thus a temporarily inconsistent program is a supported live state, not a
+rejected update. Broken definitions and unmigrated values are quarantined behind
+repairable conditions while the rest of the program continues under the new
+world.
 
 **Functions.** A redefinition takes effect at the *next call* (late binding).
 Frames already running keep their pinned version to completion.
@@ -124,7 +161,10 @@ not the running world.
 ## Not yet (deliberately)
 
 Closures (lambdas with captures — function *values* exist, capture-free),
-maps/other collections, modules, generics, migration transformers in surface
-syntax (they are supplied through the engine API / the REPL's `:migrate`).
+maps/other collections, modules, generics, and general migration expressions.
+Migration bodies are ordinary pure language code: `old` has the field's
+previous type and the body must return its new type. Calls, globals, effects,
+and mutation are excluded so an installed migration is deterministic and
+frozen in history.
 Each of these lands the same way everything above did: on every tier at once,
 with its live-evolution semantics defined before its syntax.

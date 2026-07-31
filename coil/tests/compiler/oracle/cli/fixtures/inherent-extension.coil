@@ -1,0 +1,7 @@
+(module inherent_extension)
+(import "inherent-remote.coil" :use [Remote])
+
+; Importing this module brings its extension into the caller. The target itself
+; belongs to a different module, so this also exercises non-local impl targets.
+(impl Remote
+  (remote-mark [(r Remote)] (-> i64) 6))

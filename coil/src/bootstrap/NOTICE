@@ -1,0 +1,69 @@
+Vendored third-party source: Zig stage1 wasm2c
+================================================
+
+The following files in this directory are copied VERBATIM from the Zig
+project's `stage1/` directory (https://github.com/ziglang/zig, path
+`stage1/`). They are the small, self-contained WebAssembly-to-C translator
+Zig uses to bootstrap itself from `zig1.wasm` on any platform with a C
+compiler. We vendor them here to give the Coil compiler the same property:
+a platform-agnostic C bootstrap built from a committed `.wasm` seed.
+
+  wasm2c.c        the translator (wasm -> C)         [MODIFIED — see below]
+  FuncGen.h       per-function codegen state         (pristine)
+  InputStream.h   little-endian / LEB128 reader       [MODIFIED — see below]
+  wasm.h          opcode / section / valtype enums    (pristine)
+  panic.h         panic() helper                      (pristine)
+  LICENSE-ZIG     the MIT (Expat) license these files ship under
+
+License: MIT (Expat). Copyright (c) Zig contributors. See LICENSE-ZIG.
+The MIT license text is retained here in full as required by the license.
+
+--------------------------------------------------------------------------
+Modifications we made (kept as SEPARATE git commits after this pristine
+import, so the diff from upstream stays auditable)
+--------------------------------------------------------------------------
+
+Coil's `coilc.wasm` is a **memory64** module (i64 linear-memory addresses)
+that also uses the **bulk-memory** proposal (memory.copy / memory.fill).
+Upstream stage1 wasm2c targets only wasm32 MVP and rejects these. Our
+changes are the minimal, correct handling required to translate it:
+
+  InputStream.h
+    * InputStream_readLimits(): accept the 64-bit limit flag bytes 0x04 /
+      0x05 (memory64 & table64) in addition to the MVP 0x00 / 0x01. The
+      min/max LEB values are read unchanged (they are ordinary unsigned
+      LEBs regardless of index width).
+
+  wasm2c.c
+    * evalExpr()   (constant-offset evaluator for elem/data segments):
+      also accept i64.const (0x42), needed because memory64 active
+      segments encode their offset as i64.const.
+    * renderExpr() (constant initialiser for globals): also render
+      i64.const (0x42) as UINT64_C(...), needed for the module's i64
+      globals (__heap_base, __stack_pointer, GOT.* ...).
+    * table parsing: allow a table whose limits have no maximum (flag
+      0x04). Such a table cannot grow without table.grow (which this
+      module never uses), so it is sized to its declared minimum. Only
+      the min==max panic is relaxed; sizing already used the minimum.
+    * export handling: emit an accessor for exported GLOBALS (export kind
+      0x03) as `TYPE *const wasm_<name> = &g<idx>;` so the C runtime can
+      read exports such as __heap_base. (Upstream handled only function
+      and memory exports.)
+    * emit a public `void wasm_init(void) { init(); }`. The module's static
+      init() (which allocates linear memory and installs data segments) is
+      otherwise only reachable through an exported function's prologue; the
+      runtime must run it BEFORE writing argv into linear memory and calling
+      main.
+
+  Note on memory64 loads/stores: NO change was needed. Each memory access
+  the translator emits indexes the linear-memory buffer with the address
+  operand popped off the value stack, e.g. `m0[l7 + UINT32_C(off)]`. For a
+  memory64 module that operand is an i64 value, so its C local is declared
+  `uint64_t` (via WasmValType_toC), and the index arithmetic is naturally
+  64-bit. call_indirect likewise indexes the function table with an i64
+  local for table64. bulk-memory memory.copy/memory.fill were already
+  translated by upstream (to memmove/memset); they too Just Work with i64
+  operands. memory.grow / memory.size are never used by this module.
+
+Upstream revision: Zig stage1 wasm2c as downloaded 2026-07-24 from the
+ziglang/zig repository `stage1/` directory.

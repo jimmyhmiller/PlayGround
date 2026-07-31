@@ -1,0 +1,238 @@
+; tests/compiler/oracle/x64/tests/sysv-abi.coil — adversarial SysV AMD64 ABI test.
+;
+; The shared corpus is backend-agnostic, so it exercises the ABI only as much as
+; ordinary programs happen to. The bugs that actually escaped it were all SysV
+; rules with no AAPCS64 analogue, and one of them (a 16-byte aggregate spilled to
+; the stack, written as ONE eightbyte by the caller and read as TWO by the
+; callee) survived all 54 corpus programs and only surfaced when the x64-built
+; compiler tried to compile something — because `run-pipeline` happens to take
+; several slices past the sixth argument.
+;
+; So this file targets the rules directly:
+;   * the register file runs out INDEPENDENTLY for INTEGER and SSE args
+;   * a <=16B aggregate takes one register PER EIGHTBYTE, and each eightbyte's
+;     class (INTEGER vs SSE) is decided separately
+;   * when an aggregate does not fit in the remaining registers the WHOLE thing
+;     goes on the stack — but later arguments keep using registers
+;   * a >16B aggregate is always memory, and a >16B RETURN uses a hidden pointer
+;   * mixed int/float packing decides eightbyte classes by the MERGE rule
+;     (INTEGER dominates SSE within one eightbyte)
+;
+; IMPORTANT SCOPE NOTE. For calls between Coil functions this backend passes
+; aggregates BY POINTER (same as the arm64 backend), so the eightbyte
+; classification only governs the C boundary. This file therefore covers what
+; internal calls DO exercise — register exhaustion, aggregate returns, >16B
+; by-value/sret — and the true eightbyte rules are tested against a real
+; gcc-compiled translation unit in gate-cabi.sh, which is the only way to check
+; them honestly.
+;
+; Every expected value is computed by hand so a wrong ABI shows up as a wrong
+; number rather than a crash. Exit code is 0 on success, or the number of the
+; first failing check.
+(module sysvabi)
+
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+
+; ---- types spanning every SysV classification ----
+(defstruct P1 [(a i64)])                      ; 8B  -> 1 eightbyte, INTEGER
+(defstruct P2 [(a i64) (b i64)])              ; 16B -> 2 eightbytes, INTEGER,INTEGER
+(defstruct F1 [(x f64)])                      ; 8B  -> 1 eightbyte, SSE
+(defstruct F2 [(x f64) (y f64)])              ; 16B -> 2 eightbytes, SSE,SSE
+(defstruct MIX [(x f64) (n i64)])             ; 16B -> SSE,INTEGER  (one class each)
+(defstruct PACK [(a f32) (b f32) (n i64)])    ; 16B -> the two f32s share eightbyte 0
+                                              ;        (SSE), n is eightbyte 1 (INTEGER)
+(defstruct MERGE [(a f32) (n i32) (m i64)])   ; 16B -> eightbyte 0 holds f32+i32, so the
+                                              ;        MERGE rule makes it INTEGER
+(defstruct BIG [(a i64) (b i64) (c i64) (d i64)])  ; 32B -> MEMORY
+
+; There is no early `return` in this language, so checks record the FIRST
+; failing check number into a mutable cell and the program reports it at the
+; end. Every check still runs, which is useful: one ABI mistake usually trips
+; several of them and the pattern says which rule is wrong.
+(defn note-fail! [(firstbad (ptr i64)) (n i64)] (-> i64)
+  (print-str (stderr) "sysv-abi: check ")
+  (print-int (stderr) n)
+  (print-str (stderr) " FAILED\n")
+  (when (icmp-eq (load firstbad) 0) (store! firstbad n) 0)
+  0)
+
+; ============================================================================
+; 1. INTEGER registers run out (6) while SSE registers are still free.
+;    The 7th int spills to the stack; the floats keep using xmm0..xmm2.
+; ============================================================================
+(defn intspill [(a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64)
+                (x f64) (y f64) (z f64)] (-> i64)
+  (iadd (iadd (iadd (iadd a b) (iadd c d)) (iadd (iadd e f) g))
+        (cast i64 (fadd x (fadd y z)))))
+
+; ============================================================================
+; 2. SSE registers run out (8) while INTEGER registers are still free.
+;    The 9th float spills; the ints keep using rdi/rsi.
+; ============================================================================
+(defn ssespill [(x1 f64) (x2 f64) (x3 f64) (x4 f64) (x5 f64)
+                (x6 f64) (x7 f64) (x8 f64) (x9 f64)
+                (a i64) (b i64)] (-> i64)
+  (iadd (cast i64 (fadd (fadd (fadd x1 x2) (fadd x3 x4))
+                        (fadd (fadd (fadd x5 x6) (fadd x7 x8)) x9)))
+        (iadd a b)))
+
+; ============================================================================
+; 3. A 16-byte INTEGER,INTEGER aggregate that does NOT fit in the remaining
+;    registers, so the WHOLE aggregate goes on the stack — while the argument
+;    AFTER it still takes a register. This is the exact bug that broke the
+;    self-host: the caller wrote 8 bytes where the callee read 16.
+; ============================================================================
+; Six ints exhaust rdi/rsi/rdx/rcx/r8/r9, so the pair and the trailing int both
+; land on the stack. For an INTERNAL call the pair goes as a pointer, so what
+; this really pins down is that stack-slot assignment stays consistent between
+; caller and callee once the registers run out. (The eightbyte split itself is
+; a C-boundary rule — see gate-cabi.sh.)
+(defn pairspill [(a i64) (b i64) (c i64) (d i64) (e i64) (h i64) (p P2) (f i64)] (-> i64)
+  ; The three stack-resident values are weighted DIFFERENTLY. A backend that
+  ; writes only the pair's first eightbyte leaves the trailing `f` sitting where
+  ; p.b belongs, so p.b and f swap — with equal weights that is invisible
+  ; (the sum is the same), which is exactly how this bug escaped the first time.
+  (iadd (iadd (iadd (iadd a b) (iadd c d)) (iadd e h))
+        (iadd (iadd (load (field p a)) (imul (load (field p b)) 7))
+              (imul f 31))))
+
+; ============================================================================
+; 4. Two SSE eightbytes (F2), also forced onto the stack, with an int after.
+; ============================================================================
+(defn f2spill [(x1 f64) (x2 f64) (x3 f64) (x4 f64)
+               (x5 f64) (x6 f64) (x7 f64) (q F2) (n i64)] (-> i64)
+  (iadd (cast i64 (fadd (fadd (fadd x1 x2) (fadd x3 x4))
+                        (fadd (fadd x5 x6) x7)))
+        (iadd (cast i64 (fadd (load (field q x)) (load (field q y)))) n)))
+
+; ============================================================================
+; 5. Mixed-class aggregates: one eightbyte in a GPR, the other in an xmm.
+;    MIX is SSE,INTEGER; PACK packs two f32 into one SSE eightbyte; MERGE has
+;    an f32 and an i32 sharing eightbyte 0, which the merge rule makes INTEGER.
+; ============================================================================
+(defn mixed [(m MIX) (p PACK) (g MERGE)] (-> i64)
+  (iadd (iadd (cast i64 (load (field m x))) (load (field m n)))
+        (iadd (iadd (cast i64 (load (field p a))) (cast i64 (load (field p b))))
+              (iadd (load (field p n))
+                    (iadd (cast i64 (load (field g a)))
+                          (iadd (cast i64 (load (field g n))) (load (field g m))))))))
+
+; ============================================================================
+; 6. >16B aggregates are MEMORY in both directions: passed by value on the
+;    stack, and a >16B return uses a hidden pointer (rdi) that must also come
+;    back in rax.
+; ============================================================================
+(defn bigret [(n i64)] (-> BIG)
+  (let [r (alloc-stack BIG)]
+    (store! (field r a) n)
+    (store! (field r b) (iadd n 1))
+    (store! (field r c) (iadd n 2))
+    (store! (field r d) (iadd n 3))
+    (load r)))
+(defn bigsum [(v BIG)] (-> i64)
+  (iadd (iadd (load (field v a)) (load (field v b)))
+        (iadd (load (field v c)) (load (field v d)))))
+; a >16B return AND a >16B by-value argument in the same signature: the hidden
+; sret pointer must not be confused with the first real argument.
+(defn bigboth [(v BIG) (k i64)] (-> BIG)
+  (let [r (alloc-stack BIG)]
+    (store! (field r a) (iadd (load (field v a)) k))
+    (store! (field r b) (iadd (load (field v b)) k))
+    (store! (field r c) (iadd (load (field v c)) k))
+    (store! (field r d) (iadd (load (field v d)) k))
+    (load r)))
+
+; ============================================================================
+; 7. Small aggregates returned in registers: 8B in rax / xmm0, 16B in the
+;    (rax,rdx) / (xmm0,xmm1) / mixed pairs.
+; ============================================================================
+(defn mkp1 [(n i64)] (-> P1)
+  (let [r (alloc-stack P1)] (store! (field r a) n) (load r)))
+(defn mkp2 [(n i64)] (-> P2)
+  (let [r (alloc-stack P2)] (store! (field r a) n) (store! (field r b) (imul n 2)) (load r)))
+(defn mkf1 [(v f64)] (-> F1)
+  (let [r (alloc-stack F1)] (store! (field r x) v) (load r)))
+(defn mkf2 [(v f64)] (-> F2)
+  (let [r (alloc-stack F2)] (store! (field r x) v) (store! (field r y) (fmul v 2.0)) (load r)))
+(defn mkmix [(v f64) (n i64)] (-> MIX)
+  (let [r (alloc-stack MIX)] (store! (field r x) v) (store! (field r n) n) (load r)))
+
+(defn main [] (-> i64)
+  (let [w (stdout)
+        fb (alloc-stack i64)]
+    (store! fb 0)
+    ; ---- 1. int registers exhausted, floats still in registers
+    ; 1+2+3+4+5+6+7 = 28, floats 1.5+2.5+3.0 = 7.0 -> 28+7 = 35
+    (let [r (intspill 1 2 3 4 5 6 7 1.5 2.5 3.0)]
+      (unless (icmp-eq r 35) (note-fail! fb 1)))
+
+    ; ---- 2. SSE registers exhausted, ints still in registers
+    ; 1..9 = 45, ints 10+20 = 30 -> 75
+    (let [r (ssespill 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10 20)]
+      (unless (icmp-eq r 75) (note-fail! fb 2)))
+
+    ; ---- 3. a 16B INTEGER pair spilled whole to the stack, int after it
+    ; 1+2+3+4+5+6 = 21, p={100,200} -> 100 + 200*7 = 1500, f=7 -> 7*31 = 217
+    ; total 21 + 1500 + 217 = 1738. If p.b and f swap the answer is 21 + 100 +
+    ; 7*7 + 200*31 = 6370, so the weights make the mistake visible.
+    (let [p (mkp2 100)
+          r (pairspill 1 2 3 4 5 6 p 7)]
+      (unless (icmp-eq r 1738) (note-fail! fb 3)))
+
+    ; ---- 4. a 16B SSE pair spilled whole to the stack, int after it
+    ; 1..7 = 28, q = {3.0, 6.0} -> 9, trailing 5 -> 42
+    (let [q (mkf2 3.0)
+          r (f2spill 1.0 2.0 3.0 4.0 5.0 6.0 7.0 q 5)]
+      (unless (icmp-eq r 42) (note-fail! fb 4)))
+
+    ; ---- 5. mixed-class eightbytes
+    ; m = {2.0, 5}      -> 2 + 5   = 7
+    ; p = {1.5f,2.5f,4} -> 1 + 2 + 4 = 7   (casts truncate)
+    ; g = {3.5f, 6, 9}  -> 3 + 6 + 9 = 18
+    ; total 32
+    (let [m (alloc-stack MIX)
+          p (alloc-stack PACK)
+          g (alloc-stack MERGE)]
+      (store! (field m x) 2.0)
+      (store! (field m n) 5)
+      (store! (field p a) (cast f32 1.5))
+      (store! (field p b) (cast f32 2.5))
+      (store! (field p n) 4)
+      (store! (field g a) (cast f32 3.5))
+      (store! (field g n) (cast i32 6))
+      (store! (field g m) 9)
+      (let [r (mixed (load m) (load p) (load g))]
+        (unless (icmp-eq r 32) (note-fail! fb 5))))
+
+    ; ---- 6. >16B by value and >16B returned through the hidden pointer
+    ; bigret 10 -> {10,11,12,13}, sum 46
+    (let [v (bigret 10)]
+      (unless (icmp-eq (bigsum v) 46) (note-fail! fb 6))
+      ; both at once: {10,11,12,13} + 5 each -> {15,16,17,18}, sum 66
+      (let [v2 (bigboth v 5)]
+        (unless (icmp-eq (bigsum v2) 66) (note-fail! fb 7))))
+
+    ; ---- 7. small aggregates returned in registers
+    (let [a (mkp1 42)]
+      (unless (icmp-eq (load (field a a)) 42) (note-fail! fb 8)))
+    (let [b (mkp2 7)]
+      (unless (icmp-eq (iadd (load (field b a)) (load (field b b))) 21) (note-fail! fb 9)))
+    (let [c (mkf1 2.5)]
+      (unless (fcmp-eq (load (field c x)) 2.5) (note-fail! fb 10)))
+    (let [d (mkf2 1.5)]
+      (unless (fcmp-eq (fadd (load (field d x)) (load (field d y))) 4.5) (note-fail! fb 11)))
+    (let [e (mkmix 3.5 4)]
+      (unless (fcmp-eq (load (field e x)) 3.5) (note-fail! fb 12))
+      (unless (icmp-eq (load (field e n)) 4) (note-fail! fb 13)))
+
+    ; ---- 8. a by-value aggregate round-trips through a call chain unchanged
+    ; (catches a copy that clobbers its own source pointer)
+    (let [v (bigret 100)
+          v2 (bigboth (bigboth v 1) 2)]
+      ; {100,101,102,103} +1 +2 -> {103,104,105,106}, sum 418
+      (unless (icmp-eq (bigsum v2) 418) (note-fail! fb 14)))
+
+    (if (icmp-eq (load fb) 0)
+        (do (print-str w "sysv-abi: all checks passed\n") 0)
+        (load fb))))

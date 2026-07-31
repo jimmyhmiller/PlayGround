@@ -2,7 +2,13 @@
 // type and functions assigns their ids but runs nothing, which lets the host
 // bind the native implementations before any `letonce` initializer fires.
 
+// Three shapes, not one: a program that dispatches on a `Kind` has to be able
+// to draw something that differs by more than its size, or the enum is a name
+// with no consequence on screen.
+
 foreign type Canvas;
 foreign fn open_canvas() -> Canvas;
 foreign fn clear(c: Canvas) -> ();
 foreign fn circle(c: Canvas, x: i64, y: i64, r: i64, hue: i64) -> ();
+foreign fn ring(c: Canvas, x: i64, y: i64, r: i64, hue: i64) -> ();
+foreign fn bar(c: Canvas, x: i64, y: i64, w: i64, h: i64, hue: i64) -> ();

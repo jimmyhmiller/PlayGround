@@ -165,7 +165,15 @@ fn tcp_create() -> u32 {
 }
 
 fn parse_addr(ip: &str, port: u32) -> std::result::Result<SocketAddr, i32> {
-    let s = format!("{}:{}", ip, port);
+    // An IPv6 literal must be bracketed before it can be joined to a port:
+    // `::` + `:3000` parses as nothing, `[::]:3000` is a socket address.
+    // net.js reaches this path whenever listen() is called without a host,
+    // because it probes the unspecified IPv6 address first.
+    let s = if ip.contains(':') && !ip.starts_with('[') {
+        format!("[{}]:{}", ip, port)
+    } else {
+        format!("{}:{}", ip, port)
+    };
     s.parse().map_err(|_| -libc::EINVAL)
 }
 

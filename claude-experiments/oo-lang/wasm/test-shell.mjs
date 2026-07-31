@@ -15,6 +15,9 @@ const s = await ScryWasm.instantiate(await readFile(new URL('scry.wasm', base)),
   },
 });
 s.boot("/assistant.scry");
+s.eval('Orchestrator.instance(0).setApiBaseUrl("http://fake-api.in-page/v1")');
+s.eval('Orchestrator.instance(0).setModel("fake-1 (in-page)")');
+s.eval('Orchestrator.instance(0).useApi()');
 let ok = true;
 const check = (n, c, extra="") => { console.log(`${c?"ok  ":"FAIL"} ${n}${extra?" — "+extra:""}`); if(!c) ok=false; };
 const run = (cmd) => s.eval(`Process.run(${JSON.stringify(cmd)})`).value?.value ?? "";

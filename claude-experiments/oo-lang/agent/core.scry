@@ -44,6 +44,84 @@ fn strStartsWith(s: String, p: String) -> Bool {
   s.slice(0, p.len()) == p
 }
 
+fn newlineAt(s: String) -> Int {
+  var i = 0
+  while i < s.len() {
+    if s.charCode(i) == 10 { return i }
+    i = i + 1
+  }
+  -1
+}
+
+fn jsonField(v: JsonValue, key: String) -> String {
+  match jgetStr(v, key) { Some(s) -> s  None -> "" }
+}
+
+fn claudeTextDelta(line: String) -> String {
+  match Json.parse(line) {
+    Ok(root) -> {
+      if jsonField(root, "type") == "stream_event" {
+        match jget(root, "event") {
+          Some(event) -> if jsonField(event, "type") == "content_block_delta" {
+            match jget(event, "delta") {
+              Some(delta) -> if jsonField(delta, "type") == "text_delta" { jsonField(delta, "text") } else { "" }
+              None -> ""
+            }
+          } else { "" }
+          None -> ""
+        }
+      } else { "" }
+    }
+    Err(e) -> ""
+  }
+}
+
+fn claudeFinalText(line: String) -> String {
+  match Json.parse(line) {
+    Ok(root) -> if jsonField(root, "type") == "result" { jsonField(root, "result") } else { "" }
+    Err(e) -> ""
+  }
+}
+
+fn codexDelta(line: String) -> String {
+  match Json.parse(line) {
+    Ok(root) -> if jsonField(root, "method") == "item/agentMessage/delta" {
+      match jget(root, "params") { Some(params) -> jsonField(params, "delta")  None -> "" }
+    } else { "" }
+    Err(e) -> ""
+  }
+}
+
+fn codexThreadId(line: String) -> String {
+  match Json.parse(line) {
+    Ok(root) -> match jgetInt(root, "id") {
+      Some(id) -> if id == 1 {
+        match jget(root, "result") {
+          Some(result) -> match jget(result, "thread") { Some(thread) -> jsonField(thread, "id")  None -> "" }
+          None -> ""
+        }
+      } else { "" }
+      None -> ""
+    }
+    Err(e) -> ""
+  }
+}
+
+fn jsonMessageMethod(line: String) -> String {
+  match Json.parse(line) { Ok(root) -> jsonField(root, "method")  Err(e) -> "" }
+}
+
+fn jsonMessageId(line: String) -> Int {
+  match Json.parse(line) { Ok(root) -> match jgetInt(root, "id") { Some(id) -> id  None -> -1 }  Err(e) -> -1 }
+}
+
+fn jsonErrorMessage(line: String) -> String {
+  match Json.parse(line) {
+    Ok(root) -> match jget(root, "error") { Some(error) -> jsonField(error, "message")  None -> "" }
+    Err(e) -> ""
+  }
+}
+
 // JSON-quote a raw string into a "..."-delimited JSON string literal (byte-faithful passthrough,
 // same escape set as std.json's serializer). Used to build request bodies + tool inputs by hand.
 fn jq(s: String) -> String {
@@ -191,6 +269,10 @@ fn finalTextResp(text: String) -> ModelResponse {
 
 fn errorResp(msg: String) -> ModelResponse {
   ModelResponse(text: "[anthropic] " + msg, toolCalls: List<ToolCall>(), stopReason: "error", contentJson: "[]")
+}
+
+fn cliErrorResp(provider: String, msg: String) -> ModelResponse {
+  ModelResponse(text: "[" + provider + "] " + msg, toolCalls: List<ToolCall>(), stopReason: "error", contentJson: "[]")
 }
 
 // ============================ tools ============================
@@ -358,6 +440,7 @@ fn weatherFor(loc: String) -> String {
 interface Model {
   fn complete(prompt: String) -> String
   fn respond(convo: Conversation, tools: List<Tool>) -> ModelResponse
+  fn streamedLastResponse() -> Bool
 }
 
 // Deterministic offline brain. complete() is the one-shot keyword chat; respond() is a REAL
@@ -366,6 +449,7 @@ interface Model {
 // answer that INCORPORATES the tool output — so the loop is exercised end-to-end with no network.
 class ScriptedModel implements Model {
   persona: String
+  fn streamedLastResponse() -> Bool { false }
 
   fn complete(prompt: String) -> String {
     if strContains(prompt, "hello") || strContains(prompt, "hi ") {
@@ -458,6 +542,7 @@ class AnthropicModel implements Model {
   apiKey: String
   systemPrompt: String
   baseUrl: String          // Anthropic-compatible endpoint base, e.g. https://api.deepseek.com/anthropic
+  fn streamedLastResponse() -> Bool { false }
 
   fn init(modelId: String, apiKey: String, systemPrompt: String, baseUrl: String) {
     self.modelId = modelId
@@ -522,6 +607,236 @@ class AnthropicModel implements Model {
     } else {
       parseAnthropic(resp.body)
     }
+  }
+}
+
+// A subscription-backed model adapter. It delegates one invocation to an installed CLI which
+// already owns authentication, model access, and its internal tool loop. This is
+// deliberately different from AnthropicModel: CLI providers return a final answer, so Scry does
+// not replay their private tool calls through the local Tool list. The CliModel entity and every
+// Message remain live in Scry's heap for the viewer.
+class CliModel implements Model {
+  provider: String          // "claude" | "codex"
+  executable: String
+  modelId: String           // empty => provider default
+  timeoutMs: Int
+  maxOutputBytes: Int
+  calls: Int
+  lastExit: Int
+  lastError: String
+  lastStderr: String
+  lastTimedOut: Bool
+  lastTruncated: Bool
+  lastDurationMs: Int
+  lastStreamed: Bool
+
+  fn streamedLastResponse() -> Bool { self.lastStreamed }
+
+  fn init(provider: String, executable: String, modelId: String,
+          timeoutMs: Int, maxOutputBytes: Int) {
+    self.provider = provider
+    self.executable = executable
+    self.modelId = modelId
+    self.timeoutMs = timeoutMs
+    self.maxOutputBytes = maxOutputBytes
+    self.calls = 0
+    self.lastExit = 0
+    self.lastError = ""
+    self.lastStderr = ""
+    self.lastTimedOut = false
+    self.lastTruncated = false
+    self.lastDurationMs = 0
+    self.lastStreamed = false
+  }
+
+  fn complete(prompt: String) -> String {
+    let c = Conversation()
+    c.append(mkTextMessage("user", prompt))
+    self.invoke(c)
+  }
+
+  fn respond(convo: Conversation, tools: List<Tool>) -> ModelResponse {
+    let out = self.invoke(convo)
+    if self.lastExit == 0 {
+      finalTextResp(out)
+    } else {
+      cliErrorResp(self.provider, self.lastError)
+    }
+  }
+
+  fn transcript(convo: Conversation) -> String {
+    var out = "You are the model behind a Scry agent. Continue this conversation and answer the final user message.\n\n"
+    var i = 0
+    while i < convo.size() {
+      let m = convo.messages.get(i)
+      out = out + m.role + ": " + m.content + "\n"
+      i = i + 1
+    }
+    out
+  }
+
+  fn args(prompt: String) -> List<String> {
+    let args = List<String>()
+    if self.provider == "claude" {
+      args.push("-p")
+      args.push("--output-format")
+      args.push("stream-json")
+      args.push("--include-partial-messages")
+      args.push("--verbose")
+      args.push("--permission-mode")
+      args.push("acceptEdits")
+      if self.modelId.len() > 0 {
+        args.push("--model")
+        args.push(self.modelId)
+      }
+      args.push(prompt)
+    } else {
+      args.push("exec")
+      args.push("--ephemeral")
+      args.push("--skip-git-repo-check")
+      args.push("--sandbox")
+      args.push("workspace-write")
+      if self.modelId.len() > 0 {
+        args.push("--model")
+        args.push(self.modelId)
+      }
+      args.push(prompt)
+    }
+    args
+  }
+
+  fn invoke(convo: Conversation) -> String {
+    self.calls = self.calls + 1
+    self.lastStreamed = false
+    if self.provider == "claude" { self.invokeClaudeStream(self.transcript(convo)) }
+    else { self.invokeCodexStream(self.transcript(convo)) }
+  }
+
+  fn invokeClaudeStream(prompt: String) -> String {
+    let child = Process.spawnArgv(self.executable, self.args(prompt), self.timeoutMs, self.maxOutputBytes)
+    child.closeInput()
+    var pending = ""
+    var answer = ""
+    var stderr = ""
+    var code = -1
+    var finalText = ""
+    var finalSeen = false
+    var finalError = false
+    var timedOut = false
+    while code == -1 {
+      let proc = child.poll(20)
+      pending = pending + proc.stdout
+      stderr = stderr + proc.stderr
+      code = proc.exitCode
+      self.lastTimedOut = timedOut
+      self.lastTruncated = proc.truncated
+      self.lastDurationMs = proc.durationMs
+      var nl = newlineAt(pending)
+      while nl >= 0 {
+        let line = pending.slice(0, nl)
+        pending = pending.slice(nl + 1, pending.len())
+        let delta = claudeTextDelta(line)
+        if delta.len() > 0 {
+          if !self.lastStreamed { Console.print("assistant> ") self.lastStreamed = true }
+          Console.print(delta)
+          answer = answer + delta
+        }
+        let completed = claudeFinalText(line)
+        if completed.len() > 0 {
+          finalText = completed
+          finalSeen = true
+          finalError = strContains(line, "\"is_error\":true")
+        }
+        nl = newlineAt(pending)
+      }
+      if finalSeen {
+        child.kill()
+        if finalError { code = 1 } else { code = 0 }
+      }
+    }
+    if self.lastStreamed { Console.log("") }
+    if timedOut { self.lastExit = 124 } else { self.lastExit = code }
+    self.lastStderr = stderr
+    if self.lastTimedOut {
+      self.lastError = self.provider + " CLI timed out after ${self.timeoutMs}ms"
+      ""
+    } else if self.lastTruncated {
+      self.lastError = self.provider + " CLI exceeded the ${self.maxOutputBytes}-byte output limit"
+      ""
+    } else if self.lastExit != 0 {
+      if finalText.len() > 0 { self.lastError = finalText }
+      else if stderr.len() > 0 { self.lastError = stderr }
+      else { self.lastError = "claude CLI exited with status ${self.lastExit}" }
+      ""
+    } else {
+      self.lastError = ""
+      if answer.len() > 0 { answer } else { finalText }
+    }
+  }
+
+  fn invokeCodexStream(prompt: String) -> String {
+    let args = List<String>()
+    args.push("app-server")
+    let child = Process.spawnArgv(self.executable, args, self.timeoutMs, self.maxOutputBytes)
+    child.write("{\"method\":\"initialize\",\"id\":0,\"params\":{\"clientInfo\":{\"name\":\"scry_agent\",\"title\":\"Scry Agent\",\"version\":\"0.1.0\"}}}\n")
+    var pending = ""
+    var stderr = ""
+    var answer = ""
+    var code = -1
+    var turnDone = false
+    var protocolError = ""
+    var timedOut = false
+    while code == -1 {
+      let proc = child.poll(20)
+      pending = pending + proc.stdout
+      stderr = stderr + proc.stderr
+      code = proc.exitCode
+      self.lastTimedOut = timedOut
+      self.lastTruncated = proc.truncated
+      self.lastDurationMs = proc.durationMs
+      var nl = newlineAt(pending)
+      while nl >= 0 {
+        let line = pending.slice(0, nl)
+        pending = pending.slice(nl + 1, pending.len())
+        let messageId = jsonMessageId(line)
+        let messageError = jsonErrorMessage(line)
+        if messageError.len() > 0 {
+          protocolError = messageError
+          child.closeInput()
+        }
+        if messageId == 0 {
+          child.write("{\"method\":\"initialized\",\"params\":{}}\n")
+          child.write("{\"method\":\"thread/start\",\"id\":1,\"params\":{\"model\":" + jq(self.modelId) + ",\"approvalPolicy\":\"never\",\"sandbox\":\"workspace-write\",\"ephemeral\":true}}\n")
+        }
+        let threadId = codexThreadId(line)
+        if threadId.len() > 0 {
+          child.write("{\"method\":\"turn/start\",\"id\":2,\"params\":{\"threadId\":" + jq(threadId) + ",\"input\":[{\"type\":\"text\",\"text\":" + jq(prompt) + "}]}}\n")
+        }
+        let delta = codexDelta(line)
+        if delta.len() > 0 {
+          if !self.lastStreamed { Console.print("assistant> ") self.lastStreamed = true }
+          Console.print(delta)
+          answer = answer + delta
+        }
+        if jsonMessageMethod(line) == "turn/completed" {
+          turnDone = true
+          child.closeInput()
+          child.kill()
+          code = 0
+        }
+        nl = newlineAt(pending)
+      }
+    }
+    if self.lastStreamed { Console.log("") }
+    if timedOut { self.lastExit = 124 } else { self.lastExit = code }
+    self.lastStderr = stderr
+    if self.lastTimedOut { self.lastError = "codex app-server timed out after ${self.timeoutMs}ms" "" }
+    else if self.lastTruncated { self.lastError = "codex app-server exceeded the ${self.maxOutputBytes}-byte output limit" "" }
+    else if protocolError.len() > 0 { self.lastError = protocolError "" }
+    else if code != 0 || !turnDone {
+      if stderr.len() > 0 { self.lastError = stderr } else { self.lastError = "codex app-server exited before completing the turn" }
+      ""
+    } else { self.lastError = "" answer }
   }
 }
 

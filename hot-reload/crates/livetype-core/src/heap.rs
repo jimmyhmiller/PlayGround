@@ -11,8 +11,9 @@
 //! against the same locks the concurrent tier relies on (an accepted cost we can
 //! optimize to an atomic `Arc` swap later; see `UNIFICATION.md`).
 
+use crate::exec::{ForeignCall, GlobalRead, Machine, RecvResult, step_instruction};
 use crate::{
-    Body, Condition, DefId, FieldId, MigrationSource, ObjectId, Type, Value, VariantId,
+    Body, Condition, DefId, FieldId, Function, MigrationSource, ObjectId, Type, Value, VariantId,
     Version, World,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -56,6 +57,73 @@ fn type_error(message: &str) -> Condition {
     }
 }
 
+struct MigrationMachine<'a> {
+    heap: &'a Heap,
+    world: &'a World,
+    function: &'a Function,
+    registers: Vec<Option<Value>>,
+    pc: usize,
+    result: Option<Value>,
+}
+
+impl Machine for MigrationMachine<'_> {
+    fn world(&self) -> &World { self.world }
+    fn heap(&self) -> &Heap { self.heap }
+    fn current(&self) -> (DefId, Version) { (self.function.id, self.function.version) }
+    fn pc(&self) -> usize { self.pc }
+    fn reg(&self, i: usize) -> Option<Value> { self.registers[i] }
+    fn set_reg(&mut self, dst: usize, value: Value) { self.registers[dst] = Some(value); }
+    fn set_pc(&mut self, pc: usize) { self.pc = pc; }
+    fn advance(&mut self) { self.pc += 1; }
+    fn emit(&mut self, _value: Value) { unreachable!("validated migration is pure") }
+    fn global(&self, _id: DefId) -> GlobalRead { GlobalRead::Unsupported }
+    fn call_foreign(&mut self, _id: crate::ForeignFnId, _args: &[Value]) -> ForeignCall {
+        ForeignCall::Unsupported
+    }
+    fn push_call(
+        &mut self,
+        _callee: DefId,
+        _version: Version,
+        _registers: Vec<Option<Value>>,
+        _return_reg: usize,
+    ) {
+        unreachable!("validated migration contains no calls")
+    }
+    fn do_return(&mut self, value: Value) { self.result = Some(value); }
+    fn send(&mut self, _target: usize, _value: Value) -> Option<bool> { None }
+    fn recv(&mut self) -> RecvResult { RecvResult::Unsupported }
+}
+
+fn run_transform(
+    heap: &Heap,
+    world: &World,
+    function: &Function,
+    input: Value,
+) -> Result<Value, Condition> {
+    let mut registers = vec![None; function.registers];
+    registers[0] = Some(input);
+    let mut machine = MigrationMachine {
+        heap,
+        world,
+        function,
+        registers,
+        pc: 0,
+        result: None,
+    };
+    for _ in 0..1_000_000 {
+        if let Some(result) = machine.result {
+            return Ok(result);
+        }
+        let instruction = function
+            .code
+            .get(machine.pc)
+            .ok_or_else(|| type_error("migration fell off the end"))?
+            .clone();
+        step_instruction(&mut machine, &instruction)?;
+    }
+    Err(type_error("migration exceeded the instruction limit"))
+}
+
 impl Heap {
     pub fn new() -> Heap {
         Heap::default()
@@ -78,12 +146,7 @@ impl Heap {
 
     /// Allocate an object with the given body. Non-moving: the returned handle
     /// never changes even as the body is later migrated.
-    pub fn alloc(
-        &self,
-        type_id: DefId,
-        schema: Version,
-        fields: BTreeMap<FieldId, Value>,
-    ) -> ObjectId {
+    pub fn alloc(&self, type_id: DefId, schema: Version, fields: BTreeMap<FieldId, Value>) -> ObjectId {
         self.alloc_body(Body {
             type_id,
             schema,
@@ -106,11 +169,7 @@ impl Heap {
     }
 
     /// Allocate a mutable array, checking each initial item against `elem`.
-    pub fn new_array(
-        &self,
-        elem: Type,
-        items: Vec<Value>,
-    ) -> Result<ObjectId, Condition> {
+    pub fn new_array(&self, elem: Type, items: Vec<Value>) -> Result<ObjectId, Condition> {
         for item in &items {
             if !self.value_ok(item, &elem) {
                 return Err(type_error(&format!(
@@ -140,12 +199,7 @@ impl Heap {
         usize::try_from(index)
             .ok()
             .and_then(|i| items.get(i).copied())
-            .ok_or_else(|| {
-                type_error(&format!(
-                    "index {index} out of bounds (len {})",
-                    items.len()
-                ))
-            })
+            .ok_or_else(|| type_error(&format!("index {index} out of bounds (len {})", items.len())))
     }
 
     /// Write one element — checked against the array's element type, so pinned
@@ -200,8 +254,7 @@ impl Heap {
     }
 
     pub fn contains(&self, id: ObjectId) -> bool {
-        self.objects.lock().unwrap().contains_key(&id)
-            || self.arrays.lock().unwrap().contains_key(&id)
+        self.objects.lock().unwrap().contains_key(&id) || self.arrays.lock().unwrap().contains_key(&id)
     }
 
     pub fn len(&self) -> usize {
@@ -359,16 +412,9 @@ impl Heap {
     /// con-freeness trap — pinned old code must not fall through some arm it
     /// didn't mean. Shared by the interpreter's `CaseVariant` arm and the JIT's
     /// `lt_case_variant` extern, so the trap condition is identical everywhere.
-    pub fn variant_case(
-        &self,
-        id: ObjectId,
-        arms: &[(VariantId, usize)],
-        world: &World,
-    ) -> Result<usize, Condition> {
+    pub fn variant_case(&self, id: ObjectId, arms: &[(VariantId, usize)], world: &World) -> Result<usize, Condition> {
         self.migrate(id, world)?;
-        let body = self
-            .body(id)
-            .ok_or_else(|| type_error("match: unknown object"))?;
+        let body = self.body(id).ok_or_else(|| type_error("match: unknown object"))?;
         let Some(variant) = body.variant else {
             return Err(type_error("match on a non-enum object"));
         };
@@ -443,18 +489,13 @@ impl Heap {
                 let value = match source {
                     MigrationSource::Copy(s) => body.fields[s],
                     MigrationSource::Value(v) => *v,
-                    MigrationSource::Wrap {
-                        type_id,
-                        field,
-                        source,
-                    } => {
+                    MigrationSource::Wrap { type_id, field, source } => {
                         let v = world.current_schemas[type_id];
-                        let wid = self.alloc(
-                            *type_id,
-                            v,
-                            BTreeMap::from([(*field, body.fields[source])]),
-                        );
+                        let wid = self.alloc(*type_id, v, BTreeMap::from([(*field, body.fields[source])]));
                         Value::Ref(wid)
+                    }
+                    MigrationSource::Transform { source, function } => {
+                        run_transform(self, world, function, body.fields[source])?
                     }
                 };
                 fields.insert(*target, value);
@@ -528,9 +569,7 @@ impl Heap {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|(id, cell)| {
-                    (*id, (cell.elem.clone(), cell.items.lock().unwrap().clone()))
-                })
+                .map(|(id, cell)| (*id, (cell.elem.clone(), cell.items.lock().unwrap().clone())))
                 .collect(),
         }
     }

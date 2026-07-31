@@ -9,13 +9,12 @@
 # request time. This script proves it (a request-scope `fetch(` fails the gate) and the
 # deps are installed ONCE (pinned versions) into the shared corpus node_modules that
 # each nested app resolves via node's parent-dir walk.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 corpus="${1:-$repo/integration/next-corpus}"
 diffpack="$repo/target/release/diffpack"
-
-fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== building diffpack (release) =="
 cargo build --release --manifest-path "$repo/Cargo.toml"

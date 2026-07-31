@@ -1,0 +1,603 @@
+;; The shape table: hidden classes, built at compile time.
+;;
+;; A SHAPE IS AN ORDERED FIELD LIST. Adding a field is a TRANSITION, an edge in a tree rooted at
+;; the field-less shape 0. `shape-transition s name ty` is memoised on `(s, name)`, so re-adding the
+;; same field to the same shape is the same edge and the same descendant: the hidden-class tree a
+;; whole-program build produces is a function of the program and not of visit order.
+;;
+;; THE ALIAS IS ALLOCATED AT THE EDGE THAT INTRODUCES THE FIELD, and inherited unchanged by every
+;; descendant. That single sentence is what makes memory SSA work: a store through `{x}` and a load
+;; through `{x,y}` name the SAME alias class and the same byte offset, because `{x,y}` was reached
+;; from `{x}` and a transition does not move an existing field. Per-shape-per-field aliases would
+;; make those two touch different words and load-after-store forwarding would silently stop firing.
+;;
+;; Two shapes reached by DIFFERENT paths are genuinely different layouts: `{x,y}` and `{y,x}` put
+;; `x` at different offsets and give it different aliases, because the edge that introduced `x` is a
+;; different edge. That is not a wart, it is the whole content of "hidden class", and it is the
+;; witness `tests/shape-test.coil` uses.
+;;
+;; WHY THE FIELD WINDOW IS RESERVED BEFORE IT IS FILLED. This is M3's most expensive lattice bug,
+;; transplanted into a new file so it cannot be rediscovered. `ty-meet-tuples` pushed each member
+;; as it computed it, while computing a member INTERNS and interning appends to the same array; the
+;; outer window ended up describing the inner tuple's members. A shape's field window is the same
+;; structure with the same hazard: anything that can re-enter this table while a window is being
+;; filled appends to it. So `shape-fields-open` reserves, `shape-fields-put!` writes in place, and
+;; a slot nobody filled is a named panic rather than a plausible field.
+;;
+;; THIS FILE IMPORTS ty.coil AND ty.coil DOES NOT IMPORT IT. The shape-id and alias-id bitsets are
+;; lattice axes, and they stay OPAQUE to the lattice exactly as the `fidxs` axis is: `meet` never
+;; asks whether a shape exists. The consequence is that "is this a defined shape" is answerable only
+;; here, by the table that could know, which is where the check lives.
+(module shape)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "ty.coil"        :use *)
+
+; ============================================================================
+; Layout
+; ============================================================================
+;; WHERE THE HIDDEN-CLASS WORD SITS, stated in exactly one place. An object is a header followed by
+;; its fields, and field `i` of any shape lives at `8 * (SHAPE-HEADER-WORDS + i)`. The stride is 8
+;; because D3 says a dynamic value is ONE 64-bit NaN-boxed word, so there is no per-field size and
+;; no alignment computation: every field is one word wide.
+;;
+;; 4b's `New` writes the header word and a shape test reads it. When that happens it will need an
+;; alias of its own out of the same counter this file allocates from; the number is not chosen here
+;; because 4a has no memory op to name it.
+(const SHAPE-HEADER-WORDS i64 1)
+(const SHAPE-WORD-BYTES   i64 8)
+
+;; The root shape: no fields. It is id 0 by construction, created by `shape-reset!`.
+(const SHAPE-ROOT i64 0)
+
+;; "That shape does not carry that field", and "no name like that has been interned". Both are
+;; LEGITIMATE answers; see `shape-find-field`.
+(const SHAPE-NO-FIELD i64 -1)
+(const SHAPE-NO-NAME  i64 -1)
+
+;; What a reserved-but-unfilled field slot holds. -1 is not a name id, not a TyId, not an alias and
+;; not an offset, so a slot nobody wrote is detectable rather than a plausible field at offset 0.
+(const SHAPE-UNFILLED i64 -1)
+
+; ============================================================================
+; The records
+; ============================================================================
+;; A field. `name` is a NAME ID (an index into the interned-name table) rather than an `(off,len)`
+;; into the byte arena, so equality is integer equality and an inherited field costs no bytes. The
+;; arena still exists and still owns the bytes; the id is the handle, exactly as a TyId is.
+(defstruct ShapeField
+  [(name  i64)     ; name id
+   (ty    i64)     ; the declared TyId
+   (alias i64)     ; allocated at the transition edge that introduced this field
+   (off   i64)])   ; byte offset from the object's base
+
+;; `match` and `al-get` hand a struct back BY VALUE and `field` needs a place, so these accessors
+;; exist for the same reason `val-kinds` does in ty.coil: passing the record to a function gives a
+;; read-only reference to poke at.
+(defn sf-name  [(x ShapeField)] (-> i64) (load (field x name)))
+(defn sf-ty    [(x ShapeField)] (-> i64) (load (field x ty)))
+(defn sf-alias [(x ShapeField)] (-> i64) (load (field x alias)))
+(defn sf-off   [(x ShapeField)] (-> i64) (load (field x off)))
+
+;; A shape is its field window, and nothing else. Everything else about a shape (its size, its
+;; aliases, its offsets) is derived, so there is no second copy to drift.
+(defstruct ShapeRec [(foff i64) (flen i64)])
+(defn sr-foff [(x ShapeRec)] (-> i64) (load (field x foff)))
+(defn sr-flen [(x ShapeRec)] (-> i64) (load (field x flen)))
+
+;; One transition edge, and it is the memo table: a lookup on `(from, name)` is what makes
+;; `shape-transition` deterministic and idempotent. `ty` and `alias` are carried on the edge itself
+;; rather than read out of `to`'s last field, so the edge is self-describing and the declared-type
+;; disagreement check has one place to look.
+(defstruct ShapeEdge
+  [(from  i64)
+   (name  i64)
+   (ty    i64)
+   (alias i64)
+   (to    i64)])
+(defn se-from  [(x ShapeEdge)] (-> i64) (load (field x from)))
+(defn se-name  [(x ShapeEdge)] (-> i64) (load (field x name)))
+(defn se-ty    [(x ShapeEdge)] (-> i64) (load (field x ty)))
+(defn se-alias [(x ShapeEdge)] (-> i64) (load (field x alias)))
+(defn se-to    [(x ShapeEdge)] (-> i64) (load (field x to)))
+
+; ============================================================================
+; The table
+; ============================================================================
+(defstruct Shapes
+  [(recs   (ArrayList ShapeRec))     ; shape id -> its field window
+   (fields (ArrayList ShapeField))   ; THE side array; windows are (foff, flen)
+   (nbytes (ArrayList u8))           ; the name arena
+   (noff   (ArrayList i64))          ; name id -> offset into nbytes
+   (nlen   (ArrayList i64))          ; name id -> length
+   (edges  (ArrayList ShapeEdge))    ; the transition edges, which are also the memo table
+   (nalias i64)                      ; the next alias number to hand out
+   (inited bool)])
+
+;; The one global, the same `alloc-static`-in-an-accessor idiom `types` and `graph` use.
+(defn shapes [] (-> (ptr Shapes))
+  (let [p (alloc-static Shapes)]
+    (if (load (field p inited)) 0
+      (do (store! (field p inited) true)   ; set FIRST: `shape-reset!` re-enters through here
+          (store! (field p recs)   (al-new [ShapeRec] (malloc-allocator)))
+          (store! (field p fields) (al-new [ShapeField] (malloc-allocator)))
+          (store! (field p nbytes) (al-new [u8] (malloc-allocator)))
+          (store! (field p noff)   (al-new [i64] (malloc-allocator)))
+          (store! (field p nlen)   (al-new [i64] (malloc-allocator)))
+          (store! (field p edges)  (al-new [ShapeEdge] (malloc-allocator)))
+          (store! (field p nalias) 0)
+          (shape-seed!)
+          0))
+    p))
+
+(defn shape-panic [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "shape table: ") (ps w msg) (ps w "\n"))
+  (abort) 0)
+
+;; Start a fresh table, mirroring `graph-reset!`: tests call it between cases so shape ids and
+;; alias numbers are comparable across runs, and a golden offset does not depend on which test ran
+;; first. The names are cleared too, because a name id is only meaningful against this table.
+(defn shape-reset! [] (-> i64)
+  (let [p (shapes)]
+    (al-clear! [ShapeRec]   (field p recs))
+    (al-clear! [ShapeField] (field p fields))
+    (al-clear! [u8]         (field p nbytes))
+    (al-clear! [i64]        (field p noff))
+    (al-clear! [i64]        (field p nlen))
+    (al-clear! [ShapeEdge]  (field p edges))
+    (store! (field p nalias) 0)
+    (shape-seed!)
+    0))
+
+;; The root shape. It is created here rather than lazily so that `SHAPE-ROOT` is a fact about the
+;; table and not a claim the first caller has to establish.
+(defn shape-seed! [] (-> i64)
+  (let [p (shapes)
+        (mut r) (zeroed ShapeRec)]
+    (store! (field r foff) (al-len [ShapeField] (load (field p fields))))
+    (store! (field r flen) 0)
+    (al-push! [ShapeRec] (field p recs) (load r))
+    (if (= (al-len [ShapeRec] (load (field p recs))) 1) 0
+      (do (shape-panic "shape-seed!: the root shape is not id 0; the table was not empty") 0))))
+
+; ---------------------------------------------------------------------------
+; Sizes, and the "is this a shape" question
+; ---------------------------------------------------------------------------
+(defn shape-count [] (-> i64) (al-len [ShapeRec] (load (field (shapes) recs))))
+(defn shape-alias-count [] (-> i64) (load (field (shapes) nalias)))
+(defn shape-edge-count [] (-> i64) (al-len [ShapeEdge] (load (field (shapes) edges))))
+
+;; How many field slots the side array holds. Exported for exactly the reason `ty-kids-len` is: a
+;; gate asserts that RE-adding an existing field does not grow it, because the array is append-only
+;; and a leak there would be unbounded in the number of CALLS rather than in program size.
+(defn shape-fields-len [] (-> i64) (al-len [ShapeField] (load (field (shapes) fields))))
+
+;; IS THIS A DEFINED SHAPE. It lives here because the lattice cannot answer it: `Val.shapes` is an
+;; opaque bitset to `meet`, exactly as `fidxs` is, so a type may name shape 9 while only three
+;; shapes exist. Every entry point that takes a shape id asks this first.
+(defn shape-defined? [(s i64)] (-> bool) (and (>= s 0) (< s (shape-count))))
+
+(defn shape-rec [(s i64)] (-> ShapeRec)
+  (if (shape-defined? s) 0
+    (do (shape-panic "shape-rec: not a defined shape id") 0))
+  (al-get (load (field (shapes) recs)) s))
+
+(defn shape-field-count [(s i64)] (-> i64)
+  (let [r (shape-rec s)] (sr-flen r)))
+
+;; The byte size of an object of this shape: the header plus one word per field. `shape-size` of the
+;; root is therefore the header alone, which is right: a field-less object still carries its hidden
+;; class.
+(defn shape-size [(s i64)] (-> i64)
+  (* SHAPE-WORD-BYTES (+ SHAPE-HEADER-WORDS (shape-field-count s))))
+
+;; Where field `i` of ANY shape sits. One expression, and it is the only statement anywhere of how
+;; the header and the fields are laid out; `shape-size` and every offset in the table derive from it.
+(defn shape-offset-of-index [(i i64)] (-> i64)
+  (if (>= i 0) 0
+    (do (shape-panic "shape-offset-of-index: negative field index") 0))
+  (* SHAPE-WORD-BYTES (+ SHAPE-HEADER-WORDS i)))
+
+; ---------------------------------------------------------------------------
+; Reading a field
+; ---------------------------------------------------------------------------
+;; An index into the side array, bounds-checked against the shape's OWN window. A field index past
+;; the end is a malformed request, not a shape with fewer fields than the caller thought.
+(defn shape-field-slot [(s i64) (i i64)] (-> i64)
+  (let [r (shape-rec s)]
+    (if (and (>= i 0) (< i (sr-flen r))) 0
+      (do (shape-panic "shape-field-slot: field index is outside this shape's field window") 0))
+    (+ (sr-foff r) i)))
+
+(defn shape-field-at [(slot i64)] (-> ShapeField)
+  (al-get (load (field (shapes) fields)) slot))
+
+(defn shape-field-name  [(s i64) (i i64)] (-> i64)
+  (let [f (shape-field-at (shape-field-slot s i))] (sf-name f)))
+(defn shape-field-ty    [(s i64) (i i64)] (-> i64)
+  (let [f (shape-field-at (shape-field-slot s i))] (sf-ty f)))
+(defn shape-field-alias [(s i64) (i i64)] (-> i64)
+  (let [f (shape-field-at (shape-field-slot s i))] (sf-alias f)))
+(defn shape-field-offset [(s i64) (i i64)] (-> i64)
+  (let [f (shape-field-at (shape-field-slot s i))] (sf-off f)))
+
+; ============================================================================
+; Field names
+; ============================================================================
+;; Names are interned into an arena and addressed by a dense id, so an inherited field costs no
+;; bytes and `(shape, name)` is a pair of integers. Lookup is a LINEAR SCAN, deliberately: this
+;; table holds at most SHAPE-MAX shapes and a handful of names per shape, a scan is deterministic
+;; with no hash seed anywhere near it, and a HashMap keyed by borrowed bytes would put a KeyOps
+;; vtable between a name and its id for no measurable gain at this size.
+(defn shape-name-count [] (-> i64) (al-len [i64] (load (field (shapes) noff))))
+
+(defn shape-name-len [(nid i64)] (-> i64)
+  (if (and (>= nid 0) (< nid (shape-name-count))) 0
+    (do (shape-panic "shape-name-len: not an interned name id") 0))
+  (al-get (load (field (shapes) nlen)) nid))
+
+;; The bytes, as a slice into the arena. IT BORROWS: the arena is append-only and never moves a
+;; live name's bytes, but `al-push!` may REALLOCATE it, so a slice taken before a later intern must
+;; not be held across one. Callers here use it immediately and nowhere else.
+(defn shape-name-bytes [(nid i64)] (-> (slice u8))
+  (if (and (>= nid 0) (< nid (shape-name-count))) 0
+    (do (shape-panic "shape-name-bytes: not an interned name id") 0))
+  (let [p (shapes)
+        d (load (field (field p nbytes) data))
+        o (al-get (load (field p noff)) nid)
+        n (al-get (load (field p nlen)) nid)]
+    (slice-new [u8] (index d o) n)))
+
+(defn shape-name-eq? [(nid i64) (name (slice u8))] (-> bool)
+  (let [p (shapes)
+        n (al-get (load (field p nlen)) nid)]
+    (if (!= n (slice-len name)) false
+      (let [o (al-get (load (field p noff)) nid)
+            (mut i) 0
+            (mut same) true]
+        (loop
+          (if (or (>= (load i) n) (not (load same))) (break)
+            (do (if (!= (cast i64 (al-get (load (field p nbytes)) (+ o (load i))))
+                        (cast i64 (slice-get name (load i))))
+                    (store! same false) 0)
+                (store! i (+ (load i) 1))
+                0)))
+        (load same)))))
+
+;; SHAPE-NO-NAME when nothing has been interned under those bytes, and that is a legitimate answer:
+;; asking whether a name is known is how `shape-has-field?` avoids interning a name just to look it
+;; up, and a program that never mentions `z` should not have `z` in the arena.
+(defn shape-name-find [(name (slice u8))] (-> i64)
+  (let [n (shape-name-count) (mut i) 0 (mut found) SHAPE-NO-NAME]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) SHAPE-NO-NAME)) (break)
+        (do (if (shape-name-eq? (load i) name) (store! found (load i)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+(defn shape-name-intern! [(name (slice u8))] (-> i64)
+  (let [found (shape-name-find name)]
+    (if (!= found SHAPE-NO-NAME) found
+      (let [p (shapes)
+            o (al-len [u8] (load (field p nbytes)))
+            n (slice-len name)
+            (mut i) 0]
+        (loop
+          (if (>= (load i) n) (break)
+            (do (al-push! [u8] (field p nbytes) (slice-get name (load i)))
+                (store! i (+ (load i) 1))
+                0)))
+        (al-push! [i64] (field p noff) o)
+        (al-push! [i64] (field p nlen) n)
+        (- (shape-name-count) 1)))))
+
+; ============================================================================
+; Lookups
+; ============================================================================
+;; "THIS SHAPE DOES NOT CARRY THAT FIELD" IS A LEGITIMATE ANSWER AND NOT A STUB, and it is worth
+;; saying so at the definition because every other unimplemented path in this file aborts by name.
+;; Simple's `Load.compute` depends on exactly this answer: a field missing from the pointer's shape
+;; lifts to TOP when the pointer is high and falls to the declared type when it is low, which is how
+;; a polymorphic site with two shapes keeps two inline paths. A predicate that aborted instead could
+;; not express that, and one that returned field 0 would forward a load from the wrong word.
+(defn shape-find-field-nid [(s i64) (nid i64)] (-> i64)
+  (let [n (shape-field-count s) (mut i) 0 (mut found) SHAPE-NO-FIELD]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) SHAPE-NO-FIELD)) (break)
+        (do (if (= (shape-field-name s (load i)) nid) (store! found (load i)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+;; By name bytes. It does NOT intern the name: asking a question must not change the table, or a
+;; failed lookup would leave a name behind and the arena would grow with every miss.
+(defn shape-find-field [(s i64) (name (slice u8))] (-> i64)
+  (let [nid (shape-name-find name)]
+    (if (= nid SHAPE-NO-NAME) SHAPE-NO-FIELD (shape-find-field-nid s nid))))
+
+(defn shape-has-field? [(s i64) (name (slice u8))] (-> bool)
+  (!= (shape-find-field s name) SHAPE-NO-FIELD))
+
+;; ALIAS -> FIELD INDEX, the inverse of `shape-field-alias`, and the reason both directions exist:
+;; 4b's Load carries an alias and needs the offset, while 4c's store-to-load forwarding carries two
+;; aliases and needs to know whether they are the same word. SHAPE-NO-FIELD when this shape does not
+;; carry that alias at all, which is legitimate for the same reason as above: an alias introduced on
+;; a sibling branch belongs to a different layout.
+(defn shape-field-by-alias [(s i64) (alias i64)] (-> i64)
+  (let [n (shape-field-count s) (mut i) 0 (mut found) SHAPE-NO-FIELD]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) SHAPE-NO-FIELD)) (break)
+        (do (if (= (shape-field-alias s (load i)) alias) (store! found (load i)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+; ---------------------------------------------------------------------------
+; The alias, from the other end
+; ---------------------------------------------------------------------------
+;; AN ALIAS NAMES A WORD, GLOBALLY, and that is what lets a `Load` or a `Store` carry an alias
+;; number and nothing else: no shape, no offset, no field index. The alias is allocated at the
+;; edge that introduces the field, and `shape-transition-new!` copies every inherited field's
+;; alias AND offset unchanged, so `alias -> (declared type, name, offset)` is a function of the
+;; TABLE rather than of whichever shape the pointer happens to have. A memory op that had to name
+;; a shape as well would be unable to describe the polymorphic site 4c is built around, where two
+;; shapes share the word and only the layouts differ.
+;;
+;; THE EDGE IS FOUND BY SCANNING, not by indexing on the alias number. Today alias k IS edge k,
+;; because `shape-alias-new!` is called exactly once per new edge; that is a consequence of the
+;; tree relation `shape-alias-invariant-ok?` asserts, and the note on `shape-alias-new!` already
+;; says a second alias allocator (a header word, an array element) arrives the moment there is
+;; more to name than fields. A scan still answers correctly on that day. The table is small and
+;; the alternative is a second side array that can drift from the edges it mirrors.
+(defn shape-alias-defined? [(a i64)] (-> bool) (and (>= a 0) (< a (shape-alias-count))))
+
+(defn shape-alias-edge [(a i64)] (-> i64)
+  (if (shape-alias-defined? a) 0
+    (do (shape-panic "shape-alias-edge: not an allocated alias number") 0))
+  (let [n (shape-edge-count) (mut i) 0 (mut found) -1]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) -1)) (break)
+        (do (let [e (shape-edge-at (load i))]
+              (if (= (se-alias e) a) (store! found (load i)) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    ; An allocated number with no edge means some second allocator handed it out and did not
+    ; record what it names. Answering 0, or the root's non-existent field, would put a load on
+    ; the wrong word; every caller here needs a real answer or none.
+    (if (!= (load found) -1) 0
+      (do (shape-panic "shape-alias-edge: an allocated alias that no transition edge introduced") 0))
+    (load found)))
+
+(defn shape-alias-name [(a i64)] (-> i64)
+  (let [e (shape-edge-at (shape-alias-edge a))] (se-name e)))
+(defn shape-alias-ty [(a i64)] (-> i64)
+  (let [e (shape-edge-at (shape-alias-edge a))] (se-ty e)))
+
+;; The byte offset of the word this alias names, read off the edge's PARENT: the field was
+;; appended at index `shape-field-count from`, and no descendant moves it.
+(defn shape-alias-offset [(a i64)] (-> i64)
+  (let [e (shape-edge-at (shape-alias-edge a))]
+    (shape-offset-of-index (shape-field-count (se-from e)))))
+
+; ============================================================================
+; Building: the field window is reserved, then filled
+; ============================================================================
+;; See the file header. Reserve first, write in place, and refuse to close a window with a hole in
+;; it. Nothing in 4a can re-enter this table while a window is open, and that is precisely the
+;; property that changes silently, which is why the discipline is here rather than an argument that
+;; it is unnecessary.
+(defstruct FieldBuild [(off i64) (len i64)])
+(defn fb-off [(b FieldBuild)] (-> i64) (load (field b off)))
+(defn fb-len [(b FieldBuild)] (-> i64) (load (field b len)))
+
+(defn shape-fields-open [(len i64)] (-> FieldBuild)
+  (if (>= len 0) 0
+    (do (shape-panic "shape-fields-open: negative field count") 0))
+  (let [p (shapes)
+        off (al-len [ShapeField] (load (field p fields)))
+        (mut hole) (zeroed ShapeField)
+        (mut i) 0
+        (mut b) (zeroed FieldBuild)]
+    (store! (field hole name)  SHAPE-UNFILLED)
+    (store! (field hole ty)    SHAPE-UNFILLED)
+    (store! (field hole alias) SHAPE-UNFILLED)
+    (store! (field hole off)   SHAPE-UNFILLED)
+    (loop
+      (if (>= (load i) len) (break)
+        (do (al-push! [ShapeField] (field p fields) (load hole))
+            (store! i (+ (load i) 1))
+            0)))
+    (store! (field b off) off)
+    (store! (field b len) len)
+    (load b)))
+
+(defn shape-fields-put! [(b FieldBuild) (i i64) (name i64) (ty i64) (alias i64) (off i64)] (-> i64)
+  (if (and (>= i 0) (< i (fb-len b))) 0
+    (do (shape-panic "shape-fields-put!: field index outside the reserved window") 0))
+  (let [(mut f) (zeroed ShapeField)]
+    (store! (field f name)  name)
+    (store! (field f ty)    ty)
+    (store! (field f alias) alias)
+    (store! (field f off)   off)
+    (al-set! [ShapeField] (field (shapes) fields) (+ (fb-off b) i) (load f))
+    0))
+
+;; Turn a filled window into a shape id. Every slot is checked, because an unfilled one would be a
+;; field named -1 at offset -1 and the first thing to notice it would be a wrong load.
+(defn shape-fields-close [(b FieldBuild)] (-> i64)
+  (let [p (shapes) (mut i) 0]
+    (loop
+      (if (>= (load i) (fb-len b)) (break)
+        (do (let [f (shape-field-at (+ (fb-off b) (load i)))]
+              (if (= (sf-alias f) SHAPE-UNFILLED)
+                  (do (shape-panic "shape-fields-close: a field slot was never filled") 0)
+                0))
+            (store! i (+ (load i) 1))
+            0)))
+    ; THE BOUND IS CHECKED BEFORE THE ID IS HANDED OUT. `Val.shapes` is a 64-bit set, so shape 64
+    ; has no bit; `t-obj-shape` would abort on it, but only once something tried to TYPE an object
+    ; of that shape, which could be passes later. Refusing here fails at the allocation.
+    (if (< (shape-count) SHAPE-MAX) 0
+      (do (shape-panic "shape-fields-close: no shape id left; the lattice's shape bitset is full (SHAPE-MAX)") 0))
+    (let [(mut r) (zeroed ShapeRec)]
+      (store! (field r foff) (fb-off b))
+      (store! (field r flen) (fb-len b))
+      (al-push! [ShapeRec] (field p recs) (load r))
+      (- (shape-count) 1))))
+
+;; Hand out the next alias number. The bound is the width of `TMem.aliases`, so the 65th alias has
+;; no bit and `t-mem-alias` would mint the EMPTY alias set, which is the top of that axis and reads
+;; as "this memory state describes nothing".
+;;
+;; IN 4a THIS CANNOT FIRE, and saying so is more useful than implying it can. `shape-transition` is
+;; the only allocator, the transition graph is a tree, so aliases = shapes - 1 exactly (asserted by
+;; `shape-alias-invariant-ok?`); SHAPE-MAX is reached one edge earlier and reports first. It is a
+;; real bound, kept because 4b adds a second allocator (the header word, and later array elements)
+;; the moment memory ops exist, and at that point the relation stops holding.
+(defn shape-alias-new! [] (-> i64)
+  (let [p (shapes) a (load (field p nalias))]
+    (if (< a ALIAS-MAX) 0
+      (do (shape-panic "shape-alias-new!: no alias number left; the memory type's alias bitset is full (ALIAS-MAX)") 0))
+    (store! (field p nalias) (+ a 1))
+    a))
+
+;; The tree relation, exposed so it is asserted rather than assumed. It is what makes the ALIAS-MAX
+;; note above a fact instead of a hope: if it ever goes false, a second alias allocator exists and
+;; that bound became reachable.
+(defn shape-alias-invariant-ok? [] (-> bool)
+  (and (= (shape-alias-count) (shape-edge-count))
+       (= (shape-count) (+ (shape-edge-count) 1))))
+
+; ============================================================================
+; Transitions
+; ============================================================================
+;; The memo lookup: the edge index for `(from, name)`, or -1. Linear, deterministic, and the reason
+;; `shape-transition` is idempotent.
+(defn shape-edge-find [(from i64) (nid i64)] (-> i64)
+  (let [p (shapes) n (shape-edge-count) (mut i) 0 (mut found) -1]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) -1)) (break)
+        (do (let [e (al-get (load (field p edges)) (load i))]
+              (if (and (= (se-from e) from) (= (se-name e) nid)) (store! found (load i)) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+(defn shape-edge-at [(i i64)] (-> ShapeEdge)
+  (al-get (load (field (shapes) edges)) i))
+
+;; ADD A FIELD, or find the shape that already has it added.
+;;
+;; Every refusal is a NAMED hard error, and none of them is a case the caller could reasonably want
+;; guessed at:
+;;
+;;   - an undefined `s`: the lattice cannot check a shape id, so this is the only place that can.
+;;   - the chain already carries `name`: JavaScript's `o.x = 1` twice is a STORE, not a transition,
+;;     and the front end must not reach here for it. Picking either the old or the new declared type
+;;     would silently change which word a later load reads.
+;;   - an existing edge whose declared type differs: two call sites disagree about the program.
+;;     Meeting the two types is a decision about the source language, not about the table, and one
+;;     made here would be invisible.
+;;
+;; The declared type is required to be a lattice element the memory type can hold, for the same
+;; reason `t-mem` requires it: a field holds one NaN-boxed value, so a field declared `ctrl` or a
+;; tuple denotes nothing.
+(defn shape-transition [(s i64) (name (slice u8)) (ty i64)] (-> i64)
+  (if (shape-defined? s) 0
+    (do (shape-panic "shape-transition: not a defined shape id") 0))
+  (if (ty-mem-contents-ok? ty) 0
+    (do (shape-panic "shape-transition: a field's declared type must be a value, ANY or ALL") 0))
+  (let [nid (shape-name-intern! name)
+        hit (shape-edge-find s nid)]
+    (if (!= hit -1)
+        ; MEMOISED. The same edge, so the same descendant, the same alias and the same offset,
+        ; however many times the program adds the field. Nothing is appended, which is what the
+        ; side-array-does-not-grow gate measures.
+        (let [e (shape-edge-at hit)]
+          (if (= (se-ty e) ty) 0
+            (do (shape-panic "shape-transition: an existing transition edge for this field declares a different type") 0))
+          (se-to e))
+      (do (if (= (shape-find-field-nid s nid) SHAPE-NO-FIELD) 0
+              (do (shape-panic "shape-transition: this shape already carries a field with that name") 0))
+          (shape-transition-new! s nid ty)))))
+
+;; The new-edge path, split out so the memo path above reads as one decision. The window is
+;; reserved, the parent's fields are copied UNCHANGED (same alias, same offset: a transition does not
+;; move an existing field), and the new field gets a fresh alias and the next offset.
+(defn shape-transition-new! [(s i64) (nid i64) (ty i64)] (-> i64)
+  (let [n     (shape-field-count s)
+        alias (shape-alias-new!)
+        b     (shape-fields-open (+ n 1))
+        (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (shape-fields-put! b (load i)
+                               (shape-field-name s (load i))
+                               (shape-field-ty s (load i))
+                               (shape-field-alias s (load i))
+                               (shape-field-offset s (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    (shape-fields-put! b n nid ty alias (shape-offset-of-index n))
+    (let [to (shape-fields-close b)
+          p  (shapes)
+          (mut e) (zeroed ShapeEdge)]
+      (store! (field e from)  s)
+      (store! (field e name)  nid)
+      (store! (field e ty)    ty)
+      (store! (field e alias) alias)
+      (store! (field e to)    to)
+      (al-push! [ShapeEdge] (field p edges) (load e))
+      to)))
+
+;; Add a whole field list to the root, left to right. The convenience the tests and 4b's object
+;; literals both want, and it is a convenience only: it is `shape-transition` folded, so it inherits
+;; every check and every memo hit.
+(defn shape-of-fields [(names (slice (slice u8))) (tys (slice i64))] (-> i64)
+  (if (= (slice-len names) (slice-len tys)) 0
+    (do (shape-panic "shape-of-fields: one declared type per field name") 0))
+  (let [n (slice-len names) (mut s) SHAPE-ROOT (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (store! s (shape-transition (load s) (slice-get names (load i)) (slice-get tys (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (load s)))
+
+; ============================================================================
+; Printing
+; ============================================================================
+;; A shape as `#<id>{name:ty@off/alias, …}`. THIS IS A DEBUG FORM ONLY, deliberately not a
+;; round-trippable one: it contains `:` and would be unusable inside a graph line's type field (see
+;; `mem-print` in src/ty.coil for why that constraint exists). A shape is not a type and never
+;; appears in one; what appears in a type is its ID, and the exact form of the shape TABLE is a
+;; question for whichever milestone first needs to serialise a whole program.
+;;
+;; An undefined id prints as `#<id>?` rather than aborting: a printer is observation, and a debug
+;; dump of a half-built table is exactly when you want to see the id that is wrong.
+(defn shape-print [(w (ptr Writer)) (s i64)] (-> i64)
+  (ps w "#")
+  (dec-print w s)
+  (if (not (shape-defined? s)) (ps w "?")
+    (do (ps w "{")
+        (let [n (shape-field-count s) (mut i) 0]
+          (loop
+            (if (>= (load i) n) (break)
+              (do (if (> (load i) 0) (ps w ", ") 0)
+                  (print-str w (shape-name-bytes (shape-field-name s (load i))))
+                  (ps w ":")
+                  (ty-print w (shape-field-ty s (load i)))
+                  (ps w "@")
+                  (dec-print w (shape-field-offset s (load i)))
+                  (ps w "/a")
+                  (dec-print w (shape-field-alias s (load i)))
+                  (store! i (+ (load i) 1))
+                  0))))
+        (ps w "}")
+        0)))

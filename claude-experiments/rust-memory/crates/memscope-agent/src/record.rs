@@ -60,10 +60,22 @@ pub struct FileRecorder {
     written: u64,
 }
 
+/// Expand `{pid}` in a recording path.
+///
+/// One `MEMSCOPE_RECORD` value is inherited by every child process (a Node app
+/// spawning Rust workers, a tool that offloads to a daemon), and they would all
+/// write the same file. `{pid}` gives each process its own — the same template
+/// slot `MEMSCOPE_HPROF_OUT` already has.
+pub fn expand_path(path: &str) -> String {
+    path.replace("{pid}", &std::process::id().to_string())
+}
+
 impl FileRecorder {
-    /// Create a recorder for `path`. Binary unless the path ends in `.json` or
-    /// `.jsonl`. Builds the DWARF oracle once so sites resolve to types + stacks.
+    /// Create a recorder for `path` (`{pid}` expands). Binary unless the path
+    /// ends in `.json` or `.jsonl`. Sites are written raw; the reader resolves
+    /// them against the recorded image's DWARF.
     pub fn create(path: &str) -> std::io::Result<Self> {
+        let path = &expand_path(path);
         let format = if path.ends_with(".json") || path.ends_with(".jsonl") {
             Format::Json
         } else {
@@ -345,6 +357,6 @@ pub fn record_to_file(path: &str) -> std::io::Result<()> {
     unsafe {
         libc::atexit(drain_at_exit);
     }
-    eprintln!("[memscope] recording allocations to {path}");
+    eprintln!("[memscope] recording allocations to {}", expand_path(path));
     Ok(())
 }

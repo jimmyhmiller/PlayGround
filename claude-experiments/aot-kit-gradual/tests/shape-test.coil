@@ -1,0 +1,960 @@
+;; The M4 slice 4a gate: the shape table.
+;;
+;; A shape is an ORDERED field list and adding a field is an edge in a tree rooted at the
+;; field-less shape 0, so almost everything worth asserting here is an invariant over the whole
+;; table rather than a value read back out of one call. The four claims, and what each one is
+;; standing in the way of:
+;;
+;;   1. THE EDGE IS THE IDENTITY. `shape-transition` is memoised on `(s, name)`, so the same field
+;;      sequence is the same shape id however often the program walks it, and `{x,y}` and `{y,x}`
+;;      are DIFFERENT shapes. Memoise on the field SET instead and those two collapse, which makes
+;;      a field's offset depend on which path reached the shape: the one thing a hidden class
+;;      exists to prevent.
+;;   2. THE ALIAS AND THE OFFSET BELONG TO THE INTRODUCING EDGE, not to the shape. That is what
+;;      makes a store through `{x}` and a load through `{x,y}` name the same word, which is the
+;;      whole basis of 4b's memory SSA. Allocate per `(shape, field)` instead and the two touch
+;;      different words while every type still checks out.
+;;   3. LAYOUT IS ONE EXPRESSION. Field `i` sits at `8 * (SHAPE-HEADER-WORDS + i)`; the stride is 8
+;;      because D3 says a dynamic value is one NaN-boxed word. Drop the header and a field
+;;      overwrites the hidden-class word; change the stride and fields overlap.
+;;   4. EVERY REFUSAL HAS A NAME. "It aborted" is satisfied by a table that always aborts, so each
+;;      provocation below asserts the SPECIFIC message, captured out of a forked child through a
+;;      pipe, and the suite measures how many DIFFERENT refusals it reached.
+;;
+;; THE VACUITY DEFENCE. Every structural sweep counts what it compared and refuses to pass below a
+;; floor, because "the invariant holds" is trivially true of an empty loop, and the fixture is built
+;; as a FOREST rather than a chain: a chain would satisfy the inheritance claims while saying
+;; nothing about what a sibling branch does NOT inherit, and it contains no pair of unrelated
+;; shapes at all, which is the pair 4c's two-inline-paths fixture rests on.
+;;
+;;   coil test tests/shape-test.coil
+(module shapetest)
+
+(import "../src/shape.coil" :use *)
+(import "../src/ty.coil"    :use *)
+(import "assert.coil"   :use *)
+(import "control.coil"  :use *)
+(import "io.coil"       :use *)
+(import "fmt.coil"      :use *)
+(import "alloc.coil"    :use *)
+(import "str.coil"      :use *)
+(import "slice.coil"    :use *)
+
+;; A HARD ERROR CAN ONLY BE OBSERVED FROM ANOTHER PROCESS, and its MESSAGE only through a pipe.
+;; `abort` takes the whole program with it, so the child does the thing that must abort, its fd 2
+;; is redirected into a pipe, and the parent reads the message and the wait status. Same shape as
+;; `g_parse_aborts_instead_of_returning_a_partial_graph` in tests/gtext-test.coil, one step further:
+;; the status says it died, the captured bytes say WHICH refusal noticed.
+;;
+;; `read` comes from io.coil, which already declares it; declaring it again here would be a second
+;; declaration of the same libc symbol in one link.
+(extern fork    :cc c [] (-> i32))
+(extern waitpid :cc c [i32 (ptr i32) i32] (-> i32))
+(extern _exit   :cc c [i32] (-> void))
+(extern pipe    :cc c [(ptr i32)] (-> i32))
+(extern dup2    :cc c [i32 i32] (-> i32))
+(extern close   :cc c [i32] (-> i32))
+
+(const SIG-ABRT i64 6)          ; what `abort` raises; asserted exactly, not as "some signal"
+
+;; "This shape was created by no edge", which is true of exactly the root.
+(const PARENT-NONE i64 -1)
+
+; ---------------------------------------------------------------------------
+; Floors. A number here fails loudly when the thing it measures shrinks.
+; ---------------------------------------------------------------------------
+;; The witness forest: 8 transitions, so 9 shapes and 8 aliases. Written down because every sweep
+;; below ranges over "every shape in the table", and that phrase means nothing if the table is the
+;; root alone.
+(const FOREST-SHAPES i64 9)
+(const FOREST-EDGES  i64 8)
+
+;; How many (shape, field) pairs the inheritance, inverse and layout sweeps must actually compare.
+;; The forest has 0+1+2+3+2+1+2+1+2 = 14 field slots across its 9 shapes.
+(const FIELD-PAIRS-FLOOR i64 14)
+
+;; How many DIFFERENT named refusals the provocation table reaches. A table that tripped one
+;; message fourteen times would satisfy every individual assertion and test one check.
+(const REFUSAL-FLOOR i64 14)
+
+; ===========================================================================
+; Rendering and located failure reporting
+; ===========================================================================
+;; Buffer sizes are literals at both the `alloc-stack` and the `cap`, as in tests/text-test.coil:
+;; Coil has no const array dimensions, so a const used for only one of the two is a buffer overrun
+;; waiting for an edit.
+(defn shape-render [(s i64) (buf (ptr i8)) (cap i64)] (-> (slice u8))
+  (let [fb (alloc-stack FixBuf)
+        w  (alloc-stack Writer)]
+    (store! (field fb data) buf)
+    (store! (field fb cap)  cap)
+    (store! (field fb len)  0)
+    (fixed-buffer-writer w fb)
+    (shape-print w s)
+    (let [n (load (field fb len))]
+      ; a truncated string compares equal to another truncated string, so this is a hard error
+      ; rather than a shorter answer
+      (if (>= n cap) (do (ps (stderr) "\nshape-render: buffer too small\n") (abort) 0) 0)
+      (slice-new [u8] (cast (ptr u8) buf) n))))
+
+(defn sfail-head [(label (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "\nSHAPE GATE: ") (ps w label) (ps w "\n") 0))
+
+;; THE OFFENDING OBJECT HERE IS THE TABLE, so this is the analogue of dumping the graph: every
+;; shape with its whole field list, and every edge with the alias it allocated. A failure that
+;; printed two ids would tell you an invariant broke and nothing about which transition did it.
+(defn dump-table [] (-> i64)
+  (let [w (stderr) (mut i) 0]
+    (fmt w "  shape table: {d} shapes, {d} edges, {d} aliases, {d} field slots, {d} names\n"
+         (shape-count) (shape-edge-count) (shape-alias-count) (shape-fields-len)
+         (shape-name-count))
+    (loop
+      (if (>= (load i) (shape-count)) (break)
+        (do (ps w "    ") (shape-print w (load i)) (ps w "\n")
+            (store! i (+ (load i) 1))
+            0)))
+    (let [(mut e) 0]
+      (loop
+        (if (>= (load e) (shape-edge-count)) (break)
+          (do (let [ed (shape-edge-at (load e))]
+                (fmt w "    edge {d}: #{d} + " (load e) (se-from ed))
+                (ps w (shape-name-bytes (se-name ed)))
+                (fmt w " -> #{d}   alias a{d}  declared " (se-to ed) (se-alias ed))
+                (ty-print w (se-ty ed))
+                (ps w "\n"))
+              (store! e (+ (load e) 1))
+              0))))
+    0))
+
+(defn sfail1 [(label (slice u8)) (a i64)] (-> i64)
+  (sfail-head label)
+  (let [w (stderr)] (ps w "  shape a = ") (shape-print w a) (ps w "\n"))
+  (dump-table) (abort) 0)
+
+(defn sfail2 [(label (slice u8)) (a i64) (b i64)] (-> i64)
+  (sfail-head label)
+  (let [w (stderr)]
+    (ps w "  shape a = ") (shape-print w a) (ps w "\n")
+    (ps w "  shape b = ") (shape-print w b) (ps w "\n"))
+  (dump-table) (abort) 0)
+
+; ===========================================================================
+; Reading the table through its public surface
+; ===========================================================================
+;; A field name back as bytes. `shape-name-bytes` BORROWS the arena and the arena may move on the
+;; next intern, so every use here is immediate.
+(defn field-named? [(s i64) (i i64) (name (slice u8))] (-> bool)
+  (str-eq (shape-name-bytes (shape-field-name s i)) name))
+
+;; THE EDGE THAT CREATED `s`, found by scanning the edges rather than read out of a parent pointer,
+;; because the table has no parent pointer: a shape is its field window and nothing else. The root
+;; is created by no edge, which is what PARENT-NONE says.
+(defn parent-of [(s i64)] (-> i64)
+  (let [n (shape-edge-count) (mut i) 0 (mut p) PARENT-NONE]
+    (loop
+      (if (or (>= (load i) n) (!= (load p) PARENT-NONE)) (break)
+        (do (let [e (shape-edge-at (load i))]
+              (if (= (se-to e) s) (store! p (se-from e)) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load p)))
+
+;; "Is `a` on the transition chain that reaches `d`", `a = d` included. Used to make UNRELATED a
+;; checked fact rather than a claim in a comment: the two-inline-paths witness must be a pair
+;; neither of which is an ancestor of the other, or "the same field at different offsets" would be
+;; asserting something the inheritance rule already forbids.
+(defn ancestor-of? [(a i64) (d i64)] (-> bool)
+  (let [(mut cur) d (mut found) false]
+    (loop
+      (if (or (= (load cur) PARENT-NONE) (load found)) (break)
+        (do (if (= (load cur) a) (store! found true) 0)
+            (store! cur (parent-of (load cur)))
+            0)))
+    (load found)))
+
+; ===========================================================================
+; The witness forest
+; ===========================================================================
+;; DELIBERATELY NOT A CHAIN. A chain satisfies every inheritance claim while saying nothing about
+;; what a sibling branch does not inherit, and it contains no pair of unrelated shapes, which is
+;; exactly the pair slice 4c needs. So: a three-deep chain, a sibling hanging off its first link,
+;; both orders of the same two fields, and a third edge introducing `x` under a different parent.
+;;
+;;   #0 {}
+;;   #1 {x}            #2 {x,y}      #3 {x,y,z}
+;;                     #4 {x,w}      (sibling of #2: inherits x's alias, not y's)
+;;   #5 {y}            #6 {y,x}      (the other order: a different layout for the same field set)
+;;   #7 {a}            #8 {a,x}      (x introduced by a third edge, so a third alias)
+(defn forest-sx   [] (-> i64) (shape-transition SHAPE-ROOT "x" (t-dyn)))
+(defn forest-sxy  [] (-> i64) (shape-transition (forest-sx) "y" (t-int)))
+(defn forest-sxyz [] (-> i64) (shape-transition (forest-sxy) "z" (t-str)))
+(defn forest-sxw  [] (-> i64) (shape-transition (forest-sx) "w" (t-int)))
+(defn forest-sy   [] (-> i64) (shape-transition SHAPE-ROOT "y" (t-int)))
+(defn forest-syx  [] (-> i64) (shape-transition (forest-sy) "x" (t-dyn)))
+(defn forest-sa   [] (-> i64) (shape-transition SHAPE-ROOT "a" (t-dyn)))
+(defn forest-sax  [] (-> i64) (shape-transition (forest-sa) "x" (t-dyn)))
+
+;; Build it from a clean table. Every accessor above is memoised on `(shape, name)`, so calling
+;; them in any order builds the same forest; that is itself part of what test 1 asserts.
+(defn build-forest! [] (-> i64)
+  (shape-reset!)
+  (forest-sxyz) (forest-sxw) (forest-syx) (forest-sax)
+  (if (= (shape-count) FOREST-SHAPES) 0
+    (do (sfail1 "build-forest!: the forest is not the shape the floors describe" SHAPE-ROOT) 0))
+  (shape-count))
+
+; ===========================================================================
+; 1. A field sequence determines the shape, and the ORDER is part of it
+; ===========================================================================
+;; WHY IT WOULD FAIL IF THE FEATURE WERE REMOVED. Memoise the transition on the field SET and
+;; `{x,y}` and `{y,x}` become one id, so the `!=` goes red; drop the memo entirely and the same
+;; sequence walked twice mints two ids, so the `=` goes red. There is no implementation that
+;; passes both halves except memoisation on `(shape, name)`.
+(deftest a_field_sequence_determines_the_shape_and_the_order_is_part_of_it
+  (let [w (stdout) n (build-forest!)]
+    (fmt w "\n--- the witness forest: {d} shapes, {d} edges ---\n" n (shape-edge-count))
+    (dump-table)
+
+    ; the same sequence, walked again from the root: the same edges, so the same descendant
+    (assert (= (shape-transition SHAPE-ROOT "x" (t-dyn)) (forest-sx)))
+    (assert (= (shape-transition (forest-sx) "y" (t-int)) (forest-sxy)))
+    (assert (= (forest-sxy) (shape-transition (shape-transition SHAPE-ROOT "x" (t-dyn)) "y" (t-int))))
+
+    ; the OTHER order of the same field set is a DIFFERENT shape
+    (assert (!= (forest-sxy) (forest-syx)))
+    ; and both really do carry both fields, so the inequality is about layout and not about content
+    (assert (shape-has-field? (forest-sxy) "x"))
+    (assert (shape-has-field? (forest-sxy) "y"))
+    (assert (shape-has-field? (forest-syx) "x"))
+    (assert (shape-has-field? (forest-syx) "y"))
+    (assert (= (shape-field-count (forest-sxy)) 2))
+    (assert (= (shape-field-count (forest-syx)) 2))
+
+    ; the field lists are in TRANSITION order, which is the order the offsets follow
+    (assert (field-named? (forest-sxy) 0 "x"))
+    (assert (field-named? (forest-sxy) 1 "y"))
+    (assert (field-named? (forest-syx) 0 "y"))
+    (assert (field-named? (forest-syx) 1 "x"))
+    (assert (= (shape-find-field (forest-sxy) "x") 0))
+    (assert (= (shape-find-field (forest-syx) "x") 1))
+
+    ; "this shape does not carry that field" is a legitimate answer, not a stub: it is what lets a
+    ; polymorphic Load lift to TOP on one arm instead of forwarding from the wrong word
+    (assert (= (shape-find-field (forest-sxy) "z") SHAPE-NO-FIELD))
+    (assert (not (shape-has-field? SHAPE-ROOT "x")))
+    (assert (= (shape-field-count SHAPE-ROOT) 0))
+    ; and a name nothing ever interned is a miss rather than an intern: asking must not change the
+    ; table, or a failed lookup would grow the arena on every probe
+    (let [nn (shape-name-count)]
+      (assert (= (shape-find-field (forest-sxy) "never-mentioned") SHAPE-NO-FIELD))
+      (assert (= (shape-name-find "never-mentioned") SHAPE-NO-NAME))
+      (assert (= (shape-name-count) nn)))))
+
+; ===========================================================================
+; 2. Re-adding an existing field appends NOTHING
+; ===========================================================================
+;; The failure mode the type table already paid for once: an append-only side array plus a producer
+;; that reserves before it knows the answer leaks per CALL rather than per program. It fails by
+;; exactly +N per repeat if the memo is removed, so the loop count is large enough to be
+;; unmistakable and the assertions are equalities rather than bounds.
+(deftest re_adding_a_field_appends_nothing_to_the_table
+  (let [w (stdout)]
+    (build-forest!)
+    (let [ns (shape-count) ne (shape-edge-count) na (shape-alias-count)
+          nf (shape-fields-len) nn (shape-name-count) nt (ty-count)
+          (mut i) 0]
+      (loop
+        (if (>= (load i) 300) (break)
+          (do (forest-sxyz) (forest-sxw) (forest-syx) (forest-sax)
+              (store! i (+ (load i) 1))
+              0)))
+      (fmt w "\n--- 1200 memoised transitions ---\n")
+      (fmt w "  shapes {d} -> {d}, edges {d} -> {d}, aliases {d} -> {d}, field slots {d} -> {d}\n"
+           ns (shape-count) ne (shape-edge-count) na (shape-alias-count) nf (shape-fields-len))
+      (assert (= (shape-count) ns))
+      (assert (= (shape-edge-count) ne))
+      (assert (= (shape-alias-count) na))
+      (assert (= (shape-fields-len) nf))
+      ; nor does re-interning a name that is already in the arena
+      (assert (= (shape-name-count) nn))
+      (assert (= (shape-name-intern! "x") (shape-name-find "x")))
+      (assert (= (shape-name-count) nn))
+      ; and nothing about a repeat transition touches the LATTICE either
+      (assert (= (ty-count) nt)))))
+
+; ===========================================================================
+; 3. An alias and an offset are invariant along a transition chain
+; ===========================================================================
+;; THE CLAIM 4b's MEMORY SSA RESTS ON: a store through `{x}` and a load through `{x,y}` name the
+;; same word. The alias is allocated at the edge that introduces the field and inherited unchanged,
+;; so every field of an ancestor is at the same INDEX, the same ALIAS and the same OFFSET in every
+;; descendant.
+;;
+;; WHY IT WOULD FAIL IF THE FEATURE WERE REMOVED. Allocate the alias per `(shape, field)` instead of
+;; per edge and `x`'s alias in `{x}` differs from its alias in `{x,y}`: the first pair below goes
+;; red immediately. That version typechecks, prints plausibly, and silently stops load-after-store
+;; forwarding from firing, which is why the assertion is on the alias NUMBER and not on the offset
+;; alone.
+(defn expect-prefix-preserved [(anc i64) (desc i64)] (-> i64)
+  (let [n (shape-field-count anc) (mut i) 0]
+    (if (<= n (shape-field-count desc)) 0
+      (do (sfail2 "a descendant carries FEWER fields than its ancestor" anc desc) 0))
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (= (shape-field-name anc (load i)) (shape-field-name desc (load i))) 0
+              (do (sfail2 "a transition REORDERED an inherited field" anc desc) 0))
+            (if (= (shape-field-alias anc (load i)) (shape-field-alias desc (load i))) 0
+              (do (sfail2 "a transition REALLOCATED an inherited field's alias" anc desc) 0))
+            (if (= (shape-field-offset anc (load i)) (shape-field-offset desc (load i))) 0
+              (do (sfail2 "a transition MOVED an inherited field's offset" anc desc) 0))
+            (if (= (shape-field-ty anc (load i)) (shape-field-ty desc (load i))) 0
+              (do (sfail2 "a transition CHANGED an inherited field's declared type" anc desc) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    n))
+
+(deftest an_alias_and_an_offset_are_invariant_along_a_transition_chain
+  (let [w (stdout) (mut pairs) 0]
+    (build-forest!)
+    (ps w "\n--- inheritance along every transition chain ---\n")
+    ; the named pairs, including the one 4b's forwarding rule is stated in terms of
+    (store! pairs (+ (load pairs) (expect-prefix-preserved (forest-sx)  (forest-sxy))))
+    (store! pairs (+ (load pairs) (expect-prefix-preserved (forest-sx)  (forest-sxyz))))
+    (store! pairs (+ (load pairs) (expect-prefix-preserved (forest-sxy) (forest-sxyz))))
+    ; a SIBLING branch: {x,w} inherits x's alias from the same edge and has never seen y's
+    (store! pairs (+ (load pairs) (expect-prefix-preserved (forest-sx)  (forest-sxw))))
+    (store! pairs (+ (load pairs) (expect-prefix-preserved (forest-sy)  (forest-syx))))
+    (store! pairs (+ (load pairs) (expect-prefix-preserved (forest-sa)  (forest-sax))))
+
+    ; and then every ancestor/descendant pair in the whole table, which is the general form
+    (let [n (shape-count) (mut i) 0]
+      (loop
+        (if (>= (load i) n) (break)
+          (let [(mut j) 0]
+            (loop
+              (if (>= (load j) n) (break)
+                (do (if (and (!= (load i) (load j)) (ancestor-of? (load i) (load j)))
+                        (do (store! pairs
+                                    (+ (load pairs)
+                                       (expect-prefix-preserved (load i) (load j))))
+                            0)
+                      0)
+                    (store! j (+ (load j) 1))
+                    0)))
+            (store! i (+ (load i) 1))
+            0))))
+    (fmt w "  {d} inherited (shape, field) comparisons\n" (load pairs))
+
+    ; the concrete statement of the same thing, so a reader can see the number that matters:
+    ; x is field 0 at offset 8 with ONE alias in all four shapes that reached it through the
+    ; root -> x edge, and a DIFFERENT alias in the two shapes that introduced it elsewhere
+    (let [ax (shape-field-alias (forest-sx) 0)]
+      (assert (= (shape-field-alias (forest-sxy)  0) ax))
+      (assert (= (shape-field-alias (forest-sxyz) 0) ax))
+      (assert (= (shape-field-alias (forest-sxw)  0) ax))
+      (assert (= (shape-field-offset (forest-sxy) 0) (shape-field-offset (forest-sx) 0)))
+      (assert (!= (shape-field-alias (forest-syx) 1) ax))
+      (assert (!= (shape-field-alias (forest-sax) 1) ax)))
+    ; a sibling's own field is NOT inherited across the branch: {x,y} and {x,w} share x and
+    ; nothing else, which is what makes an alias a per-edge fact rather than a per-name one
+    (assert (!= (shape-field-alias (forest-sxy) 1) (shape-field-alias (forest-sxw) 1)))
+    (assert (= (shape-field-offset (forest-sxy) 1) (shape-field-offset (forest-sxw) 1)))
+
+    ; the sweep really compared something
+    (assert (>= (load pairs) FIELD-PAIRS-FLOOR))))
+
+; ===========================================================================
+; 4. field -> alias and alias -> (shape, index) are exact inverses
+; ===========================================================================
+;; Both directions exist because 4b's Load carries an alias and needs the offset, while 4c's
+;; store-to-load forwarding carries two aliases and has to know whether they are the same word. An
+;; inverse that is only one-way is how forwarding fires on the wrong field.
+;;
+;; The third assertion is the one that makes this more than a round trip: the number of aliases
+;; that resolve inside a shape must equal its field count exactly. A `shape-field-by-alias` that
+;; scanned names, or returned field 0 on a miss, would satisfy the round trip on every field it was
+;; handed and fail this.
+(deftest field_to_alias_and_alias_to_field_are_exact_inverses
+  (let [w (stdout) (mut fwd) 0 (mut back) 0]
+    (build-forest!)
+    (let [ns (shape-count) na (shape-alias-count) (mut s) 0]
+      (loop
+        (if (>= (load s) ns) (break)
+          (do (let [nf (shape-field-count (load s)) (mut i) 0]
+                (loop
+                  (if (>= (load i) nf) (break)
+                    (do (if (= (shape-field-by-alias (load s) (shape-field-alias (load s) (load i)))
+                               (load i)) 0
+                          (do (sfail1 "an alias did not resolve back to the field it came from"
+                                      (load s)) 0))
+                        (store! fwd (+ (load fwd) 1))
+                        (store! i (+ (load i) 1))
+                        0)))
+                ; every alias in the table, against this shape: it either resolves to a field
+                ; carrying that exact alias, or it is not this layout's alias at all
+                (let [(mut a) 0 (mut hits) 0]
+                  (loop
+                    (if (>= (load a) na) (break)
+                      (do (let [idx (shape-field-by-alias (load s) (load a))]
+                            (if (= idx SHAPE-NO-FIELD) 0
+                              (do (if (= (shape-field-alias (load s) idx) (load a)) 0
+                                    (do (sfail1 "alias -> field landed on a field with another alias"
+                                                (load s)) 0))
+                                  (store! hits (+ (load hits) 1))
+                                  0)))
+                          (store! back (+ (load back) 1))
+                          (store! a (+ (load a) 1))
+                          0)))
+                  (if (= (load hits) nf) 0
+                    (do (sfail1 "the number of aliases resolving inside this shape is not its field count"
+                                (load s)) 0)))
+                0)
+              (store! s (+ (load s) 1))
+              0))))
+    (fmt w "\n--- alias inverses ---\n  {d} fields resolved forward, {d} (shape, alias) probes\n"
+         (load fwd) (load back))
+    ; an alias nothing allocated belongs to no layout; SHAPE-NO-FIELD is the legitimate answer, not
+    ; an abort, because a sibling branch's alias is a genuine miss on this shape
+    (assert (= (shape-field-by-alias (forest-sxy) (shape-alias-count)) SHAPE-NO-FIELD))
+    (assert (= (shape-field-by-alias (forest-sxy) (shape-field-alias (forest-sxw) 1))
+               SHAPE-NO-FIELD))
+    (assert (>= (load fwd) FIELD-PAIRS-FLOOR))
+    (assert (>= (load back) FIELD-PAIRS-FLOOR))))
+
+; ===========================================================================
+; 5. Every alias comes from its own edge
+; ===========================================================================
+;; The pairwise statement of "the alias belongs to the introducing edge": distinct edges have
+;; distinct aliases, and there are exactly as many aliases as edges. Together with the inheritance
+;; sweep this pins the allocation to the edge from both sides: no edge shares an alias with
+;; another, and no descendant re-allocates one.
+(deftest distinct_introducing_edges_get_distinct_aliases
+  (let [w (stdout) (mut cmps) 0]
+    (build-forest!)
+    (let [ne (shape-edge-count) (mut i) 0]
+      (loop
+        (if (>= (load i) ne) (break)
+          (let [(mut j) 0]
+            (loop
+              (if (>= (load j) ne) (break)
+                (do (if (or (= (load i) (load j))
+                            (!= (se-alias (shape-edge-at (load i)))
+                                (se-alias (shape-edge-at (load j))))) 0
+                      (do (sfail2 "two different edges allocated the same alias"
+                                  (se-to (shape-edge-at (load i)))
+                                  (se-to (shape-edge-at (load j)))) 0))
+                    (store! cmps (+ (load cmps) 1))
+                    (store! j (+ (load j) 1))
+                    0)))
+            (store! i (+ (load i) 1))
+            0))))
+    (fmt w "\n--- {d} edge alias comparisons over {d} edges ---\n" (load cmps) (shape-edge-count))
+    ; the alias each edge carries is the one the field it introduced carries in the shape it made
+    (let [ne (shape-edge-count) (mut i) 0]
+      (loop
+        (if (>= (load i) ne) (break)
+          (let [e (shape-edge-at (load i))
+                to (se-to e)
+                last (- (shape-field-count to) 1)]
+            (assert (= (shape-field-alias to last) (se-alias e)))
+            (assert (= (shape-field-name  to last) (se-name e)))
+            (assert (= (shape-field-ty    to last) (se-ty e)))
+            (assert (= (shape-field-count (se-from e)) last))
+            (store! i (+ (load i) 1))
+            0))))
+    (assert (>= (load cmps) (* FOREST-EDGES (- FOREST-EDGES 1))))
+    (assert (= (shape-edge-count) FOREST-EDGES))))
+
+; ===========================================================================
+; 6. The layout: one word per field, past the header, no overlap
+; ===========================================================================
+;; Field `i` of ANY shape sits at `8 * (SHAPE-HEADER-WORDS + i)`, and this sweep is that expression
+;; restated as five independent properties so that a change to either constant is caught by name:
+;; drop the header and the first field lands on the hidden-class word (`> 0` and the header bound go
+;; red); change the stride and the step, the alignment and the size coverage all go red at once.
+(deftest offsets_are_one_word_apart_past_the_header_and_covered_by_shape_size
+  (let [w (stdout) (mut fields) 0]
+    (build-forest!)
+    ; the header exists at all, which is what makes "past the header" a claim rather than an
+    ; identity, and the root's size is the header alone: a field-less object still carries its
+    ; hidden class
+    (assert (>= SHAPE-HEADER-WORDS 1))
+    (assert (= SHAPE-WORD-BYTES 8))
+    (assert (= (shape-size SHAPE-ROOT) (* SHAPE-WORD-BYTES SHAPE-HEADER-WORDS)))
+
+    (let [ns (shape-count) (mut s) 0]
+      (loop
+        (if (>= (load s) ns) (break)
+          (do (let [nf (shape-field-count (load s)) (mut i) 0 (mut prev) -1]
+                (if (= (shape-size (load s))
+                       (* SHAPE-WORD-BYTES (+ SHAPE-HEADER-WORDS nf))) 0
+                  (do (sfail1 "shape-size is not the header plus one word per field" (load s)) 0))
+                (loop
+                  (if (>= (load i) nf) (break)
+                    (let [off (shape-field-offset (load s) (load i))]
+                      ; the ONE layout expression, and every field agrees with it
+                      (if (= off (shape-offset-of-index (load i))) 0
+                        (do (sfail1 "a field's offset is not 8 * (header + index)" (load s)) 0))
+                      ; past the header, so no field can overwrite the hidden-class word
+                      (if (>= off (* SHAPE-WORD-BYTES SHAPE-HEADER-WORDS)) 0
+                        (do (sfail1 "a field's offset is inside the object header" (load s)) 0))
+                      (if (> off 0) 0
+                        (do (sfail1 "a field sits at offset 0, where the hidden class lives" (load s)) 0))
+                      ; 8-aligned, because a NaN-boxed value is one 64-bit word (D3)
+                      (if (= (urem off SHAPE-WORD-BYTES) 0) 0
+                        (do (sfail1 "a field's offset is not 8-aligned" (load s)) 0))
+                      ; strictly increasing, and by exactly one word, so no two fields overlap
+                      (if (> (load i) 0)
+                          (do (if (> off (load prev)) 0
+                                (do (sfail1 "field offsets are not strictly increasing" (load s)) 0))
+                              (if (= (- off (load prev)) SHAPE-WORD-BYTES) 0
+                                (do (sfail1 "two adjacent fields are not one word apart" (load s)) 0))
+                              0)
+                        0)
+                      ; and the whole field is inside the object
+                      (if (<= (+ off SHAPE-WORD-BYTES) (shape-size (load s))) 0
+                        (do (sfail1 "a field runs past the end of the object" (load s)) 0))
+                      (store! prev off)
+                      (store! fields (+ (load fields) 1))
+                      (store! i (+ (load i) 1))
+                      0)))
+                0)
+              (store! s (+ (load s) 1))
+              0))))
+    (fmt w "\n--- layout over every field of every shape ---\n  {d} fields checked\n" (load fields))
+
+    ; the concrete numbers, so that a reader can see what "one word past a one-word header" means
+    (assert (= (shape-field-offset (forest-sxyz) 0) 8))
+    (assert (= (shape-field-offset (forest-sxyz) 1) 16))
+    (assert (= (shape-field-offset (forest-sxyz) 2) 24))
+    (assert (= (shape-size (forest-sxyz)) 32))
+    (assert (= (shape-size (forest-sx)) 16))
+    (assert (>= (load fields) FIELD-PAIRS-FLOOR))))
+
+; ===========================================================================
+; 7. Two UNRELATED shapes put the same field at DIFFERENT offsets
+; ===========================================================================
+;; THE FACT 4c's "a shape-polymorphic site keeps two inline paths instead of collapsing" RESTS ON.
+;; If both shapes happened to put `x` at the same offset, that fixture would be monomorphic in
+;; everything but its shape id and would pass with one inline path, which is why this is asserted
+;; here rather than left to be noticed there.
+;;
+;; UNRELATED is a checked fact: neither shape is on the other's transition chain, so the different
+;; offsets are not the inheritance rule restated. `{x,y}` versus `{y,x}` is the strongest form,
+;; because BOTH shared fields move.
+(deftest two_unrelated_shapes_put_the_same_field_at_different_offsets
+  ; THE TABLE IS BUILT BEFORE ANY ID IS READ. `shape-reset!` renumbers, so an id bound in a `let`
+  ; whose body then resets the table is a stale id that still looks perfectly valid.
+  (build-forest!)
+  (let [w (stdout) a (forest-sxy) b (forest-syx) c (forest-sax)]
+    (ps w "\n--- a shape-polymorphic witness ---\n")
+    (let [e (stdout)]
+      (ps e "  ") (shape-print e a) (ps e "\n")
+      (ps e "  ") (shape-print e b) (ps e "\n")
+      (ps e "  ") (shape-print e c) (ps e "\n"))
+
+    ; distinct, defined, and genuinely unrelated
+    (assert (!= a b))
+    (assert (shape-defined? a))
+    (assert (shape-defined? b))
+    (assert (not (ancestor-of? a b)))
+    (assert (not (ancestor-of? b a)))
+    (assert (not (ancestor-of? a c)))
+    (assert (not (ancestor-of? c a)))
+
+    ; the same field name, at two different indices, offsets and aliases
+    (let [ia (shape-find-field a "x") ib (shape-find-field b "x")]
+      (assert (!= ia SHAPE-NO-FIELD))
+      (assert (!= ib SHAPE-NO-FIELD))
+      (assert (!= ia ib))
+      (assert (!= (shape-field-offset a ia) (shape-field-offset b ib)))
+      (assert (!= (shape-field-alias  a ia) (shape-field-alias  b ib))))
+    ; and `y` moves the other way, so neither shape is a permutation the other could be read as
+    (let [ja (shape-find-field a "y") jb (shape-find-field b "y")]
+      (assert (!= (shape-field-offset a ja) (shape-field-offset b jb))))
+    ; the third witness shares no prefix at all: {a,x} carries x at index 1 like {y,x} does, with
+    ; a third alias again, which is what makes a two-shape site's two paths two paths
+    (let [ic (shape-find-field c "x")]
+      (assert (= ic 1))
+      (assert (!= (shape-field-alias c ic) (shape-field-alias a (shape-find-field a "x"))))
+      (assert (!= (shape-field-alias c ic) (shape-field-alias b (shape-find-field b "x")))))
+
+    ; AND THE LATTICE KEEPS BOTH, which is the other half of "two inline paths": the object types
+    ; are distinct elements and their meet is the two-shape set, not a collapse to `obj`
+    (let [ta (t-obj-shape a) tb (t-obj-shape b) both (ty-meet (t-obj-shape a) (t-obj-shape b))]
+      (assert (!= ta tb))
+      (assert (= both (t-obj-shapes (| (<< 1 a) (<< 1 b)))))
+      (assert (!= both (t-obj)))
+      (assert (ty-isa ta both))
+      (assert (ty-isa tb both)))))
+
+; ===========================================================================
+; 8. The transition graph is a tree, so aliases = shapes - 1
+; ===========================================================================
+;; DESIGN.md states this relation and rests the "ALIAS-MAX cannot fire in 4a" argument on it, so it
+;; is asserted rather than assumed: the moment 4b adds a second alias allocator (the header word) it
+;; stops holding, and this is the test that says so instead of the bound quietly becoming reachable.
+(deftest the_transition_graph_is_a_tree_so_aliases_are_shapes_minus_one
+  (let [w (stdout) n (build-forest!)]
+    (assert (shape-alias-invariant-ok?))
+    (assert (= (shape-alias-count) (shape-edge-count)))
+    (assert (= (shape-count) (+ (shape-edge-count) 1)))
+    (assert (= n FOREST-SHAPES))
+    ; a tree: every shape but the root has exactly one parent, and the root has none
+    (assert (= (parent-of SHAPE-ROOT) PARENT-NONE))
+    (let [(mut s) 1 (mut parents) 0]
+      (loop
+        (if (>= (load s) (shape-count)) (break)
+          (do (if (!= (parent-of (load s)) PARENT-NONE) 0
+                (do (sfail1 "a non-root shape was created by no edge" (load s)) 0))
+              ; and its parent is strictly earlier, so the ids themselves are a topological order
+              (if (< (parent-of (load s)) (load s)) 0
+                (do (sfail1 "a shape's parent has a LATER id than the shape" (load s)) 0))
+              (store! parents (+ (load parents) 1))
+              (store! s (+ (load s) 1))
+              0)))
+      (fmt w "\n--- the transition graph is a tree: {d} shapes, {d} parents, {d} aliases ---\n"
+           (shape-count) (load parents) (shape-alias-count))
+      (assert (= (load parents) (- FOREST-SHAPES 1))))
+    ; a fresh table is the root alone, with no aliases spent
+    (shape-reset!)
+    (assert (= (shape-count) 1))
+    (assert (= (shape-alias-count) 0))
+    (assert (= (shape-edge-count) 0))
+    (assert (= (shape-field-count SHAPE-ROOT) 0))
+    (assert (shape-alias-invariant-ok?))))
+
+; ===========================================================================
+; 9. shape-of-fields is shape-transition folded, and nothing else
+; ===========================================================================
+;; The convenience 4b's object literals want. It is asserted to be the FOLD rather than a second
+;; construction path: same ids, same aliases, and no growth, because a second path is a second set
+;; of offsets waiting to disagree.
+(deftest shape_of_fields_is_shape_transition_folded
+  (build-forest!)
+  (let [ns (alloc-stack (array (slice u8) 3))
+        ts (alloc-stack (array i64 3))]
+    (store! (index ns 0) "x")
+    (store! (index ns 1) "y")
+    (store! (index ns 2) "z")
+    (store! (index ts 0) (t-dyn))
+    (store! (index ts 1) (t-int))
+    (store! (index ts 2) (t-str))
+    (let [n0 (shape-count)
+          f0 (shape-fields-len)
+          s  (shape-of-fields (slice-new [(slice u8)] (cast (ptr (slice u8)) (index ns 0)) 3)
+                              (slice-new [i64] (cast (ptr i64) (index ts 0)) 3))]
+      ; the forest already built this chain, so the fold hits the memo the whole way down
+      (assert (= s (forest-sxyz)))
+      (assert (= (shape-count) n0))
+      (assert (= (shape-fields-len) f0))
+      ; and the empty list is the root, not a new shape
+      (assert (= (shape-of-fields (slice-new [(slice u8)] (cast (ptr (slice u8)) (index ns 0)) 0)
+                                  (slice-new [i64] (cast (ptr i64) (index ts 0)) 0))
+                 SHAPE-ROOT)))))
+
+; ===========================================================================
+; 10. A type may name a shape the table never created, and only the table can say
+; ===========================================================================
+;; The consequence of the shape-id bitset being OPAQUE to `meet` (DESIGN.md: a shape id does not do
+;; two things). `t-obj-shape 2` is a legal type against an empty table, because the lattice has no
+;; way to ask and must not pretend to: `Val.shapes` is a bitset exactly as `fidxs` is. So the
+;; question "is this a defined shape" has exactly one answer-giver, and this test pins both halves:
+;; the lattice accepts the id, and the table refuses every operation on it BY NAME (in test 11).
+;;
+;; This is also the honest form of a worry raised against `ty-sample`, which contains
+;; `t-obj-shape 2` while building no shapes at all: that entry is not a latent bug, it is this
+;; decision, and the reason it is safe is that no lattice operation reads the shape TABLE.
+(deftest a_type_may_name_a_shape_the_table_never_created_and_only_the_table_can_say
+  (shape-reset!)
+  (let [w (stdout)]
+    ; the table holds the root and nothing else
+    (assert (= (shape-count) 1))
+    (assert (shape-defined? SHAPE-ROOT))
+    (assert (not (shape-defined? 1)))
+    (assert (not (shape-defined? 2)))
+    (assert (not (shape-defined? -1)))
+    (assert (not (shape-defined? SHAPE-MAX)))
+    ; and the lattice will still name shape 2, meet it, dual it and print it
+    (let [t (t-obj-shape 2)]
+      (assert (!= t (t-bot)))
+      (assert (!= t (t-obj)))
+      (assert (ty-isa t (t-obj)))
+      (assert (= (ty-dual (ty-dual t)) t))
+      (assert (!= (ty-meet t (t-obj-shape 3)) t))
+      (ps w "\n--- a type naming an uncreated shape: ") (ty-print w t) (ps w " ---\n"))
+    ; every id the bitset can hold is a legal type, including the last bit
+    (assert (!= (t-obj-shape (- SHAPE-MAX 1)) (t-bot)))
+    ; the boundary between "the lattice cannot name it" and "the table has not created it" is
+    ; exactly SHAPE-MAX, and the two are different failures: one aborts (test 11), one is `false`
+    (assert (not (shape-defined? (- SHAPE-MAX 1))))))
+
+; ===========================================================================
+; 11. Every refusal aborts BY NAME
+; ===========================================================================
+;; "It aborted" is satisfied by a table that always aborts, so each provocation asserts the
+;; SPECIFIC message. The child's fd 2 is redirected into a pipe, so the parent can read what the
+;; refusal said; the wait status says it died of SIGABRT and not of anything else.
+;;
+;; WHY IT WOULD FAIL IF THE FEATURE WERE REMOVED: with the check gone the child falls through to
+;; `_exit(0)`, so the status is a normal exit and the captured bytes are empty. With the check
+;; present but renamed or merged into another, the needle is missing and the suite reports which
+;; provocation lost its name.
+(const PV-UNDEF-REC       i64 0)   ; shape-rec on an id no transition created
+(const PV-UNDEF-TRANS     i64 1)   ; shape-transition from an id no transition created
+(const PV-DUP-FIELD       i64 2)   ; adding a field the chain already carries
+(const PV-TY-DISAGREE     i64 3)   ; two call sites declaring the same field differently
+(const PV-BAD-DECL-TY     i64 4)   ; a field declared `ctrl`, which a memory word cannot hold
+(const PV-WINDOW-HOLE     i64 5)   ; closing a field window with a slot nobody filled
+(const PV-FIELD-INDEX     i64 6)   ; a field index outside the shape's own window
+(const PV-NEG-INDEX       i64 7)   ; a negative field index
+(const PV-NAME-ID         i64 8)   ; a name id nothing interned
+(const PV-SHAPE-MAX       i64 9)   ; the 65th shape: `Val.shapes` has no bit for it
+(const PV-ALIAS-MAX       i64 10)  ; the 65th alias: `TMem.aliases` has no bit for it
+(const PV-OBJ-SHAPE-BIT   i64 11)  ; t-obj-shape at the bitset's width
+(const PV-MEM-ALIAS-BIT   i64 12)  ; t-mem-alias at the bitset's width
+(const PV-FIELDS-MISMATCH i64 13)  ; shape-of-fields with a name that has no declared type
+
+;; A field name for the long chain: `fNN`, two digits, so 100 distinct names with no allocation.
+(defn chain-name [(i i64) (buf (ptr u8))] (-> (slice u8))
+  (store! (index buf 0) (cast u8 \f))
+  (store! (index buf 1) (cast u8 (+ \0 (udiv i 10))))
+  (store! (index buf 2) (cast u8 (+ \0 (urem i 10))))
+  (slice-new [u8] buf 3))
+
+;; `n` transitions from the root, each introducing a fresh field: a linear chain, so it allocates
+;; one shape and one alias per step and reaches the bound in the fewest calls.
+(defn build-chain! [(n i64)] (-> i64)
+  (let [nb (alloc-stack (array u8 8)) (mut s) SHAPE-ROOT (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (store! s (shape-transition (load s)
+                                        (chain-name (load i) (cast (ptr u8) (index nb 0)))
+                                        (t-dyn)))
+            (store! i (+ (load i) 1))
+            0)))
+    (load s)))
+
+(defn burn-aliases! [(n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (assert (= (shape-alias-new!) (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    (shape-alias-count)))
+
+;; THE THING THAT MUST ABORT. Runs in the child only. Each arm starts from a table it establishes
+;; itself, so the parent's state cannot make a provocation fire for the wrong reason.
+(defn provoke [(which i64)] (-> i64)
+  (shape-reset!)
+  (case which
+    PV-UNDEF-REC       (shape-field-count 7)
+    PV-UNDEF-TRANS     (shape-transition 7 "x" (t-dyn))
+    PV-DUP-FIELD       (shape-transition (shape-transition SHAPE-ROOT "x" (t-dyn)) "x" (t-dyn))
+    PV-TY-DISAGREE     (do (shape-transition SHAPE-ROOT "x" (t-dyn))
+                           (shape-transition SHAPE-ROOT "x" (t-int)))
+    PV-BAD-DECL-TY     (shape-transition SHAPE-ROOT "x" (t-ctrl))
+    PV-WINDOW-HOLE     (let [b (shape-fields-open 2)]
+                         ; slot 0 filled, slot 1 left as the reserved hole
+                         (shape-fields-put! b 0 (shape-name-intern! "x") (t-dyn) 0 8)
+                         (shape-fields-close b))
+    PV-FIELD-INDEX     (shape-field-offset (shape-transition SHAPE-ROOT "x" (t-dyn)) 1)
+    PV-NEG-INDEX       (shape-offset-of-index -1)
+    PV-NAME-ID         (do (ps (stdout) "") (slice-len (shape-name-bytes 99)))
+    PV-SHAPE-MAX       (build-chain! SHAPE-MAX)          ; root + SHAPE-MAX shapes = one too many
+    PV-ALIAS-MAX       (do (burn-aliases! ALIAS-MAX) (shape-alias-new!))
+    PV-OBJ-SHAPE-BIT   (t-obj-shape SHAPE-MAX)
+    PV-MEM-ALIAS-BIT   (t-mem-alias ALIAS-MAX (t-dyn))
+    PV-FIELDS-MISMATCH (let [ns (alloc-stack (array (slice u8) 2))
+                             ts (alloc-stack (array i64 2))]
+                         (store! (index ns 0) "x")
+                         (store! (index ns 1) "y")
+                         (store! (index ts 0) (t-dyn))
+                         (shape-of-fields
+                          (slice-new [(slice u8)] (cast (ptr (slice u8)) (index ns 0)) 2)
+                          (slice-new [i64] (cast (ptr i64) (index ts 0)) 1)))
+    (do (sfail-head "provoke: no such provocation") (abort) 0)))
+
+;; Fork, capture the child's stderr, and assert both halves: SIGABRT, and the message that names
+;; the check. Returns the provocation's BIT so the caller can measure how many DIFFERENT refusals
+;; the table reached.
+(defn expect-abort-naming [(which i64) (needle (slice u8))] (-> i64)
+  (let [w   (stdout)
+        fds (alloc-stack (array i32 2))
+        buf (alloc-stack (array u8 4096))
+        st  (alloc-stack i32)]
+    (store! (index fds 0) 0)
+    (store! (index fds 1) 0)
+    (store! st 0)
+    (if (= (cast i64 (pipe (cast (ptr i32) (index fds 0)))) 0) 0
+      (do (sfail-head "expect-abort-naming: pipe() failed") (abort) 0))
+    (let [rfd (load (index fds 0))
+          wfd (load (index fds 1))
+          pid (fork)]
+      (if (= (cast i64 pid) 0)
+          (do (dup2 wfd 2)          ; the refusal's message goes down the pipe
+              (close rfd)
+              (close wfd)
+              (provoke which)
+              (_exit 0)             ; reached only if the refusal did not fire
+              0)
+        (do (close wfd)
+            (let [(mut got) 0]
+              (loop
+                (let [n (cast i64 (read rfd (cast (ptr i8) (index buf (load got)))
+                                        (cast isize (- 4095 (load got)))))]
+                  (if (<= n 0) (break)
+                    (do (store! got (+ (load got) n))
+                        (if (>= (load got) 4095) (break) 0)
+                        0))))
+              (close rfd)
+              (waitpid pid st 0)
+              (let [status (cast i64 (load st))
+                    sig    (& status 127)
+                    code   (>> status 8)
+                    msg    (slice-new [u8] (cast (ptr u8) (index buf 0)) (load got))
+                    named  (match (str-find msg needle) (Some [i] true) (None [] false))]
+                (fmt w "  provocation {d}: signal {d}, exit {d}, {d} bytes: " which sig code (load got))
+                (if named (do (ps w "names \"") (ps w needle) (ps w "\"\n") 0)
+                  (do (ps w "MESSAGE DOES NOT NAME IT\n") 0))
+                (if (and (= sig SIG-ABRT) named) 0
+                  (do (sfail-head "a refusal did not fire, or did not name itself")
+                      (let [e (stderr)]
+                        (fmt e "  provocation {d}\n" which)
+                        (ps e "  wanted a SIGABRT whose message contains \"") (ps e needle)
+                        (ps e "\"\n")
+                        (fmt e "  got signal {d}, exit code {d}\n" sig code)
+                        (ps e "  the child said: \"") (ps e msg) (ps e "\"\n")
+                        (if (= sig 0)
+                            (ps e "  a normal exit means the check is GONE: the child ran past it\n")
+                          0))
+                      (abort)
+                      0))
+                (<< 1 which))))))))
+
+(deftest every_named_refusal_aborts_by_name
+  (let [w (stdout) (mut seen) 0]
+    (ps w "\n--- every refusal, observed from a child process ---\n")
+    (store! seen (| (load seen) (expect-abort-naming PV-UNDEF-REC
+                                                     "shape-rec: not a defined shape id")))
+    (store! seen (| (load seen) (expect-abort-naming PV-UNDEF-TRANS
+                                                     "shape-transition: not a defined shape id")))
+    (store! seen (| (load seen) (expect-abort-naming PV-DUP-FIELD
+                                                     "already carries a field with that name")))
+    (store! seen (| (load seen) (expect-abort-naming PV-TY-DISAGREE
+                                                     "declares a different type")))
+    (store! seen (| (load seen) (expect-abort-naming PV-BAD-DECL-TY
+                                                     "a field's declared type must be a value, ANY or ALL")))
+    (store! seen (| (load seen) (expect-abort-naming PV-WINDOW-HOLE
+                                                     "a field slot was never filled")))
+    (store! seen (| (load seen) (expect-abort-naming PV-FIELD-INDEX
+                                                     "outside this shape's field window")))
+    (store! seen (| (load seen) (expect-abort-naming PV-NEG-INDEX
+                                                     "negative field index")))
+    (store! seen (| (load seen) (expect-abort-naming PV-NAME-ID
+                                                     "not an interned name id")))
+    ; THE TWO BITSET BOUNDS, at all four sites that turn a number into a bit
+    (store! seen (| (load seen) (expect-abort-naming PV-SHAPE-MAX
+                                                     "the lattice's shape bitset is full (SHAPE-MAX)")))
+    (store! seen (| (load seen) (expect-abort-naming PV-ALIAS-MAX
+                                                     "no alias number left")))
+    (store! seen (| (load seen) (expect-abort-naming PV-OBJ-SHAPE-BIT
+                                                     "shape id is outside the value type's shape bitset (SHAPE-MAX)")))
+    (store! seen (| (load seen) (expect-abort-naming PV-MEM-ALIAS-BIT
+                                                     "alias number is outside the memory type's alias bitset (ALIAS-MAX)")))
+    (store! seen (| (load seen) (expect-abort-naming PV-FIELDS-MISMATCH
+                                                     "one declared type per field name")))
+    (fmt w "  {d} different named refusals reached\n" (popcount64 (load seen)))
+    (assert (>= (popcount64 (load seen)) REFUSAL-FLOOR))))
+
+; ===========================================================================
+; 12. The bound is reached one edge BEFORE the alias bound, and not one earlier
+; ===========================================================================
+;; The other half of the SHAPE-MAX provocation: it has to abort on the 65th shape and not on the
+;; 64th. Without this the abort test above would pass just as well against an off-by-one that
+;; refused a legal shape, which would make a 64-shape program uncompilable and look like a bug in
+;; whatever built the 64th shape.
+;;
+;; It also establishes the DESIGN claim that `ALIAS-MAX` is unreachable in 4a: at the moment the
+;; shape bound is full, exactly SHAPE-MAX - 1 aliases have been spent, so there is still an alias
+;; left over when there is no shape id left.
+(deftest the_shape_bound_is_reached_one_edge_before_the_alias_bound
+  (let [w (stdout)]
+    (shape-reset!)
+    ; SHAPE-MAX - 1 transitions: the root plus that many is exactly SHAPE-MAX shapes, all legal
+    (let [tip (build-chain! (- SHAPE-MAX 1))]
+      (fmt w "\n--- the shape table filled to its bound ---\n")
+      (fmt w "  {d} shapes, {d} aliases, {d} edges, deepest shape #{d} with {d} fields\n"
+           (shape-count) (shape-alias-count) (shape-edge-count) tip (shape-field-count tip))
+      (assert (= (shape-count) SHAPE-MAX))
+      (assert (= (shape-alias-count) (- SHAPE-MAX 1)))
+      (assert (shape-alias-invariant-ok?))
+      ; every id the table handed out is one the lattice can name, which is the whole point of the
+      ; bound being SHAPE-MAX rather than a policy number
+      (let [(mut s) 0]
+        (loop
+          (if (>= (load s) (shape-count)) (break)
+            (do (assert (shape-defined? (load s)))
+                (assert (!= (t-obj-shape (load s)) (t-bot)))
+                (store! s (+ (load s) 1))
+                0))))
+      ; and so is every alias
+      (let [(mut a) 0]
+        (loop
+          (if (>= (load a) (shape-alias-count)) (break)
+            (do (assert (!= (t-mem-alias (load a) (t-dyn)) (t-bot)))
+                (store! a (+ (load a) 1))
+                0))))
+      ; the deepest shape is still a legal layout: the bound is on the ID SPACE, not on the object
+      (assert (= (shape-field-count tip) (- SHAPE-MAX 1)))
+      (assert (= (shape-size tip) (* SHAPE-WORD-BYTES (+ SHAPE-HEADER-WORDS (- SHAPE-MAX 1)))))
+      ; one alias is still unspent when no shape id is left, which is why ALIAS-MAX cannot fire
+      (assert (< (shape-alias-count) ALIAS-MAX)))))
+
+; ===========================================================================
+; 13. The debug print is total, and is NOT a type form
+; ===========================================================================
+;; `shape-print` is deliberately not round-trippable: it contains `:`, which is the byte
+;; src/gtext.coil's line grammar scans for, so a shape's text could never appear in a graph line's
+;; type field. That is asserted from both sides. The debug form CONTAINS the byte (so the claim is
+;; measured, not assumed), and src/text.coil's exact form for a memory type does NOT (asserted
+;; byte-wise in tests/text-test.coil, where the types are).
+;;
+;; And a printer is observation: an undefined id prints `#N?` rather than aborting, because a dump
+;; of a half-built table is exactly when you want to see the id that is wrong.
+(defn count-byte [(s (slice u8)) (b i64)] (-> i64)
+  (let [n (slice-len s) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (= (cast i64 (slice-get s (load i))) b) (store! k (+ (load k) 1)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+(deftest the_debug_print_is_total_and_is_not_a_type_form
+  (let [w (stdout) ba (alloc-stack (array u8 4096)) (mut colons) 0 (mut bytes) 0]
+    (build-forest!)
+    (ps w "\n--- shape-print over the whole table ---\n")
+    (let [(mut s) 0]
+      (loop
+        (if (>= (load s) (shape-count)) (break)
+          (let [txt (shape-render (load s) (cast (ptr i8) ba) 4096)]
+            (ps w "  ") (ps w txt) (ps w "\n")
+            (store! bytes (+ (load bytes) (slice-len txt)))
+            (store! colons (+ (load colons) (count-byte txt \:)))
+            ; the id is in the text, and a defined shape does not print the `?` marker
+            (assert (= (count-byte txt \?) 0))
+            (assert (> (slice-len txt) 1))
+            (store! s (+ (load s) 1))
+            0))))
+    ; the shapes WITH fields carry a `:`, which is exactly why this form may never reach a type
+    (assert (> (load colons) 0))
+    (assert (> (load bytes) 40))
+    ; an undefined id is observation, not an abort
+    (let [txt (shape-render (shape-count) (cast (ptr i8) ba) 4096)]
+      (ps w "  an undefined id prints as: ") (ps w txt) (ps w "\n")
+      (assert (= (count-byte txt \?) 1))
+      (assert (= (count-byte txt \{) 0)))
+    ; and the sweep really printed the forest rather than one shape
+    (assert (= (shape-count) FOREST-SHAPES))))

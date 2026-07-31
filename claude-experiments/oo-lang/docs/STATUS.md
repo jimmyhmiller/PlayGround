@@ -1,6 +1,6 @@
 # Scry — Status: What Works, What Doesn't
 
-_Last updated: 2026-07-14. This is the honest source-of-truth for the current build.
+_Last updated: 2026-07-30. This is the honest source-of-truth for the current build.
 For design rulings see `DECISIONS.md`; for the as-built log + Coil friction see `06-implementation.md`._
 
 ## What Scry is
@@ -13,7 +13,7 @@ expressions against the real heap, invoke methods, run declared actions, and hot
 code, all while the program runs.
 
 Implemented in **Coil** (a Lisp-syntax low-level language). The compiler is a
-lexer → typechecker → bytecode VM; there is no JIT yet. ~321 golden + end-to-end tests
+lexer → typechecker → bytecode VM; there is no JIT yet. 333 golden + end-to-end tests
 gate every change (`python3 tests/run-tests.py`).
 
 - **Thesis:** observability-first. The viewer is not a debugger bolted on — it's the point.
@@ -31,7 +31,7 @@ coil build                       # build the `scry` binary (Coil toolchain requi
 ./scry check foo.scry            # typecheck only, no run
 ./scry inspect foo.scry          # serve static class structure WITHOUT running
 ./scry portal                    # reverse-proxy hub on :7357 — discovers & lists all programs
-python3 tests/run-tests.py       # the full gate (~301 tests)
+python3 tests/run-tests.py       # the full gate (333 tests)
 ```
 
 CLI subcommands (all real): `run`, `check`, `inspect`, `portal`, `eval`, `schema-json`,
@@ -222,6 +222,29 @@ objects and *leaves the ones already promoted to OLD*, then `gc()` sweeps those 
   This is what turns the assistant's tools from stubs into real work: `ShellTool` now executes,
   `SearchTool` greps the tree, and there are real `FileReadTool`/`FileWriteTool` — the model picks
   a tool, Scry actually does it, the output feeds back (offline golden: `agent_real_tool`).
+
+### Subscription-backed agent providers (production track)
+
+- `CliModel` delegates bounded turns to an installed, already-authenticated Claude Code or Codex
+  CLI. `/models` opens the terminal model picker with current Claude Fable/Opus/Sonnet aliases and
+  Codex GPT-5.6 Sol/Terra/Luna. The developer viewer mirrors the same state. The adapter never reads auth
+  caches, passes dynamic arguments directly to `execvp`, isolates child stdin from the REPL,
+  records real exit status, and exposes provider/call/error state as ordinary viewer-browsable
+  entities.
+- `ChildProcess` provides native asynchronous argv spawn, writable stdin, incremental stdout/stderr
+  polling, process-group termination, and bounded output. Claude partial-message events and Codex
+  app-server `item/agentMessage/delta` notifications stream directly into the terminal.
+- Native `Process.runArgv(executable, args, stdin, timeoutMs, maxOutputBytes)` returns a live,
+  browsable `{ exitCode, stdout, stderr, timedOut, truncated, durationMs }` entity. It cooperatively
+  drains both streams and kills the child process group when a deadline or output budget is hit.
+  Legacy shell-backed `Process.run/capture/exec` remain available for explicit shell tools, but no
+  provider path uses them.
+- Codex subscription execution is verified live. Claude subscription authentication is verified;
+  the current account's live completion gate is presently rate-limited, and the returned limit
+  message is surfaced as a model error.
+- This is the first production slice, not a production-readiness claim. Structured spawn/results,
+  timeout/cancellation, capability-based tools, persistence/recovery, and the operations-console
+  viewer are specified in `docs/10-production-agent.md`.
 - **A real LLM agent loop** — verified live against DeepSeek's Anthropic-compatible
   endpoint (default `deepseek-v4-pro` @ `https://api.deepseek.com/anthropic`; key from
   `DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY`). Real tool-use: the model picks a
@@ -274,7 +297,7 @@ These are real, current gaps. Most are deliberate PoC cut-lines, not bugs.
 
 ## Test & quality status
 
-- **~301 golden + end-to-end tests, all green.** Categories: `parse/` (AST snapshots +
+- **333 golden + end-to-end tests, all green.** Categories: `parse/` (AST snapshots +
   parse errors), `check/` (50 typecheck-error cases `e01`–`e50` + 25 success cases
   `s01`–`s25`), `eval/` (the reflection/live-change/trace wire surface, ~90 cases),
   `run/` (end-to-end program output, ~90 cases), `run-arenas/`, `run-err/`, `http/`,

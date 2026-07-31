@@ -1,13 +1,15 @@
 // examples/assistant.scry — the Phase 8c flagship: a Claude-Code-like interactive assistant with
 // a TRUE agent loop. The brain is now a real `Model` (interface): an AnthropicModel that does
-// model-driven tool use against the live /v1/messages API when ANTHROPIC_API_KEY is set, or a
-// deterministic ScriptedModel offline. Both drive the SAME loop (std.agent.runAgentLoop): the
-// model decides, tools run, results feed back, until a final answer. Structurally real (arena
+// model-driven tool use against the live /v1/messages API when selected in the viewer, subscription
+// delegation through Claude/Codex CLIs, or a deterministic ScriptedModel offline. They drive the
+// same observable agent shell; provider/model are live Orchestrator state, not launch flags.
+// In the native loop the model decides, tools run, and results feed back until a final answer.
+// Structurally real (arena
 // entities, real sub-agents on real OS threads, a live conversation) and — with a key — honestly
 // real (a live model actually calls a tool).
 //
 // Run it:   ./scry run examples/assistant.scry        (opens the viewer + reads your input)
-// Then at the `you> ` prompt, try:
+// Then at the `> ` prompt, try:
 //     hello                              <- plain chat: one agent turn (no tool needed)
 //     what is 17 times 23?               <- the model picks the `calculate` tool, runs it, answers
 //     weather in Tokyo?                  <- the model picks `get_weather` with the location it read
@@ -31,7 +33,7 @@
 //   class Session {
 //     history: List<String>
 //     fn init() { self.history = List<String>() }
-//     fn renderPrompt() -> String { "you> " }
+//     fn renderPrompt() -> String { "> " }
 //     fn suggest(input: String) -> String {
 //       if self.history.len() == 0 { "" }
 //       else { "  [suggestions: help | research <topic> | exit  (last: " + self.history.get(self.history.len() - 1) + ")]" }
@@ -44,7 +46,7 @@
 // The brain + tools + loop live in std/agent.scry (imported below); this file is the app shell:
 // the REPL, the orchestrator, the real sub-agent threads, and the viewer-facing entities.
 
-import agent.core.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, ShellTool, SearchTool, CalcTool, WeatherTool, FileReadTool, FileWriteTool, runAgentLoop, mkTextMessage}
+import agent.core.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, CliModel, ShellTool, SearchTool, CalcTool, WeatherTool, FileReadTool, FileWriteTool, runAgentLoop, mkTextMessage}
 
 // ============================ small string helpers ============================
 fn startsWith(s: String, p: String) -> Bool {
@@ -77,7 +79,8 @@ class Agent {
   color: String
   status: AgentStatus
   paused: Bool
-  model: Model                 // the brain — ScriptedModel offline, AnthropicModel with a key
+  lastResponseStreamed: Bool
+  model: Model                 // active brain, switched live from the Orchestrator control surface
   conversation: Conversation
   tools: List<Tool>
 
@@ -87,6 +90,7 @@ class Agent {
     self.color = color
     self.status = AgentStatus.Idle
     self.paused = false
+    self.lastResponseStreamed = false
     self.model = model
     self.conversation = Conversation()
     self.tools = tools
@@ -109,6 +113,7 @@ class Agent {
   fn say(user: String) -> String {
     self.conversation.append(mkTextMessage("user", user))
     let reply = self.model.complete(user)
+    self.lastResponseStreamed = self.model.streamedLastResponse()
     self.conversation.append(mkTextMessage("assistant", reply))
     reply
   }
@@ -117,6 +122,7 @@ class Agent {
   fn runLoop(task: String) -> String {
     self.begin()
     let out = runAgentLoop(self.conversation, self.model, self.tools, task, 8)
+    self.lastResponseStreamed = self.model.streamedLastResponse()
     self.status = AgentStatus.Idle
     out
   }
@@ -137,7 +143,7 @@ class SubAgentWorker implements Runnable {
       let reply = self.agent.say("${self.agent.role} step ${n} of ${self.turns} on ${self.topic}")
       let tool = self.agent.tools.get(0)
       self.agent.conversation.append(mkTextMessage("tool", tool.run(self.topic)))
-      Console.log(self.agent.banner() + "  step ${n}/${self.turns}  " + reply)
+      if !self.agent.lastResponseStreamed { Console.log(self.agent.banner() + "  step ${n}/${self.turns}  " + reply) }
       Clock.sleep(250)
       i = i + 1
     }
@@ -160,7 +166,7 @@ class LoopWorker implements Runnable {
       }
       let n = i + 1
       let ans = self.agent.runLoop(self.task)
-      Console.log(self.agent.banner() + "  loop ${n}/${self.rounds}  " + ans)
+      if !self.agent.lastResponseStreamed { Console.log(self.agent.banner() + "  loop ${n}/${self.rounds}  " + ans) }
       Clock.sleep(300)
       i = i + 1
     }
@@ -169,20 +175,20 @@ class LoopWorker implements Runnable {
 }
 
 // A ONE-SHOT turn on a background thread — used by the "Ask" action so that a message sent from
-// the VIEWER behaves like one typed at the prompt: it echoes `you> <question>` and prints the
+// the VIEWER behaves like one typed at the prompt: it echoes the question and prints the
 // reply in the terminal (the same way the input loop's dispatch does), AND it runs off the eval
 // thread so the viewer stays responsive while the live model works (the eval returns immediately).
 class TurnWorker implements Runnable {
   agent: Agent
   text: String
   fn run() -> Void {
-    // leading newline breaks off the pending `you> ` prompt; the marker shows it came from the viewer
+    // leading newline breaks off the pending prompt; the marker shows it came from the viewer
     Console.log("\n[viewer] " + self.text)
     let reply = self.agent.runLoop(self.text)
-    Console.log(self.agent.banner() + " " + reply)
+    if !self.agent.lastResponseStreamed { Console.log(self.agent.banner() + " " + reply) }
     // The main loop is still blocked in readLine (it drew the prompt before we ran), so it won't
-    // redraw it — re-show `you> ` ourselves so the terminal looks ready for the next input.
-    Console.print("you> ")
+    // redraw it so the terminal looks ready for the next input.
+    Console.print("> ")
   }
 }
 
@@ -191,19 +197,24 @@ class TurnWorker implements Runnable {
 class Session {
   history: List<String>
   fn init() { self.history = List<String>() }
-  fn renderPrompt() -> String { "you> " }
+  fn renderPrompt() -> String { "> " }
   fn suggest(input: String) -> String { "" }
 }
 
-// The orchestrator: owns the assistant Agent, the shared tools, and every spawned worker (+ its
-// ThreadHandle for a clean join at shutdown). Chooses the brain (Anthropic if a key is present,
-// else Scripted) and announces it. Keyword routing lives here.
+// The orchestrator: owns the assistant Agent, live provider policy, shared tools, and every spawned
+// worker (+ its ThreadHandle for a clean join at shutdown). Keyword routing lives here.
 class Orchestrator {
   agent: Agent
   subs: List<Agent>
   handles: List<ThreadHandle>
   tools: List<Tool>
   brainName: String
+  provider: String
+  modelId: String
+  apiBaseUrl: String
+  timeoutMs: Int
+  maxOutputBytes: Int
+  configError: String
 
   fn init() {
     self.tools = List<Tool>()
@@ -214,13 +225,149 @@ class Orchestrator {
     self.tools.push(FileReadTool(root: "."))             // REAL: reads files
     self.tools.push(FileWriteTool(root: "."))            // REAL: writes files
 
-    // Pick the brain: a real AnthropicModel when ANTHROPIC_API_KEY is set, else the ScriptedModel.
-    let brain = chooseBrain()
-    self.brainName = brainLabel()
+    // Model choice is persisted across sessions. A fresh install starts on Codex Luna.
+    self.provider = "codex"
+    self.modelId = "gpt-5.6-luna"
+    self.apiBaseUrl = "https://api.deepseek.com/anthropic"
+    self.timeoutMs = 120000
+    self.maxOutputBytes = 4194304
+    self.configError = ""
+    self.brainName = "Codex subscription"
     self.agent = Agent(name: "assistant", role: "orchestrator", color: "36",
-                       model: brain, tools: self.tools)
+                       model: ScriptedModel(persona: "assistant"), tools: self.tools)
     self.subs = List<Agent>()
     self.handles = List<ThreadHandle>()
+    match Env.get("SCRY_AGENT_TEST_MODE") {
+      Some(_) -> {
+        self.provider = "offline"
+        self.modelId = ""
+        self.brainName = "ScriptedModel - offline"
+      }
+      None -> {
+        match File.read(self.modelStatePath()) {
+          Some(saved) -> { self.restoreModel(saved) }
+          None -> {}
+        }
+        self.applyConfig()
+      }
+    }
+  }
+
+  fn modelStatePath() -> String {
+    match Env.get("HOME") {
+      Some(home) -> home + "/.scry-agent-model"
+      None -> ".scry-agent-model"
+    }
+  }
+
+  fn restoreModel(saved: String) {
+    if saved == "fable" || saved == "opus" || saved == "sonnet" {
+      self.provider = "claude"
+      self.modelId = saved
+    } else if saved == "gpt-5.6-sol" || saved == "gpt-5.6-terra" || saved == "gpt-5.6-luna" {
+      self.provider = "codex"
+      self.modelId = saved
+    }
+  }
+
+  fn saveModel() {
+    if !File.write(self.modelStatePath(), self.modelId) {
+      self.configError = "Could not save the selected model"
+    }
+  }
+
+  fn applyConfig() {
+    self.configError = ""
+    if self.provider == "claude" {
+      self.agent.model = CliModel(provider: "claude", executable: "claude", modelId: self.modelId,
+                                  timeoutMs: self.timeoutMs, maxOutputBytes: self.maxOutputBytes)
+      self.brainName = "Claude subscription"
+    } else if self.provider == "codex" {
+      self.agent.model = CliModel(provider: "codex", executable: "codex", modelId: self.modelId,
+                                  timeoutMs: self.timeoutMs, maxOutputBytes: self.maxOutputBytes)
+      self.brainName = "Codex subscription"
+    } else if self.provider == "api" {
+      match resolveKey() {
+        Some(key) -> {
+          var selectedModel = "deepseek-v4-pro"
+          if self.modelId.len() > 0 { selectedModel = self.modelId }
+          self.agent.model = AnthropicModel(modelId: selectedModel, apiKey: key,
+                                            systemPrompt: "You are a concise assistant. Use the provided tools when they help.",
+                                            baseUrl: self.apiBaseUrl)
+          self.brainName = "Anthropic-compatible API (" + selectedModel + ")"
+        }
+        None -> {
+          self.provider = "offline"
+          self.agent.model = ScriptedModel(persona: "assistant")
+          self.brainName = "ScriptedModel - offline"
+          self.configError = "No API key is available in the process environment"
+        }
+      }
+    } else {
+      self.provider = "offline"
+      self.agent.model = ScriptedModel(persona: "assistant")
+      self.brainName = "ScriptedModel - offline"
+    }
+  }
+
+  fn useClaude() { self.provider = "claude" self.applyConfig() }
+  fn useCodex() { self.provider = "codex" self.applyConfig() }
+  fn useApi() { self.provider = "api" self.applyConfig() }
+  fn useOffline() { self.provider = "offline" self.applyConfig() }
+  fn setModel(model: String) { self.modelId = model self.applyConfig() }
+  fn useProviderDefaultModel() { self.modelId = "" self.applyConfig() }
+  fn setTimeoutMs(ms: Int) {
+    if ms > 0 { self.timeoutMs = ms self.applyConfig() }
+    else { self.configError = "timeoutMs must be greater than zero" }
+  }
+  fn setMaxOutputBytes(bytes: Int) {
+    if bytes > 0 { self.maxOutputBytes = bytes self.applyConfig() }
+    else { self.configError = "maxOutputBytes must be greater than zero" }
+  }
+  fn setApiBaseUrl(url: String) { self.apiBaseUrl = url self.applyConfig() }
+
+  fn showConfig() {
+    Console.log("\x1b[1mSession\x1b[0m")
+    Console.log("   active:       ${self.brainName}")
+    Console.log("   provider:     ${self.provider}")
+    if self.modelId.len() == 0 { Console.log("   model:        provider default") }
+    else { Console.log("   model:        ${self.modelId}") }
+    Console.log("   timeout:      ${self.timeoutMs} ms")
+    Console.log("   output limit: ${self.maxOutputBytes} bytes")
+    if self.configError.len() > 0 { Console.log("   error:        ${self.configError}") }
+  }
+
+  fn activeModelLabel() -> String {
+    if self.provider == "offline" { "offline" }
+    else if self.modelId.len() > 0 { self.modelId }
+    else { self.provider }
+  }
+
+  fn chooseModel(key: String) {
+    if key == "1" || key == "fable" { self.provider = "claude" self.modelId = "fable" }
+    else if key == "2" || key == "opus" { self.provider = "claude" self.modelId = "opus" }
+    else if key == "3" || key == "sonnet" { self.provider = "claude" self.modelId = "sonnet" }
+    else if key == "4" || key == "sol" { self.provider = "codex" self.modelId = "gpt-5.6-sol" }
+    else if key == "5" || key == "terra" { self.provider = "codex" self.modelId = "gpt-5.6-terra" }
+    else if key == "6" || key == "luna" { self.provider = "codex" self.modelId = "gpt-5.6-luna" }
+    else { self.configError = "Choose a model from the catalog" return }
+    self.applyConfig()
+    self.saveModel()
+    Console.log("\x1b[32m✓\x1b[0m model switched to ${self.brainName}")
+  }
+
+  fn modelPicker() {
+    Console.log("\x1b[1mSelect model\x1b[0m")
+    Console.log("  Claude")
+    Console.log("    1  Fable 5       fast")
+    Console.log("    2  Opus          deepest reasoning")
+    Console.log("    3  Sonnet        balanced")
+    Console.log("  Codex")
+    Console.log("    4  GPT-5.6 Sol   detail and polish")
+    Console.log("    5  GPT-5.6 Terra everyday workhorse")
+    Console.log("    6  GPT-5.6 Luna  fast, repeatable work")
+    Console.print("model [1-6, Enter cancels]> ")
+    match Console.readLine() { Some(v) -> if v.len() > 0 { self.chooseModel(v) }  None -> {} }
   }
 
   fn help() {
@@ -229,6 +376,8 @@ class Orchestrator {
     Console.log("   - what is 17 times 23?  /  weather in Tokyo?: I pick + run the right tool")
     Console.log("   - research <topic>: I delegate to 2 sub-agents on real threads")
     Console.log("   - loop <task>: run a repeating agent loop on a background thread (pause/resume live)")
+    Console.log("   - /models: choose a current Claude or Codex model")
+    Console.log("   - status: show the active agent configuration")
     Console.log("   - help: show this")
     Console.log("   - exit (or Ctrl-D): quit (the process keeps serving the viewer)")
   }
@@ -255,8 +404,12 @@ class Orchestrator {
   }
 
   fn dispatch(input: String) {
-    if startsWith(input, "help") {
+    if input == "help" {
       self.help()
+    } else if input == "/models" || input == "models" {
+      self.modelPicker()
+    } else if input == "status" {
+      self.showConfig()
     } else if startsWith(input, "research ") {
       self.research(input.slice(9, input.len()))
     } else if startsWith(input, "loop ") {
@@ -264,7 +417,7 @@ class Orchestrator {
     } else {
       // plain input -> one real agent loop turn (the model may pick + run a tool)
       let reply = self.agent.runLoop(input)
-      Console.log(self.agent.banner() + " " + reply)
+      if !self.agent.lastResponseStreamed { Console.log(self.agent.banner() + " " + reply) }
     }
   }
 
@@ -279,13 +432,10 @@ class Orchestrator {
   }
 }
 
-// Choose the brain from the environment. Default target is DeepSeek's Anthropic-compatible
-// endpoint (deepseek-v4-pro over https://api.deepseek.com/anthropic) — the same /v1/messages
-// tool-use protocol, so AnthropicModel is unchanged but the API key. All three are overridable:
+// API secrets still come from the environment, but provider/model selection is live state on
+// Orchestrator and is changed through `/models` (with viewer actions as a secondary developer
+// control surface). The native API path accepts:
 //   key:   DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY
-//   base:  ANTHROPIC_BASE_URL   (default https://api.deepseek.com/anthropic)
-//   model: SCRY_MODEL           (default deepseek-v4-pro)
-// No key at all -> the deterministic ScriptedModel. Both implement Model, so the loop is identical.
 fn resolveKey() -> Option<String> {
   match Env.get("DEEPSEEK_API_KEY") {
     Some(k) -> Some(k)
@@ -296,42 +446,12 @@ fn resolveKey() -> Option<String> {
   }
 }
 
-fn modelBase() -> String {
-  match Env.get("ANTHROPIC_BASE_URL") {
-    Some(u) -> u
-    None -> "https://api.deepseek.com/anthropic"
-  }
-}
-
-fn modelName() -> String {
-  match Env.get("SCRY_MODEL") {
-    Some(m) -> m
-    None -> "deepseek-v4-pro"
-  }
-}
-
-fn chooseBrain() -> Model {
-  match resolveKey() {
-    Some(key) -> AnthropicModel(modelId: modelName(), apiKey: key,
-                                systemPrompt: "You are a concise assistant. Use the provided tools when they help.",
-                                baseUrl: modelBase())
-    None -> ScriptedModel(persona: "assistant")
-  }
-}
-
-fn brainLabel() -> String {
-  match resolveKey() {
-    Some(key) -> "AnthropicModel (" + modelName() + " @ " + modelBase() + ") - LIVE"
-    None -> "ScriptedModel - offline (set DEEPSEEK_API_KEY for the live model)"
-  }
-}
-
 fn main() {
   Console.log("\x1b[1mScry assistant\x1b[0m - a Claude-Code-like REPL with a real agent loop.")
   let session = Session()
   let orch = Orchestrator()
   Console.log("brain: " + orch.brainName)
-  Console.log("Type 'help', ask a question ('what is 17 times 23?'), or 'research <topic>'.")
+  Console.log("Type '/models' to choose a current Claude/Codex model, or ask a question.")
 
   var running = true
   while running {
@@ -393,3 +513,12 @@ action "Resume" for Agent { self.resume() }
 // live-model call AND the question + reply show in the terminal, exactly like typing at the prompt.
 action "Ask"    for Agent (question: String) { let h = Thread.spawn(TurnWorker(agent: self, text: question)) }
 action "Spawn researcher" for Orchestrator (topic: String) { self.research(topic) }
+action "Use Claude" for Orchestrator { self.useClaude() }
+action "Use Codex" for Orchestrator { self.useCodex() }
+action "Use native API" for Orchestrator { self.useApi() }
+action "Go offline" for Orchestrator { self.useOffline() }
+action "Set model" for Orchestrator (model: String) { self.setModel(model) }
+action "Use provider default model" for Orchestrator { self.useProviderDefaultModel() }
+action "Set timeout (ms)" for Orchestrator (ms: Int) { self.setTimeoutMs(ms) }
+action "Set output limit (bytes)" for Orchestrator (bytes: Int) { self.setMaxOutputBytes(bytes) }
+action "Set API base URL" for Orchestrator (url: String) { self.setApiBaseUrl(url) }

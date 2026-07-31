@@ -1304,7 +1304,7 @@ function ConnIndicator() {
   const label = s === "down" ? "reconnecting…" : s === "slow" ? "live (slow)" : "● live";
   return html`<div class=${cls}><span class="dot"></span><span class="conn-label">${label}</span></div>`;
 }
-function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, programName, focus, everywhere, setEverywhere }) {
+function TopBar({ onGlobalSearch, onToggleTranscript, onAgentRuntime, mode, setMode, onBack, programName, focus, everywhere, setEverywhere }) {
   const [q, setQ] = useState("");
   return html`
     <header id="topbar">
@@ -1322,6 +1322,7 @@ function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, pro
           <input type="checkbox" checked=${everywhere} onChange=${(e) => setEverywhere(e.target.checked)} /> everywhere
         </label>` : ""}
       <div class="topbar-right">
+        ${onAgentRuntime ? html`<button class="ghost-btn" title="choose agent provider, model, and permissions" onClick=${onAgentRuntime}>agent setup</button>` : ""}
         <button class="ghost-btn" title="eval transcript" onClick=${onToggleTranscript}>transcript</button>
         <${ConnIndicator} />
       </div>
@@ -2797,6 +2798,13 @@ function App({ onBack, programName } = {}) {
   const inspectClose = useCallback(() => setInspect(null), []);
   // switching to browse (List) closes the inspector; it belongs to the Map.
   const changeMode = useCallback((m) => { setMode(m); if (m !== "map") setInspect(null); }, []);
+  const openAgentRuntime = useCallback(() => {
+    const sc = schema.find((t) => t.name === "Orchestrator" || t.qualified === "Orchestrator");
+    if (!sc || sc.liveCount < 1) return;
+    changeMode("browse");
+    openDetail(sc.qualified, 0, 0, false);
+  }, [schema, changeMode, openDetail]);
+  const hasAgentRuntime = schema.some((t) => (t.name === "Orchestrator" || t.qualified === "Orchestrator") && t.liveCount > 0);
 
   const inspTop = inspect && inspect.stack[inspect.stack.length - 1];
   // selectedId must match graph()'s BARE ref id format ("Type#slot" — data-region/data-mrow/chip
@@ -2818,7 +2826,7 @@ function App({ onBack, programName } = {}) {
 
   return html`
     <${NavContext.Provider} value=${nav}>
-      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${changeMode} onBack=${onBack} programName=${programName}
+      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} onAgentRuntime=${hasAgentRuntime ? openAgentRuntime : null} mode=${mode} setMode=${changeMode} onBack=${onBack} programName=${programName}
         focus=${focus} everywhere=${everywhere} setEverywhere=${setEverywhere} />
       ${mode === "map"
         ? html`<div id="layout" class=${"nested-layout" + (inspect ? " has-inspector" : "")}>

@@ -19,8 +19,22 @@
 //! Slices are synthesized from sample runs: consecutive samples that share the
 //! same stack-prefix at depth `d` collapse into a single slice. Markers (Phase
 //! 1 = Interval) become their own slices on a separate marker track per thread.
+//!
+//! A samply profile recorded with `--unstable-presymbolicate` is *not*
+//! symbolicated — its func names are hex addresses — and its symbols live in a
+//! `.syms.json` sidecar. Pass that file to [`FirefoxSource::load_with_symbols`]
+//! and the address chain above gains one more hop:
+//!
+//! ```text
+//! frameTable.address[f] + funcTable.resource -> resourceTable.lib -> libs[l]
+//!                       -> sidecar lookup(debug_id, rva) -> real name(s)
+//! ```
 
 #![allow(dead_code)]
+
+mod precog;
+
+pub use precog::{PrecogSymbols, SymFrame};
 
 use flame_core::{
     CategoryId, FrameId, LoadError, LoadResult, ProcessId, ProfileBuilder, TraceSource, TrackId,
@@ -36,10 +50,26 @@ pub const SOURCE: &dyn TraceSource = &FirefoxSource;
 struct File {
     meta: Meta,
     #[serde(default)]
-    libs: Vec<serde_json::Value>,
+    libs: Vec<LibJson>,
     #[serde(default)]
     shared: Option<SharedTables>,
     threads: Vec<RawThread>,
+}
+
+/// One entry of the top-level `libs` array. `resourceTable.lib` indexes into
+/// it, and its ids are what the `.syms.json` sidecar is keyed by.
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct LibJson {
+    name: String,
+    #[serde(rename = "debugName")]
+    debug_name: String,
+    /// 32 hex digits plus an age suffix. The sidecar's `debug_id` is the same
+    /// value as a dashed uuid.
+    #[serde(rename = "breakpadId")]
+    breakpad_id: Option<String>,
+    #[serde(rename = "codeId")]
+    code_id: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -79,6 +109,8 @@ struct SharedTables {
     frame_table: FrameTableJson,
     #[serde(rename = "funcTable")]
     func_table: FuncTableJson,
+    #[serde(rename = "resourceTable")]
+    resource_table: ResourceTableJson,
 }
 
 #[derive(Deserialize, Debug)]
@@ -104,6 +136,9 @@ struct RawThread {
     #[serde(default)]
     #[serde(rename = "funcTable")]
     func_table: Option<FuncTableJson>,
+    #[serde(default)]
+    #[serde(rename = "resourceTable")]
+    resource_table: Option<ResourceTableJson>,
 
     samples: SamplesJson,
     #[serde(default)]
@@ -130,6 +165,18 @@ struct FrameTableJson {
     line: Vec<Option<u32>>,
     /// Optional category index into meta.categories.
     category: Vec<Option<u32>>,
+    /// Address of this frame relative to its lib's load base. `-1`/null for
+    /// frames that aren't native code. This is the key the `.syms.json`
+    /// sidecar is looked up by.
+    address: Vec<Option<i64>>,
+}
+
+/// `resourceTable.lib[r]` is an index into the top-level `libs` array.
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct ResourceTableJson {
+    length: usize,
+    lib: Vec<Option<i32>>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -206,6 +253,25 @@ impl TraceSource for FirefoxSource {
     }
 
     fn load(&self, input: &[u8], builder: &mut ProfileBuilder) -> LoadResult<()> {
+        self.load_with_symbols(input, None, builder)
+    }
+}
+
+impl FirefoxSource {
+    /// Load a profile, optionally naming its frames from a samply
+    /// `.syms.json` sidecar. With `symbols = None` this is exactly
+    /// [`TraceSource::load`].
+    ///
+    /// Symbolication also merges frames: a function sampled at five different
+    /// return addresses is five `frameTable` entries with five hex names, and
+    /// only once they resolve to one name do the consecutive samples collapse
+    /// into a single slice instead of five one-sample slivers.
+    pub fn load_with_symbols(
+        &self,
+        input: &[u8],
+        symbols: Option<&PrecogSymbols>,
+        builder: &mut ProfileBuilder,
+    ) -> LoadResult<()> {
         let file: File = serde_json::from_slice(input)
             .map_err(|e| LoadError::Parse(format!("firefox json: {e}")))?;
 
@@ -228,6 +294,11 @@ impl TraceSource for FirefoxSource {
         // One process per profile (Firefox traces typically describe one process).
         // Use any thread's pid as the process id; threads without pid get 0.
         let process_id = builder.add_process(0, "firefox");
+
+        // Sidecar hit/miss tally across all threads, reported once at the end.
+        // A miss is normal for kernel or JIT frames, which have no lib.
+        let mut symbolicated = 0usize;
+        let mut unsymbolicated = 0usize;
 
         for (thread_idx, thread) in file.threads.iter().enumerate() {
             let pid = json_to_i64(&thread.pid).unwrap_or(0);
@@ -253,6 +324,14 @@ impl TraceSource for FirefoxSource {
             let stack_table;
             let frame_table;
             let func_table;
+            // The resource table is optional in both layouts — it only matters
+            // for sidecar symbolication. Prefer the thread's own; v60 hoists it.
+            let empty_resources = ResourceTableJson::default();
+            let resource_table = thread
+                .resource_table
+                .as_ref()
+                .or_else(|| file.shared.as_ref().map(|s| &s.resource_table))
+                .unwrap_or(&empty_resources);
             if let Some(shared) = &file.shared {
                 strings = &shared.string_array;
                 stack_table = &shared.stack_table;
@@ -275,9 +354,35 @@ impl TraceSource for FirefoxSource {
             }
 
             // Pre-intern frames: for each FrameTable entry, resolve func -> string.
-            let mut frame_ids = Vec::with_capacity(frame_table.length);
+            // One entry expands to several ids when the sidecar reports an
+            // inlined call chain at that address; the vec is outermost-first.
+            let mut frame_ids: Vec<Vec<FrameId>> = Vec::with_capacity(frame_table.length);
             for fi in 0..frame_table.length {
                 let func_idx = *frame_table.func.get(fi).unwrap_or(&0) as usize;
+                if let Some(syms) = symbols {
+                    if let Some(resolved) = resolve_frame(
+                        syms,
+                        &file.libs,
+                        resource_table,
+                        func_table,
+                        frame_table,
+                        fi,
+                        func_idx,
+                    ) {
+                        // Line is deliberately dropped: it varies per address
+                        // within one function, and keeping it would split a
+                        // function back into one flame frame per line.
+                        frame_ids.push(
+                            resolved
+                                .iter()
+                                .map(|f| builder.intern_frame(&f.name, &f.file, 0, 0))
+                                .collect(),
+                        );
+                        symbolicated += 1;
+                        continue;
+                    }
+                    unsymbolicated += 1;
+                }
                 let name_idx =
                     *func_table.name.get(func_idx).unwrap_or(&0) as usize;
                 let name = strings.get(name_idx).map(|s| s.as_str()).unwrap_or("?");
@@ -296,7 +401,7 @@ impl TraceSource for FirefoxSource {
                     .flatten()
                     .or_else(|| frame_table.line.get(fi).copied().flatten())
                     .unwrap_or(0);
-                frame_ids.push(builder.intern_frame(name, file_str, line, 0));
+                frame_ids.push(vec![builder.intern_frame(name, file_str, line, 0)]);
             }
 
             // Pre-resolve stacks: for each stack node, walk prefix to root and build
@@ -336,8 +441,13 @@ impl TraceSource for FirefoxSource {
             // that we materialize each sample's frames root-first.
             // (A more memory-efficient alternative is to walk just the prefix
             // chain via stack_table, but the working sets are small here.)
-            let mut prev_frames: Vec<u32> = Vec::new();
-            let mut next_frames: Vec<u32> = Vec::new();
+            //
+            // The comparison is on interned `FrameId`s, not on frameTable
+            // indices: two addresses in the same function are two indices but
+            // one id, and they should extend one slice rather than end it.
+            let mut prev_frames: Vec<FrameId> = Vec::new();
+            let mut next_frames: Vec<FrameId> = Vec::new();
+            let mut stack_scratch: Vec<u32> = Vec::new();
 
             for i in 0..n {
                 let t_ms = times.get(i).copied().unwrap_or(0.0);
@@ -345,11 +455,22 @@ impl TraceSource for FirefoxSource {
 
                 next_frames.clear();
                 if let Some(Some(stack_idx)) = stacks.get(i).copied().map(Some).flatten() {
+                    stack_scratch.clear();
                     walk_stack_root_first(
                         stack_idx,
                         stack_table,
-                        &mut next_frames,
+                        &mut stack_scratch,
                     );
+                    for &fi in &stack_scratch {
+                        let ids = frame_ids.get(fi as usize).ok_or_else(|| {
+                            LoadError::Parse(format!(
+                                "thread {tid}: stackTable references frame {fi}, \
+                                 but frameTable has {} entries",
+                                frame_ids.len()
+                            ))
+                        })?;
+                        next_frames.extend_from_slice(ids);
+                    }
                 }
 
                 // Find longest common prefix with prev.
@@ -378,11 +499,7 @@ impl TraceSource for FirefoxSource {
                 }
 
                 // Open new runs for the deeper part of next.
-                for &fi in &next_frames[common..] {
-                    let fid = frame_ids
-                        .get(fi as usize)
-                        .copied()
-                        .unwrap_or(frame_ids[0]);
+                for &fid in &next_frames[common..] {
                     open_runs.push((fid, t_ns));
                     max_depth = max_depth.max(open_runs.len() as u16);
                 }
@@ -426,8 +543,37 @@ impl TraceSource for FirefoxSource {
             );
         }
 
+        if symbols.is_some() {
+            log::info!(
+                "firefox: syms.json named {symbolicated} of {} frames \
+                 ({unsymbolicated} had no lib or no covering symbol)",
+                symbolicated + unsymbolicated
+            );
+        }
+
         Ok(())
     }
+}
+
+/// Resolve one `frameTable` entry through the sidecar. `None` means the frame
+/// has no address, no owning lib, or an address the sidecar doesn't cover —
+/// all normal for kernel, JIT, and label frames — and the caller falls back to
+/// the profile's own (hex) name.
+fn resolve_frame<'a>(
+    symbols: &'a PrecogSymbols,
+    libs: &[LibJson],
+    resources: &ResourceTableJson,
+    func_table: &FuncTableJson,
+    frame_table: &FrameTableJson,
+    frame_idx: usize,
+    func_idx: usize,
+) -> Option<&'a [SymFrame]> {
+    let address = frame_table.address.get(frame_idx).copied().flatten()?;
+    let rva = u32::try_from(address).ok()?;
+    let resource = func_table.resource.get(func_idx).copied().flatten()?;
+    let lib_idx = resources.lib.get(usize::try_from(resource).ok()?).copied().flatten()?;
+    let lib = libs.get(usize::try_from(lib_idx).ok()?)?;
+    symbols.lookup(lib.breakpad_id.as_deref(), lib.code_id.as_deref(), rva)
 }
 
 fn collect_times(s: &SamplesJson) -> Vec<f64> {

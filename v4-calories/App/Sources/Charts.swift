@@ -19,12 +19,13 @@ struct DeficitSparkline: View {
     }
 }
 
-/// Reconciliation: trend (green), raw scale points (faint), logs-only (amber dashed).
+/// Reconciliation: trend (green), raw scale points (faint), logs-only (amber dashed),
+/// goal pace (dim white dashed).
 struct ReconciliationChart: View {
     let series: [WeightPoint]
 
     private var yDomain: ClosedRange<Double> {
-        let vals = series.flatMap { [$0.trend, $0.observed, $0.logsOnly].compactMap { $0 } }
+        let vals = series.flatMap { [$0.trend, $0.observed, $0.logsOnly, $0.goalPace].compactMap { $0 } }
         guard let lo = vals.min(), let hi = vals.max(), hi > lo else { return 0...1 }
         let pad = max(0.8, (hi - lo) * 0.08)
         return (lo - pad)...(hi + pad)
@@ -32,6 +33,14 @@ struct ReconciliationChart: View {
 
     var body: some View {
         Chart {
+            // Drawn first so it sits behind the measured lines — it is the reference, not a
+            // result.
+            ForEach(series.filter { $0.goalPace != nil }, id: \.date) { p in
+                LineMark(x: .value("d", p.date), y: .value("lb", p.goalPace!),
+                         series: .value("s", "goal"))
+                    .foregroundStyle(Theme.textDim(0.3))
+                    .lineStyle(StrokeStyle(lineWidth: 1.3, dash: [5, 4]))
+            }
             ForEach(series.filter { $0.logsOnly != nil }, id: \.date) { p in
                 LineMark(x: .value("d", p.date), y: .value("lb", p.logsOnly!),
                          series: .value("s", "logs"))

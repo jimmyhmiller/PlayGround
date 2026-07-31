@@ -1,0 +1,2560 @@
+;; The sea-of-nodes graph: nodes, edges, peepholes, global value numbering, worklist.
+;;
+;; A node is (op, type, inputs, outputs). Inputs are use-def edges, ordered, possibly null
+;; (NO-NODE), with input 0 conventionally the controlling node. Outputs are the def-use
+;; direction and are maintained automatically, so the graph walks both ways.
+;;
+;; Three behaviours define an op, and together they are the whole optimiser:
+;;
+;;   n-compute    the node's type from its inputs' types. MUST BE MONOTONE: if the inputs
+;;                only fall in the lattice, the result only falls. That is what makes the
+;;                optimistic dataflow pass in M7 both terminate and be correct.
+;;   n-idealize   a local rewrite to a better node, or NO-NODE for "no change".
+;;   node-hash / node-eq   structural identity, for global value numbering.
+;;
+;; `n-peephole` composes them: recompute the type, replace with a constant if the type says
+;; so, idealize, then value-number. Running it while the graph is being built keeps the graph
+;; near-minimal instead of building garbage and sweeping later.
+(module node)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "hashmap.coil"   :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "ty.coil"        :use *)
+;; The shape table, for `New`'s field count and its per-field aliases. The dependency runs one
+;; way only (shape.coil imports ty.coil and nothing else), and it is what lets a memory op carry
+;; an alias number instead of a shape and an offset.
+(import "shape.coil"     :use *)
+
+;; A node id is a plain `i64` index into the arena, for the same reason a type id is: a
+;; one-field struct would be passed by reference in Coil. `nid`/`n` for node ids, `t` for
+;; type ids, so the two never get mixed up by accident.
+(const NO-NODE i64 -1)
+
+; ============================================================================
+; Ops
+; ============================================================================
+(const OP-START  i64 0)    ; the root of control
+(const OP-STOP   i64 1)    ; collects every Return
+(const OP-RETURN i64 2)    ; (ctrl, value)
+(const OP-IF     i64 3)    ; (ctrl, predicate) -> a tuple of two controls
+(const OP-REGION i64 4)    ; (_, ctrl...) a control merge; input 0 is unused
+(const OP-LOOP   i64 5)    ; a Region whose input 1 is the entry and input 2 the back edge
+(const OP-CPROJ  i64 6)    ; (multi) control projection; aux = which slot
+(const OP-XCTRL  i64 7)    ; the unreachable-control constant
+(const OP-CTRL-END i64 7)  ; ops <= this produce control
+
+(const OP-CONST  i64 8)    ; aux = the constant's TyId
+(const OP-ARG    i64 9)    ; an opaque value of a declared type; aux = that TyId
+(const OP-PROJ   i64 10)   ; (multi) data projection; aux = which slot
+(const OP-PHI    i64 11)   ; (region, value...) one value per region path
+(const OP-CAST   i64 12)   ; (ctrl, value) upcast to aux, on a control path
+(const OP-ADD    i64 13)
+(const OP-SUB    i64 14)
+(const OP-MUL    i64 15)
+(const OP-DIV    i64 16)
+(const OP-MINUS  i64 17)   ; unary negate
+(const OP-NOT    i64 18)   ; logical not, over JS truthiness
+(const OP-EQ     i64 19)
+(const OP-LT     i64 20)
+(const OP-LE     i64 21)
+
+;; MEMORY. Four ops, and the input layouts are the whole of memory SSA, so they are written out
+;; here rather than left to be read off `v-check-slots`:
+;;
+;;   New      (ctrl, mem-of-field-0, mem-of-field-1, ...)   aux = the shape
+;;            a MULTI node: slot 0 of its tuple is the object, slot 1+i is field i's new memory.
+;;            Input slot 1+i and output slot 1+i are the same alias, which is what makes the
+;;            allocation a link in every one of its fields' memory chains rather than a node
+;;            that appears out of nowhere.
+;;   Load     (_, mem, ptr)                                 aux = the alias
+;;   Store    (_, mem, ptr, val)                            aux = the alias
+;;   MemMerge (_, mem, mem, ...)                            one memory over the union of theirs
+;;
+;; SLOT 0 OF Load, Store AND MemMerge IS THE ORDINARY CONTROL ANCHOR, null today, exactly as an
+;; Add's is: a memory op is ordered by its MEMORY edge and by nothing else, which is the property
+;; that makes forwarding fall out of dataflow. `New` is the exception and its control input is
+;; real: an allocation happening twice is two objects, so its identity is a function of the block
+;; it is in and it cannot float.
+(const OP-NEW      i64 22)
+(const OP-LOAD     i64 23)
+(const OP-STORE    i64 24)
+(const OP-MEMMERGE i64 25)
+(const OP-COUNT    i64 26)
+
+;; Case keys are the NAMED constants throughout, never the numbers. Literal keys are how a
+;; renumbering silently rewires every dispatch table in the file at once.
+(defn op-name [(op i64)] (-> (slice u8))
+  (case op
+    OP-START "Start" OP-STOP "Stop" OP-RETURN "Return" OP-IF "If"
+    OP-REGION "Region" OP-LOOP "Loop" OP-CPROJ "CProj" OP-XCTRL "XCtrl"
+    OP-CONST "Const" OP-ARG "Arg" OP-PROJ "Proj" OP-PHI "Phi" OP-CAST "Cast"
+    OP-ADD "Add" OP-SUB "Sub" OP-MUL "Mul" OP-DIV "Div" OP-MINUS "Minus"
+    OP-NOT "Not" OP-EQ "Eq" OP-LT "Lt" OP-LE "Le"
+    OP-NEW "New" OP-LOAD "Load" OP-STORE "Store" OP-MEMMERGE "MemMerge"
+    "?"))
+
+;; ---------------------------------------------------------------------------
+;; Op classification. The numbering above exists so these are range tests: control ops come
+;; first, then value ops, and within the value ops the ones that may fold to a constant come
+;; after the two that already are their own value.
+;; ---------------------------------------------------------------------------
+(defn op-control? [(op i64)] (-> bool) (<= op OP-CTRL-END))
+(defn op-value?   [(op i64)] (-> bool) (>= op OP-CONST))
+(defn op-phi?     [(op i64)] (-> bool) (= op OP-PHI))
+(defn op-merge?   [(op i64)] (-> bool) (or (= op OP-REGION) (= op OP-LOOP)))
+(defn op-multi?   [(op i64)] (-> bool)
+  (or (= op OP-IF) (or (= op OP-RETURN) (= op OP-NEW))))
+
+;; DOES THIS NODE PRODUCE A MEMORY STATE. It is a question about the NODE and not about its op,
+;; which is why the `op-memory?` predicate this replaces could never have been implemented: a
+;; `Proj` is memory when it projects a `New`'s field slot and a value when it projects slot 0, and
+;; a `Phi` is memory exactly when it merges memory. The type is what actually knows, and by the
+;; time anything asks (the diagram, a scheduler) the types are computed.
+(defn n-memory? [(n i64)] (-> bool) (ty-mem? (n-ty n)))
+
+;; Value numbering covers everything except the four identity-bearing nodes. Start and Stop are
+;; singletons; two `Arg`s are different arguments even with identical types.
+;;
+;; AND TWO `New`s ARE TWO OBJECTS. Structural identity is exactly the wrong relation for an
+;; allocation: `a = {}; b = {};` builds two News with the same shape, the same control and the
+;; same incoming memory, so they are structurally equal in every respect and merging them makes
+;; `a` and `b` the same object. Nothing downstream could ever notice, because the graph that
+;; results is internally consistent; the interpreter would simply report that a program which
+;; allocates two objects allocates one. It is the same reason `Arg` is excluded, and the same
+;; reason Simple gives `NewNode` its own `_alias` identity rather than letting GVN see it.
+(defn op-gvn? [(op i64)] (-> bool)
+  (and (> op OP-STOP) (and (!= op OP-ARG) (!= op OP-NEW))))
+
+;; May be replaced by a constant when its type says the value is known. Control cannot (a
+;; control edge is not a value), `Const` already is one, and `Arg` is opaque by construction.
+(defn op-foldable? [(op i64)] (-> bool) (>= op OP-PROJ))
+
+;; A loop's input 2 is its back edge. Everything else flows forwards.
+(defn n-back-edge? [(n i64) (i i64)] (-> bool)
+  (and (= (n-op n) OP-LOOP) (= i 2)))
+
+(defn op-commutes? [(op i64)] (-> bool)
+  (or (= op OP-ADD) (or (= op OP-MUL) (= op OP-EQ))))
+
+;; Two operands in slots 1 and 2, with slot 0 the (currently unused) control anchor. `Minus`
+;; and `Not` sit between the arithmetic and the comparisons in the numbering, so this is two
+;; ranges rather than one; the verifier's arity contract is the reason it needs a name.
+(defn op-binary? [(op i64)] (-> bool)
+  (or (and (>= op OP-ADD) (<= op OP-DIV))
+      (and (>= op OP-EQ)  (<= op OP-LE))))
+
+; ============================================================================
+; The node
+; ============================================================================
+(defstruct Node
+  [(id    i64)
+   (op    i64)
+   (ty    i64)                 ; the current computed type
+   (aux   i64)                 ; op-specific payload: the TyId for Const and Arg
+   (ins   (ArrayList i64))     ; use-def, ordered, may contain NO-NODE
+   (outs  (ArrayList i64))     ; def-use, unordered
+   (deps  (ArrayList i64))     ; nodes to revisit when this node's type changes
+   (dead  bool)
+   (keeps i64)                 ; pins against the kill cascade; see n-keep!
+   (hash  i64)])               ; cached structural hash; 0 means "not computed"
+
+; ============================================================================
+; The graph
+; ============================================================================
+(defstruct Graph
+  [(nodes  (ArrayList i64))    ; id -> (ptr Node), held as an integer address
+   (gvn    (HashMap i64 i64))  ; structural key -> node id (see gvn-keyops)
+   (wl     (ArrayList i64))    ; the worklist
+   (onwl   (ArrayList bool))   ; id -> is it on the worklist
+   (seed   i64)                ; drives worklist pop order; varying it must not change results
+   (start  i64)
+   (stop   i64)
+   (idep   (ArrayList i64))    ; id -> dominator-tree depth; see g-build-loop-tree!
+   (ldep   (ArrayList i64))    ; id -> how many loops contain it
+   (cfgver i64)                ; bumped whenever a control edge changes
+   (domver i64)                ; the cfgver the tables above were built at; -1 = never
+   (verifying bool)            ; a checker is walking the graph; see n-add-dep!
+   (achecks i64)               ; falling-type checks the last g-analyze! performed
+   (pmark  (ArrayList i64))    ; id -> generation stamp, for n-ty-proven?'s input-cone walk
+   (pstack (ArrayList i64))    ; its DFS stack; both are reused rather than reallocated
+   (pgen   i64)                ; the current generation
+   (pbusy  bool)               ; a cone walk is in progress; the buffers above are not reentrant
+   (nchg   i64)                ; peephole changes; see iterate!'s sweep loop
+   ;; TWO ENGINE COUNTERS, and they exist because the gate that used to stand in for them stopped
+   ;; being an equality. Until 4c-2 the only thing that removed a `Load` was `load-idealize`, so
+   ;; "how many loads are dead" WAS "how many forwardings happened" and the corpus gate counted the
+   ;; first while claiming the second. 4c-2 removes loads by CASCADE (deleting a store can drop the
+   ;; last reader of the object below it), so the stand-in silently inflates the number that says
+   ;; 4c-1 still works. These are incremented at exactly one site each, in the branch that performs
+   ;; the rewrite, so a gate can assert an EQUALITY rather than "more than zero".
+   (nfwd   i64)                ; load-after-store forwardings performed (4c-1)
+   (nselim i64)                ; store-after-store eliminations performed (4c-2)
+   (inited bool)])
+
+(defn graph [] (-> (ptr Graph))
+  (let [p (alloc-static Graph)]
+    (if (load (field p inited)) 0
+      (do (store! (field p inited) true)
+          (store! (field p nodes) (al-new [i64] (malloc-allocator)))
+          (store! (field p gvn)   (hm-new [i64 i64] (malloc-allocator) (gvn-keyops)))
+          (store! (field p wl)    (al-new [i64] (malloc-allocator)))
+          (store! (field p onwl)  (al-new [bool] (malloc-allocator)))
+          (store! (field p seed)  123)
+          (store! (field p start) NO-NODE)
+          (store! (field p stop)  NO-NODE)
+          (store! (field p idep)  (al-new [i64] (malloc-allocator)))
+          (store! (field p ldep)  (al-new [i64] (malloc-allocator)))
+          (store! (field p cfgver) 0)
+          (store! (field p domver) -1)
+          (store! (field p verifying) false)
+          (store! (field p achecks) 0)
+          (store! (field p pmark)  (al-new [i64] (malloc-allocator)))
+          (store! (field p pstack) (al-new [i64] (malloc-allocator)))
+          (store! (field p pgen)   0)
+          (store! (field p pbusy)  false)
+          (store! (field p nchg)   0)
+          (store! (field p nfwd)   0)
+          (store! (field p nselim) 0)
+          0))
+    p))
+
+;; Start a fresh graph. Tests call this between cases, and the seed selects a worklist pop
+;; order: the same program must optimise to the same graph under every seed.
+(defn graph-reset! [(seed i64)] (-> i64)
+  (let [p (graph)]
+    (al-clear! [i64]  (field p nodes))
+    (hm-clear! [i64 i64] (field p gvn))
+    (al-clear! [i64]  (field p wl))
+    (al-clear! [bool] (field p onwl))
+    (al-clear! [i64]  (field p idep))
+    (al-clear! [i64]  (field p ldep))
+    (al-clear! [i64]  (field p pmark))
+    (al-clear! [i64]  (field p pstack))
+    (store! (field p pbusy) false)
+    (store! (field p nchg) 0)
+    ; per-GRAPH, not per-process: every fixture starts from `graph-reset!`, so a gate that builds
+    ; the corpus in a loop reads the count for the fixture it just built and not a running total.
+    (store! (field p nfwd) 0)
+    (store! (field p nselim) 0)
+    (store! (field p cfgver) 0)
+    (store! (field p domver) -1)
+    (store! (field p verifying) false)
+    (store! (field p achecks) 0)
+    (store! (field p seed) seed)
+    (store! (field p start) (n-new OP-START 0))
+    (store! (field p stop)  (n-new OP-STOP 0))
+    ;; THE ROOTS ARE PINNED. Found by the verifier the first time it ran on the corpus, on
+    ;; `if(0) return 1; else return 2;`: Start's last user there is the predicate constant, so
+    ;; when the dead branch collapsed and that constant died, the kill cascade ran on to Start
+    ;; and killed the root of the graph. Two live nodes went on reading it, the printer omits
+    ;; dead nodes so Start silently vanished from the diagram, and `g-leaked-count` marks from
+    ;; Start, so from then on it could not see a leak.
+    ;;
+    ;; Start and Stop are singletons whose liveness is not a function of their use count, which
+    ;; is exactly what `keeps` is for. Pinning them also upgrades any future attempt to kill a
+    ;; root from silent corruption into `n-kill!`'s named panic.
+    (n-keep! (load (field p start)))
+    (n-keep! (load (field p stop)))
+    (n-peephole (load (field p start)))
+    (n-peephole (load (field p stop)))
+    0))
+
+(defn g-start [] (-> i64) (load (field (graph) start)))
+(defn g-stop  [] (-> i64) (load (field (graph) stop)))
+(defn n-count [] (-> i64) (al-len [i64] (load (field (graph) nodes))))
+
+;; A CHECKER IS RUNNING. Verifying a graph means recomputing types over it, and `n-compute` is
+;; not side-effect-free: `phi-compute` records a dependency through `n-add-dep!`. Without this
+;; flag the act of verifying appends to deps lists, which changes what the next edge change
+;; re-queues, so a checker would be observable in later results. Simple guards exactly the
+;; same call with `CODE._midAssert`.
+(defn g-verifying? [] (-> bool) (load (field (graph) verifying)))
+(defn g-set-verifying! [(v bool)] (-> i64) (store! (field (graph) verifying) v) 0)
+
+; ============================================================================
+; Node accessors
+; ============================================================================
+(defn nd [(n i64)] (-> (ptr Node))
+  (cast (ptr Node) (al-get (load (field (graph) nodes)) n)))
+
+(defn n-op    [(n i64)] (-> i64)  (load (field (nd n) op)))
+(defn n-ty    [(n i64)] (-> i64)  (load (field (nd n) ty)))
+(defn n-aux   [(n i64)] (-> i64)  (load (field (nd n) aux)))
+(defn n-dead? [(n i64)] (-> bool) (load (field (nd n) dead)))
+(defn n-nins  [(n i64)] (-> i64)  (al-len [i64] (load (field (nd n) ins))))
+(defn n-nouts [(n i64)] (-> i64)  (al-len [i64] (load (field (nd n) outs))))
+;; BOUNDS ARE CHECKED, and this is not defensive programming for its own sake. `al-get` is an
+;; unchecked read and `al-clear!` only resets the length, so a read past the end returns whatever
+;; the buffer still holds: a real node id, from before the list was cleared. That is how
+;; `cproj-idealize` against a killed If (whose `ins` had been cleared by `n-kill!`) handed back a
+;; stale id that HAPPENED to be the right one on the flat fixture and the wrong one, a dead node,
+;; on a nested branch. A plausible value is the worst possible answer here; the index being out of
+;; range is a bug in the caller and has to say so.
+(defn n-in    [(n i64) (i i64)] (-> i64)
+  (if (or (< i 0) (>= i (n-nins n)))
+      (do (panic-corrupt "n-in: input index out of range") NO-NODE)
+    (al-get (load (field (nd n) ins)) i)))
+(defn n-out   [(n i64) (i i64)] (-> i64)
+  (if (or (< i 0) (>= i (n-nouts n)))
+      (do (panic-corrupt "n-out: use index out of range") NO-NODE)
+    (al-get (load (field (nd n) outs)) i)))
+
+(defn n-set-ty! [(n i64) (t i64)] (-> i64) (store! (field (nd n) ty) t) 0)
+
+; ============================================================================
+; Creating nodes and maintaining edges
+; ============================================================================
+(defn n-new [(op i64) (aux i64)] (-> i64)
+  (let [p  (graph)
+        id (al-len [i64] (load (field p nodes)))
+        np (unwrap-ptr [Node] (create [Node] (malloc-allocator)))]
+    (store! (field np id)   id)
+    (store! (field np op)   op)
+    (store! (field np ty)   (t-top))      ; optimistic until computed
+    (store! (field np aux)  aux)
+    (store! (field np ins)  (al-new [i64] (malloc-allocator)))
+    (store! (field np outs) (al-new [i64] (malloc-allocator)))
+    (store! (field np deps) (al-new [i64] (malloc-allocator)))
+    (store! (field np dead) false)
+    (store! (field np keeps) 0)
+    (store! (field np hash) 0)
+    (al-push! [i64]  (field p nodes) (cast i64 np))
+    (al-push! [bool] (field p onwl)  false)
+    id))
+
+;; Dominators and loop nesting are derived from control edges, so any change to one invalidates
+;; them. Bumping an epoch here is what lets a stale read be a hard error instead of a subtly
+;; wrong placement decision later.
+(defn n-bump-cfg! [(n i64)] (-> i64)
+  (if (op-control? (n-op n))
+      (do (store! (field (graph) cfgver) (+ (load (field (graph) cfgver)) 1)) 0)
+    0))
+
+(defn n-add-def! [(n i64) (d i64)] (-> i64)
+  (n-bump-cfg! n)
+  (al-push! [i64] (field (nd n) ins) d)
+  (if (!= d NO-NODE) (do (al-push! [i64] (field (nd d) outs) n) 0) 0)
+  (store! (field (nd n) hash) 0)
+  0)
+
+(defn n-new1 [(op i64) (aux i64) (a i64)] (-> i64)
+  (let [n (n-new op aux)] (n-add-def! n a) n))
+(defn n-new2 [(op i64) (aux i64) (a i64) (b i64)] (-> i64)
+  (let [n (n-new op aux)] (n-add-def! n a) (n-add-def! n b) n))
+(defn n-new3 [(op i64) (aux i64) (a i64) (b i64) (c i64)] (-> i64)
+  (let [n (n-new op aux)] (n-add-def! n a) (n-add-def! n b) (n-add-def! n c) n))
+(defn n-new4 [(op i64) (aux i64) (a i64) (b i64) (c i64) (d i64)] (-> i64)
+  (let [n (n-new op aux)]
+    (n-add-def! n a) (n-add-def! n b) (n-add-def! n c) (n-add-def! n d) n))
+
+;; Remove one use edge d->u. Unordered, so a swap-remove is fine.
+(defn n-del-use! [(d i64) (u i64)] (-> bool)
+  (let [outs (field (nd d) outs)
+        len  (al-len [i64] (load outs))
+        (mut i) 0 (mut found) false]
+    (loop
+      (if (or (>= (load i) len) (load found)) (break)
+        (do (if (= (al-get (load outs) (load i)) u)
+                (do (al-set! [i64] outs (load i) (al-get (load outs) (- len 1)))
+                    (al-pop! [i64] outs)
+                    (store! found true)
+                    0)
+              (store! i (+ (load i) 1)))
+            0)))
+    (and (= (al-len [i64] (load outs)) 0) (= (load (field (nd d) keeps)) 0))))
+
+(defn n-find-in [(n i64) (d i64)] (-> i64)
+  (let [len (n-nins n) (mut i) 0 (mut at) NO-NODE]
+    (loop
+      (if (or (>= (load i) len) (!= (load at) NO-NODE)) (break)
+        (do (if (= (n-in n (load i)) d) (store! at (load i)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load at)))
+
+;; The normal way to change an edge. Keeps def-use in step, kills a def that just lost its
+;; last use, and re-queues anything whose analysis depended on this node.
+;; Closing a Loop's control back edge while a Phi on it still has an unset input is an ordering
+;; error: after this the region is no longer in progress, so that Phi starts meeting a path
+;; whose value does not exist yet. Caught here rather than left to surface as a deleted loop.
+(defn n-check-loop-close [(n i64) (i i64) (d i64)] (-> i64)
+  (if (not (and (and (= (n-op n) OP-LOOP) (= i 2)) (= (n-in n i) NO-NODE))) 0
+    (let [len (n-nouts n) (mut k) 0]
+      (loop
+        (if (>= (load k) len) (break)
+          (do (let [u (n-out n (load k))]
+                (if (and (op-phi? (n-op u)) (n-in-progress? u))
+                    (do (panic-corrupt "closing a loop's back edge while a phi on it is still open: close the phis first") 0)
+                  0))
+              (store! k (+ (load k) 1))
+              0)))
+      0)))
+
+(defn n-set-def! [(n i64) (i i64) (d i64)] (-> i64)
+  (n-check-loop-close n i d)
+  (n-bump-cfg! n)
+  (let [old (n-in n i)]
+    (if (= old d) 0
+      (do
+        ; add the new use BEFORE dropping the old one: dropping it may kill a subtree that
+        ; the new def is part of.
+        (if (!= d NO-NODE) (do (al-push! [i64] (field (nd d) outs) n) 0) 0)
+        (al-set! [i64] (field (nd n) ins) i d)
+        (if (!= old NO-NODE)
+            (if (n-del-use! old n) (n-kill! old) (wl-push! old))
+          0)
+        (store! (field (nd n) hash) 0)
+        (n-move-deps! n)
+        (wl-push! n)
+        0))))
+
+;; A node with no uses is garbage. Killing it releases its inputs, which may cascade.
+(defn n-kill! [(n i64)] (-> i64)
+  (if (n-dead? n) 0
+    (do (if (> (n-keeps n) 0) (do (panic-corrupt "n-kill!: node is pinned") 0) 0)
+        (store! (field (nd n) dead) true)
+        (gvn-remove! n)
+        (let [(mut i) 0]
+          (loop
+            (if (>= (load i) (n-nins n)) (break)
+              (do (let [d (n-in n (load i))]
+                    (if (!= d NO-NODE)
+                        (if (n-del-use! d n) (n-kill! d) (wl-push! d))
+                      0))
+                  (store! i (+ (load i) 1))
+                  0))))
+        (al-clear! [i64] (field (nd n) ins))
+        0)))
+
+;; Replace every use of `old` with `new`, then kill `old`.
+(defn n-subsume! [(old i64) (new i64)] (-> i64)
+  (loop
+    (let [k (- (n-nouts old) 1)]
+      (if (< k 0) (break)
+        (let [u  (n-out old k)
+              at (n-find-in u old)]
+          (if (= at NO-NODE)
+              ; `old` is listed as a use but is absent from that user's inputs: a corrupted
+              ; graph. Spinning forever is the worst way to find that out.
+              (do (panic-corrupt "n-subsume!: def-use edge with no matching use-def edge") 0)
+            (do (n-set-def! u at new) 0))))))
+  (n-kill! old)
+  0)
+
+;; Killing a node releases its inputs, which cascades. When the node being killed is being
+;; REPLACED by one of its own inputs (`x+0` becomes `x`), that cascade would kill the
+;; replacement, which usually has no uses of its own yet. `n-keep!` pins it for the duration.
+;; Simple calls this `deadCodeElim`; it is not optional, and without it `return arg+0;`
+;; returns a dead node.
+(defn n-keeps  [(n i64)] (-> i64) (load (field (nd n) keeps)))
+(defn n-keep!  [(n i64)] (-> i64) (store! (field (nd n) keeps) (+ (n-keeps n) 1)) 0)
+(defn n-unkeep! [(n i64)] (-> i64)
+  (if (<= (n-keeps n) 0) (do (panic-corrupt "n-unkeep!: not pinned") 0)
+    (do (store! (field (nd n) keeps) (- (n-keeps n) 1)) 0)))
+
+(defn panic-corrupt [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (print-str w "graph corruption: ") (print-str w msg) (print-str w "\n"))
+  (abort) 0)
+
+; ============================================================================
+; Dependency tracking
+; ============================================================================
+;; A peephole that looked at a node which is NOT one of its inputs has to say so, or it will
+;; not be revisited when that node changes. Missing this is the classic source of a graph
+;; that is only wrong under some visit orders, which is exactly what the multi-seed test is
+;; built to catch.
+;; A verifier recomputes every type and must leave the graph byte-identical, so while it runs
+;; this records nothing. That is sound in exactly one direction: the dependency exists to make
+;; a node be REVISITED, and the verifier changes nothing that could need revisiting. Dropping
+;; it during a real analysis would instead lose a revisit and give an order-dependent graph.
+(defn n-add-dep! [(n i64) (dep i64)] (-> i64)
+  (if (g-verifying?) 0
+    (do (al-push! [i64] (field (nd n) deps) dep) 0)))
+
+(defn n-move-deps! [(n i64)] (-> i64)
+  (let [deps (field (nd n) deps) len (al-len [i64] (load deps)) (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (wl-push! (al-get (load deps) (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    (al-clear! [i64] deps)
+    0))
+
+; ============================================================================
+; The worklist
+; ============================================================================
+;; Pop order is pseudo-random, seeded. Peepholes must reach the same fixpoint whatever the
+;; order; the multi-seed test is what holds that claim up.
+(defn wl-push! [(n i64)] (-> i64)
+  (let [p (graph)]
+    (if (al-get (load (field p onwl)) n) 0
+      (do (al-set! [bool] (field p onwl) n true)
+          (al-push! [i64] (field p wl) n)
+          0))))
+
+(defn wl-push-outs! [(n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (n-nouts n)) (break)
+        (do (wl-push! (n-out n (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    0))
+
+(defn wl-next-seed! [] (-> i64)
+  (let [p (graph)
+        ; a plain LCG; the point is a different order per seed, not statistical quality
+        s (+ (* (load (field p seed)) 6364136223846793005) 1442695040888963407)]
+    (store! (field p seed) s)
+    (& s TY-IMAX)))
+
+(defn wl-pop! [] (-> i64)
+  (let [p (graph) wl (field p wl) len (al-len [i64] (load wl))]
+    (if (= len 0) NO-NODE
+      (let [i (% (wl-next-seed!) len)
+            n (al-get (load wl) i)]
+        (al-set! [i64] wl i (al-get (load wl) (- len 1)))
+        (al-pop! [i64] wl)
+        (al-set! [bool] (field p onwl) n false)
+        n))))
+
+(defn wl-empty? [] (-> bool) (= (al-len [i64] (load (field (graph) wl))) 0))
+
+;; Is this node pending? Exported for the tests that check the revisit machinery directly: "a type
+;; change re-queues the nodes that read it" is otherwise only observable as a fixpoint several steps
+;; later, which is a much weaker thing to assert. NOT what `n-ty-proven?` asks, deliberately:
+;; `iterate!` sweeps by pushing every live node, so "pending" is true of everything mid-sweep.
+(defn wl-on? [(n i64)] (-> bool) (al-get (load (field (graph) onwl)) n))
+
+; ============================================================================
+; Global value numbering
+; ============================================================================
+;; The table is node id -> node id, with hash and equality reaching into the arena, so two
+;; structurally identical nodes collide and the second one is thrown away.
+(defn node-hash [(n i64)] (-> i64)
+  (let [cached (load (field (nd n) hash))]
+    (if (!= cached 0) cached
+      (let [(mut h) (hash-step (hash-step 1099511628211 (n-op n)) (n-aux n))
+            (mut i) 0]
+        (loop
+          (if (>= (load i) (n-nins n)) (break)
+            (do (store! h (hash-step (load h) (n-in n (load i))))
+                (store! i (+ (load i) 1))
+                0)))
+        ; 0 is the "not computed" marker, so never hand it back as a real hash
+        (let [hv (if (= (load h) 0) 1 (load h))]
+          (store! (field (nd n) hash) hv)
+          hv)))))
+
+(defn node-eq [(a i64) (b i64)] (-> bool)
+  (if (= a b) true
+    (if (or (!= (n-op a) (n-op b))
+        (or (!= (n-aux a) (n-aux b))
+            (!= (n-nins a) (n-nins b)))) false
+      (let [len (n-nins a) (mut i) 0 (mut same) true]
+        (loop
+          (if (or (>= (load i) len) (not (load same))) (break)
+            (do (if (!= (n-in a (load i)) (n-in b (load i))) (store! same false) 0)
+                (store! i (+ (load i) 1))
+                0)))
+        (load same)))))
+
+(defn gvn-keyhash [(slot (ptr i8)) (n i64)] (-> i64)
+  (node-hash (load (cast (ptr i64) slot))))
+(defn gvn-keyeq [(ka (ptr i8)) (kb (ptr i8)) (n i64)] (-> bool)
+  (node-eq (load (cast (ptr i64) ka)) (load (cast (ptr i64) kb))))
+(defn gvn-keyops [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of gvn-keyhash))
+    (store! (field o eq)   (fnptr-of gvn-keyeq))
+    (store! (field o size) (sizeof i64))
+    o))
+
+(defn gvn-remove! [(n i64)] (-> i64)
+  (if (op-gvn? (n-op n)) (do (hm-remove! [i64 i64] (field (graph) gvn) n) 0) 0))
+
+;; Look up a structurally identical node, or install this one. Returns the node that should
+;; be used from here on.
+(defn gvn! [(n i64)] (-> i64)
+  (if (not (op-gvn? (n-op n))) n
+    (match (hm-get (load (field (graph) gvn)) n)
+      (Some [e] (if (or (= e n) (n-dead? e)) n e))
+      (None [] (do (hm-put! [i64 i64] (field (graph) gvn) n n) n)))))
+
+; ============================================================================
+; compute: the type of a node from its inputs
+; ============================================================================
+(defn n-compute [(n i64)] (-> i64)
+  (case (n-op n)
+    OP-START  (t-ctrl)
+    OP-STOP   (t-bot)
+    OP-XCTRL  (t-xctrl)
+    OP-RETURN (return-compute n)
+    OP-IF     (if-compute n)
+    OP-REGION (region-compute n)
+    OP-LOOP   (loop-compute n)
+    OP-CPROJ  (proj-compute n)
+    OP-PROJ   (proj-compute n)
+    OP-CONST  (n-aux n)                    ; a Const's type IS the constant
+    OP-ARG    (n-aux n)                    ; an opaque value of its declared type
+    OP-PHI    (phi-compute n)
+    OP-CAST   (cast-compute n)
+    OP-ADD    (arith-compute OP-ADD (n-in-ty n 1) (n-in-ty n 2))
+    OP-SUB    (arith-compute OP-SUB (n-in-ty n 1) (n-in-ty n 2))
+    OP-MUL    (arith-compute OP-MUL (n-in-ty n 1) (n-in-ty n 2))
+    OP-DIV    (arith-compute OP-DIV (n-in-ty n 1) (n-in-ty n 2))
+    OP-MINUS  (minus-compute (n-in-ty n 1))
+    OP-NOT    (not-compute   (n-in-ty n 1))
+    OP-EQ     (cmp-compute OP-EQ (n-in-ty n 1) (n-in-ty n 2))
+    OP-LT     (cmp-compute OP-LT (n-in-ty n 1) (n-in-ty n 2))
+    OP-LE     (cmp-compute OP-LE (n-in-ty n 1) (n-in-ty n 2))
+    OP-NEW      (new-compute n)
+    OP-LOAD     (load-compute n)
+    OP-STORE    (store-compute n)
+    OP-MEMMERGE (memmerge-compute n)
+    (t-bot)))
+
+;; An absent input contributes ANY (nothing known yet), which keeps compute monotone while a
+;; graph is still being wired up.
+(defn n-in-ty [(n i64) (i i64)] (-> i64)
+  (if (>= i (n-nins n)) (t-top)
+    (let [d (n-in n i)] (if (= d NO-NODE) (t-top) (n-ty d)))))
+
+; ---------------------------------------------------------------------------
+; Arithmetic over the value lattice
+; ---------------------------------------------------------------------------
+;; `int` means "an integer-valued number", so integer arithmetic stays in the int kind and
+;; only the RANGE is lost on i64 overflow. That is sound: the result is still integral, we
+;; just stop tracking bounds. (Whether it is exactly representable past 2^53 is a codegen
+;; question, not a lattice one.)
+;;
+;; Non-numeric operands are handled by real JavaScript semantics, conservatively:
+;;   `+`  can concatenate strings or call valueOf, so the result is `dyn`
+;;   `-` `*` `/`  coerce to number, so the result is `num` (NaN is a float)
+;; Both are sound, and the second is precise. Neither is a placeholder: M5 replaces them with
+;; guarded specialisations, it does not correct them.
+(defn ty-kinds-of [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (val-kinds v))
+    (TBot   [] VK-MASK)     ; ALL includes every value
+    (TTop   [] VK-NONE)
+    (TCtrl  [] VK-NONE)
+    (TXCtrl [] VK-NONE)
+    (TTuple [o l] VK-NONE)
+    ; a memory state is not a value, so it joins control and tuples: no kinds at all, which is what
+    ; makes `ty-numeric?` and `ty-int-only?` false for it and keeps the int-axis readers below
+    ; unreachable on one
+    (TMem [a c] VK-NONE)))
+
+(defn ty-numeric? [(t i64)] (-> bool)
+  (let [k (ty-kinds-of t)] (and (!= k VK-NONE) (= (& k (^ VK-NUM -1)) 0))))
+
+(defn ty-int-only? [(t i64)] (-> bool) (= (ty-kinds-of t) VK-INT))
+
+(defn ty-int-lo [(t i64)] (-> i64)
+  (match (ty-get t) (TVal [v] (val-ilo v))
+    (TBot [] TY-IMIN) (TTop [] TY-IMAX) (TCtrl [] TY-IMIN) (TXCtrl [] TY-IMIN)
+    (TTuple [o l] TY-IMIN) (TMem [a c] TY-IMIN)))
+(defn ty-int-hi [(t i64)] (-> i64)
+  (match (ty-get t) (TVal [v] (val-ihi v))
+    (TBot [] TY-IMAX) (TTop [] TY-IMIN) (TCtrl [] TY-IMAX) (TXCtrl [] TY-IMAX)
+    (TTuple [o l] TY-IMAX) (TMem [a c] TY-IMAX)))
+
+(defn add-ovf? [(a i64) (b i64) (s i64)] (-> bool)
+  ; overflow exactly when the operands share a sign and the result's sign differs
+  (and (= (< a 0) (< b 0)) (!= (< s 0) (< a 0))))
+
+(defn mul-ovf? [(a i64) (b i64) (p i64)] (-> bool)
+  (if (= a 0) false
+    (if (and (= a -1) (= b TY-IMIN)) true      ; test before dividing: IMIN/-1 is undefined
+      (!= (/ p a) b))))
+
+(defn imin4 [(a i64) (b i64) (c i64) (d i64)] (-> i64) (imin2 (imin2 a b) (imin2 c d)))
+(defn imax4 [(a i64) (b i64) (c i64) (d i64)] (-> i64) (imax2 (imax2 a b) (imax2 c d)))
+
+(defn arith-compute [(op i64) (a i64) (b i64)] (-> i64)
+  ; ANY on either side means "no value can be here", so the result cannot either. Preserving
+  ; that is what lets the optimistic pass start high and fall.
+  (if (or (ty-high? a) (ty-high? b)) (t-top)
+    (if (not (and (ty-numeric? a) (ty-numeric? b)))
+        (if (= op OP-ADD) (t-dyn) (t-num))
+      (if (= op OP-DIV) (div-numeric a b)
+        (if (not (and (ty-int-only? a) (ty-int-only? b))) (t-num)
+          (int-arith op (ty-int-lo a) (ty-int-hi a) (ty-int-lo b) (ty-int-hi b)))))))
+
+(defn int-arith [(op i64) (alo i64) (ahi i64) (blo i64) (bhi i64)] (-> i64)
+  ; An inverted range is the HIGH element of the int axis: no integer is in it. So the answer
+  ; is the HIGH type, not `int`. Answering `int` (the axis BOTTOM) is what made this compute
+  ; RISE: `join(int=8, int=[0..5])` is `int=~[5..8]`, the old answer was `int`, and when the
+  ; input later fell to `int=[0..5]` the result became `int=[1..6]`, which is above `int`.
+  ; `val-high?` now reports an inverted range as high so `arith-compute` filters it out one
+  ; level up; this stays because the axis rule belongs where the axis is computed.
+  (if (or (> alo ahi) (> blo bhi)) (t-top)
+    (if (= op OP-ADD)
+        (let [lo (+ alo blo) hi (+ ahi bhi)]
+          (if (or (add-ovf? alo blo lo) (add-ovf? ahi bhi hi)) (t-int)
+            (t-int-range lo hi)))
+      (if (= op OP-SUB)
+          (let [lo (- alo bhi) hi (- ahi blo)]
+            (if (or (add-ovf? alo (- 0 bhi) lo) (or (add-ovf? ahi (- 0 blo) hi)
+                    (or (= bhi TY-IMIN) (= blo TY-IMIN)))) (t-int)
+              (t-int-range lo hi)))
+        ; multiply: the extremes are among the four corner products
+        (let [p1 (* alo blo) p2 (* alo bhi) p3 (* ahi blo) p4 (* ahi bhi)]
+          (if (or (mul-ovf? alo blo p1) (or (mul-ovf? alo bhi p2)
+                  (or (mul-ovf? ahi blo p3) (mul-ovf? ahi bhi p4)))) (t-int)
+            (t-int-range (imin4 p1 p2 p3 p4) (imax4 p1 p2 p3 p4))))))))
+
+;; Division leaves the integers: 1/2 is 0.5 and x/0 is an infinity. So the result is `num`
+;; unless both sides are integer constants that divide exactly.
+(defn div-numeric [(a i64) (b i64)] (-> i64)
+  (if (and (and (ty-int-only? a) (ty-int-only? b))
+       (and (ty-const? a) (ty-const? b)))
+      (let [x (ty-int-lo a) y (ty-int-lo b)]
+        (if (= y 0) (t-num)                                  ; +-Infinity, a float
+          (if (and (= x TY-IMIN) (= y -1)) (t-num)           ; not representable as an i64
+            (if (= (% x y) 0) (t-int-con (/ x y)) (t-num)))))
+    (t-num)))
+
+(defn minus-compute [(a i64)] (-> i64)
+  (if (ty-high? a) (t-top)
+    (if (not (ty-numeric? a)) (t-num)
+      (if (not (ty-int-only? a)) (t-num)
+        (let [lo (ty-int-lo a) hi (ty-int-hi a)]
+          ; an inverted range holds no integer, so the negation holds none either: the HIGH
+          ; answer, not `int`. See the note in `int-arith`; `int` here also rose.
+          (if (> lo hi) (t-top)
+            (if (= lo TY-IMIN) (t-int)              ; -IMIN is not representable
+              (t-int-range (- 0 hi) (- 0 lo)))))))))
+
+;; `!x` is the truthiness question with the answer inverted, so it asks the same predicates
+;; the If does rather than carrying a second, smaller copy of the rules.
+(defn not-compute [(a i64)] (-> i64)
+  (if (ty-high? a) (t-top)
+    (let [f (ty-can-be-falsey? a) tr (ty-can-be-truthy? a)]
+      (if (and f (not tr)) (t-bool-con true)
+        (if (and tr (not f)) (t-bool-con false)
+          ; neither truthy nor falsey means the operand holds no value at all, so neither does
+          ; the answer. `bool` here is the axis bottom and rose as soon as the input fell.
+          (if (or f tr) (t-bool) (t-top)))))))
+
+(defn cmp-compute [(op i64) (a i64) (b i64)] (-> i64)
+  (if (or (ty-high? a) (ty-high? b)) (t-top)
+    (if (not (and (and (ty-int-only? a) (ty-int-only? b))
+                  (and (ty-const? a) (ty-const? b)))) (t-bool)
+      (let [x (ty-int-lo a) y (ty-int-lo b)]
+        (t-bool-con (if (= op OP-EQ) (= x y) (if (= op OP-LT) (< x y) (<= x y))))))))
+
+;; ---------------------------------------------------------------------------
+;; Removing a positional input
+;; ---------------------------------------------------------------------------
+;; Only valid for nodes whose inputs are a positional LIST (a Region's paths, a Phi's values,
+;; Stop's returns) rather than fixed slots. Compressing an Add's operands would be nonsense.
+(defn n-del-def! [(n i64) (i i64)] (-> i64)
+  (n-bump-cfg! n)
+  (let [old (n-in n i) len (n-nins n) ins (field (nd n) ins) (mut k) i]
+    (loop
+      (if (>= (+ (load k) 1) len) (break)
+        (do (al-set! [i64] ins (load k) (al-get (load ins) (+ (load k) 1)))
+            (store! k (+ (load k) 1))
+            0)))
+    (al-pop! [i64] ins)
+    (store! (field (nd n) hash) 0)
+    (if (!= old NO-NODE)
+        (if (n-del-use! old n) (n-kill! old) (wl-push! old))
+      0)
+    (n-move-deps! n)
+    (wl-push! n)
+    0))
+
+;; ---------------------------------------------------------------------------
+;; THE IN-PROGRESS CONTRACT, which a front end must honour
+;; ---------------------------------------------------------------------------
+;; A merge still being built has a null final input. Two rules follow, and together they are a
+;; contract on whoever builds the graph:
+;;
+;;   1. An in-progress merge reports CONTROL, and a Phi on one reports its DECLARED type.
+;;      Otherwise the not-yet-attached path makes the region look dead and the optimiser
+;;      deletes a loop body that was about to be filled in.
+;;   2. A loop body must be built AND PEEPHOLED inside that window, and the Phis closed before
+;;      the control back edge.
+;;
+;; Rule 2 is the one that bites. Build `i = 0; while(true) i = i + 1;` by closing the loop
+;; first and only then peepholing the body, and here is what happens: with the region no longer
+;; in progress and the back-edge value still unanalysed, the phi meets only the entry and
+;; reports `int=0`. That is a perfectly good OPTIMISTIC answer and it will fall. But `i + 1`
+;; then computes `int=1`, which is a constant, and folding is irreversible: the increment
+;; becomes the literal 1, the phi loses its only other user, and the entire loop is deleted.
+;; Nothing reports an error, because every individual step was locally justified.
+;;
+;; Build it in the right order and the phi reports `int` throughout, `i + 1` is `int`, and after
+;; closing the loop everything is already at its fixpoint.
+;;
+;; The general defence is M7's phase structure, which analyses to a fixpoint before it
+;; transforms anything. Until then, the contract is on the builder, and `n-set-def!` checks the
+;; one part of it that is cheap to check.
+(defn n-in-progress? [(n i64)] (-> bool)
+  (and (> (n-nins n) 1) (= (n-in n (- (n-nins n) 1)) NO-NODE)))
+
+(defn n-xctrl [] (-> i64) (n-peephole (n-new OP-XCTRL 0)))
+
+;; LAW 4 FOR A MULTI NODE. A merge is in progress until its last input arrives; an If is in
+;; progress until its last PROJECTION exists, and for the same reason: a peephole fired inside
+;; that window sees a node whose neighbourhood is only half built.
+;;
+;; The concrete failure. Build `if (0) return 2; else return 3;` one projection at a time. The
+;; true arm's type is XCtrl, so peepholing it folds it to XCtrl and `n-subsume!` kills the raw
+;; projection. That was the If's ONLY use, so `n-del-use!` reports the If unused and the kill
+;; cascade kills the If itself. The false arm is then created on a dead node and peepholed
+;; against a dead node: `n-kill!` cleared the If's inputs but not its TYPE, so the tuple still
+;; matches, the sibling still reads as XCtrl, and the rewrite reaches for the If's control input,
+;; which no longer exists. Before `n-in` was bounds-checked that read returned a stale buffer
+;; word, and on a NESTED dead branch the stale word was itself a dead node: the surviving Return
+;; ended up with a dead control input and the arm that should have run reported EV-STUCK.
+;;
+;; So the multi is PINNED across the whole window. `n-del-use!` reports a pinned node as still
+;; used, which is the existing mechanism the roots and every `n-subsume!` replacement already
+;; rely on, so nothing new has to be invented for it.
+;;
+;; The pin is not a substitute for dead-code elimination: an If both of whose projections
+;; resolved to something else really is garbage, and leaving it live would hold its predicate
+;; alive and print a branch the program no longer has. `n-multi-close!` collects it, which is why
+;; the graph this produces is the same graph the naive build produced in the cases where the naive
+;; build happened to work (node NUMBERING can differ, since the pin changes nothing about when
+;; nodes are created but a caller may now create the two projections adjacently; nothing in the
+;; suite encodes a node id, deliberately).
+(defn n-multi-open! [(m i64)] (-> i64) (n-keep! m) m)
+
+(defn n-multi-close! [(m i64)] (-> i64)
+  (n-unkeep! m)
+  ; still pinned means an OUTER window is open on the same node, and that window owns the collect
+  (if (and (and (not (n-dead? m)) (= (n-keeps m) 0)) (= (n-nouts m) 0)) (n-kill! m) 0)
+  m)
+
+;; An If's two control projections, built and peepholed as ONE operation, which is the way every
+;; caller should get them: the open/close pair above is the primitive, and forgetting to use it is
+;; what `cproj-idealize`'s named abort exists to catch. A multi with an arity the IR does not build
+;; by hand yet (M6's `Start`, one output per parameter) opens and closes the window itself.
+(defstruct Arms [(t i64) (f i64)])
+(defn arms-t [(a Arms)] (-> i64) (load (field a t)))
+(defn arms-f [(a Arms)] (-> i64) (load (field a f)))
+
+(defn n-if-arms! [(iff i64)] (-> Arms)
+  (n-multi-open! iff)
+  (let [(mut r) (zeroed Arms)]
+    (store! (field r t) (n-peephole (n-new1 OP-CPROJ 0 iff)))
+    (store! (field r f) (n-peephole (n-new1 OP-CPROJ 1 iff)))
+    ; THE ARMS ARE PINNED ACROSS THE CLOSE, and this is the second half of the same bug rather
+    ; than belt and braces. Closing the window may kill the If, and the sibling-is-dead rewrite
+    ; hands back the If's OWN CONTROL INPUT, so the surviving arm is at that moment used by
+    ; nothing but the If that is about to die. On a flat `if(0)` that input is Start, which is
+    ; pinned, and the fixture looked correct; nested inside another branch it is an ordinary
+    ; CProj, and the cascade killed the arm we were about to return. The caller then wired a live
+    ; Return to a dead node: `g-verify` says VERR-DEAD-INPUT and the arm that should have run
+    ; reports EV-STUCK. Held only in these two slots, the arms need exactly what `n-peephole`
+    ; gives a replacement across `n-subsume!`.
+    (n-keep! (load (field r t)))
+    (n-keep! (load (field r f)))
+    (n-multi-close! iff)
+    (n-unkeep! (load (field r t)))
+    (n-unkeep! (load (field r f)))
+    (load r)))
+
+;; The live projection of a multi node at one slot, or NO-NODE. Found by walking def-use, the
+;; same way `ev-if-arm` finds a branch arm: a multi node's projections are not held anywhere else,
+;; so this is the only place that knows how to get from the multi to its outputs.
+(defn n-multi-proj [(m i64) (slot i64)] (-> i64)
+  (let [len (n-nouts m) (mut i) 0 (mut found) NO-NODE]
+    (loop
+      (if (or (>= (load i) len) (!= (load found) NO-NODE)) (break)
+        (do (let [u (n-out m (load i))]
+              (if (and (and (not (n-dead? u)) (= (n-op u) OP-PROJ)) (= (n-aux u) slot))
+                  (store! found u)
+                0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+; ---------------------------------------------------------------------------
+; Building an allocation
+; ---------------------------------------------------------------------------
+;; A New AND EVERY ONE OF ITS PROJECTIONS, built and peepholed as one operation, inside the same
+;; `n-multi-open!` window `n-if-arms!` uses. LAW 4 applies to any multi node, and a New is one.
+;;
+;; It needs no equivalent of `n-if-arms!`'s pinning of the arms across the close, and the reason
+;; is worth stating rather than leaving as an absence: that pin exists because peepholing an If's
+;; first projection can REPLACE it, which drops the If's last use and runs the kill cascade
+;; through the arm that is about to be returned. A New's projections cannot be replaced by
+;; anything. `proj-compute` gives slot 0 an object type and every other slot a memory type,
+;; `ty-const?` is false for both (an allocation is not a compile-time constant and neither is a
+;; memory state), `n-idealize` has no arm for OP-PROJ, and two projections of one New at one slot
+;; are never built. So nothing here can subsume, and the window is doing only its own job.
+(defn n-new-obj! [(ctrl i64) (shape i64) (mems (slice i64))] (-> i64)
+  (if (shape-defined? shape) 0
+    (do (panic-corrupt "n-new-obj!: not a defined shape id") 0))
+  (let [k (shape-field-count shape)]
+    (if (= (slice-len mems) k) 0
+      (do (panic-corrupt "n-new-obj!: a New takes the incoming memory of EVERY field of its shape, one each") 0))
+    (let [nw (n-new OP-NEW shape) (mut i) 0]
+      (n-add-def! nw ctrl)
+      (loop
+        (if (>= (load i) k) (break)
+          (do (n-add-def! nw (slice-get mems (load i)))
+              (store! i (+ (load i) 1))
+              0)))
+      ; A peephole that MOVED the New would leave the projections below hanging off a node the
+      ; caller does not hold. It cannot today (see the note above), and this is how that stays true.
+      (if (= (n-peephole nw) nw) 0
+        (do (panic-corrupt "n-new-obj!: a New was replaced by its own peephole") 0))
+      (n-multi-open! nw)
+      (let [(mut j) 0]
+        (loop
+          (if (> (load j) k) (break)
+            (do (n-peephole (n-new1 OP-PROJ (load j) nw))
+                (store! j (+ (load j) 1))
+                0))))
+      (n-multi-close! nw)
+      nw)))
+
+;; The two arities the IR builds by hand. A shape with more fields than this is built through
+;; `n-new-obj!` with a slice; these exist so a fixture does not have to spell out a one-element
+;; buffer, and each refuses a shape of the wrong width by name rather than silently allocating an
+;; object whose other fields nothing initialises.
+(defn n-new-obj0! [(ctrl i64) (shape i64)] (-> i64)
+  (let [buf (alloc-stack (array i64 1))]
+    (n-new-obj! ctrl shape (slice-new [i64] (cast (ptr i64) buf) 0))))
+
+(defn n-new-obj1! [(ctrl i64) (shape i64) (m0 i64)] (-> i64)
+  (let [buf (alloc-stack (array i64 1))
+        p   (cast (ptr i64) buf)]
+    (store! (index p 0) m0)
+    (n-new-obj! ctrl shape (slice-new [i64] p 1))))
+
+(defn n-new-obj2! [(ctrl i64) (shape i64) (m0 i64) (m1 i64)] (-> i64)
+  (let [buf (alloc-stack (array i64 2))
+        p   (cast (ptr i64) buf)]
+    (store! (index p 0) m0)
+    (store! (index p 1) m1)
+    (n-new-obj! ctrl shape (slice-new [i64] p 2))))
+
+;; A New's outputs by MEANING rather than by slot number. The pairing (input slot 1+i is field
+;; i's incoming memory, output slot 1+i is its outgoing memory) is stated in the op table and
+;; read out here, so a caller never writes the `+ 1` itself.
+(defn n-obj-proj [(nw i64) (slot i64)] (-> i64)
+  (if (= (n-op nw) OP-NEW) 0
+    (do (panic-corrupt "n-obj-proj: not a New") 0))
+  (let [pr (n-multi-proj nw slot)]
+    (if (!= pr NO-NODE) 0
+      (do (panic-corrupt "n-obj-proj: that projection of the New does not exist") 0))
+    pr))
+(defn n-obj-ptr [(nw i64)] (-> i64) (n-obj-proj nw 0))
+(defn n-obj-mem [(nw i64) (i i64)] (-> i64) (n-obj-proj nw (+ i 1)))
+
+; ---------------------------------------------------------------------------
+; Building a memory op
+; ---------------------------------------------------------------------------
+;; The alias is checked HERE, against the table that could know, for the same reason
+;; `shape-defined?` is checked at every entry point that takes a shape id: `t-mem-alias` would
+;; catch a number past ALIAS-MAX, but an in-range number that no transition ever allocated is a
+;; load off a word the program has no name for, and it would type-check perfectly.
+(defn n-check-alias [(alias i64) (what (slice u8))] (-> i64)
+  (if (shape-alias-defined? alias) 0
+    (do (panic-corrupt what) 0)))
+
+(defn n-load! [(mem i64) (ptr i64) (alias i64)] (-> i64)
+  (n-check-alias alias "n-load!: not an allocated alias number")
+  (n-peephole (n-new3 OP-LOAD alias NO-NODE mem ptr)))
+
+(defn n-store! [(mem i64) (ptr i64) (val i64) (alias i64)] (-> i64)
+  (n-check-alias alias "n-store!: not an allocated alias number")
+  (n-peephole (n-new4 OP-STORE alias NO-NODE mem ptr val)))
+
+(defn n-memmerge2! [(a i64) (b i64)] (-> i64)
+  (n-peephole (n-new3 OP-MEMMERGE 0 NO-NODE a b)))
+
+; ============================================================================
+; JavaScript truthiness
+; ============================================================================
+;; `if` and `!` both need to know whether a value can be falsey, truthy, or either. This is
+;; not "nonzero": false, 0, -0, NaN, "", null and undefined are all falsey, and every object,
+;; function and symbol is truthy. Defining it in one place is the difference between two ops
+;; agreeing and two ops quietly drifting apart.
+;;
+;; `str` and `bigint` appear in BOTH answers, because "" and 0n are falsey while "x" and 1n are
+;; truthy and the lattice carries no refinement yet to tell them apart. That is imprecision,
+;; not unsoundness: it costs a branch, never a wrong answer.
+(defn f64-nan-bits? [(b i64)] (-> bool)
+  (and (= (& b 9218868437227405312) 9218868437227405312)   ; exponent all ones
+       (!= (& b 4503599627370495) 0)))                      ; and a non-zero mantissa
+
+(defn fbits-falsey? [(b i64)] (-> bool)
+  (or (= (& b TY-IMAX) 0)          ; +0.0 or -0.0: the sign bit does not matter
+      (f64-nan-bits? b)))
+
+(defn range-has? [(lo i64) (hi i64) (v i64)] (-> bool)
+  (and (<= lo hi) (and (<= lo v) (<= v hi))))
+(defn range-has-other-than? [(lo i64) (hi i64) (v i64)] (-> bool)
+  (and (<= lo hi) (or (< lo v) (> hi v))))
+
+(const VK-ALWAYS-FALSEY i64 3)      ; undefined | null
+(const VK-ALWAYS-TRUTHY i64 832)    ; sym | obj | fun
+(const VK-EITHER-WAY    i64 160)    ; str | bigint: "" and 0n are falsey, others are not
+
+(defn ty-can-be-falsey? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TVal [v]
+      (let [k (val-kinds v)]
+        (or (!= (& k (| VK-ALWAYS-FALSEY VK-EITHER-WAY)) 0)
+         (or (and (!= (& k (| VK-INT VK-BOOL)) 0) (range-has? (val-ilo v) (val-ihi v) 0))
+             (and (!= (& k VK-FLT) 0)
+                  (or (!= (val-fsz v) FSZ-CON) (fbits-falsey? (val-fbits v))))))))
+    (TBot   [] true)                ; ALL includes every falsey value
+    (TTop   [] false) (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false)
+    (TMem [a c] false)))                ; a memory state is never a condition
+
+(defn ty-can-be-truthy? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TVal [v]
+      (let [k (val-kinds v)]
+        (or (!= (& k (| VK-ALWAYS-TRUTHY VK-EITHER-WAY)) 0)
+         (or (and (!= (& k (| VK-INT VK-BOOL)) 0)
+                  (range-has-other-than? (val-ilo v) (val-ihi v) 0))
+             (and (!= (& k VK-FLT) 0)
+                  (or (!= (val-fsz v) FSZ-CON) (not (fbits-falsey? (val-fbits v)))))))))
+    (TBot   [] true)
+    (TTop   [] false) (TCtrl [] false) (TXCtrl [] false) (TTuple [o l] false)
+    (TMem [a c] false)))                ; a memory state is never a condition
+
+; ============================================================================
+; Control-flow compute
+; ============================================================================
+;; An If's type is a TUPLE of its two control outputs, slot 0 true and slot 1 false. That is
+;; the whole trick behind dead-code elimination here: a branch that provably is not taken shows
+;; up as XCtrl in one slot, and everything downstream follows from ordinary type propagation
+;; rather than from a separate reachability pass.
+(defn t-if-both    [] (-> i64) (t-tuple2 (t-ctrl)  (t-ctrl)))
+(defn t-if-true    [] (-> i64) (t-tuple2 (t-ctrl)  (t-xctrl)))
+(defn t-if-false   [] (-> i64) (t-tuple2 (t-xctrl) (t-ctrl)))
+(defn t-if-neither [] (-> i64) (t-tuple2 (t-xctrl) (t-xctrl)))
+
+;; UNANALYSED IS NOT UNREACHABLE, ON EITHER INPUT.
+;;
+;; The old test was `(and (!= c (t-ctrl)) (!= c (t-bot)))`, which ANY satisfies, so an If whose
+;; own control had not been computed yet reported [~ctrl ~ctrl]: "both arms provably not taken",
+;; minted out of no information at all. `cproj-idealize`'s guard is `= (t-xctrl)`, the test its
+;; comment defends as "XCtrl, not merely high", and it cannot tell that answer from a proven
+;; one, so it replaced BOTH live projections with XCtrl and the arms were killed outright.
+;;
+;; Same for the predicate: ANY there is "not analysed yet", while a high-but-not-ANY predicate
+;; (`~dyn`, or an uninhabited `int=~[5..8]`) is a real claim that no value reaches the test, and
+;; an If no value reaches takes neither arm. So the two are separated by `ty-unanalysed?`.
+;;
+;; Returning ANY is monotone: it falls to [ctrl ctrl] when the control turns out live and to
+;; [~ctrl ~ctrl] when it turns out dead, and `proj-compute` maps ANY to ANY so the projections
+;; stay unanalysed rather than becoming provably dead.
+(defn if-compute [(n i64)] (-> i64)
+  (let [c (n-in-ty n 0) p (n-in-ty n 1)]
+    (if (or (ty-unanalysed? c) (ty-unanalysed? p)) (t-top)
+      ; an If in unreachable code takes neither branch
+      (if (and (!= c (t-ctrl)) (!= c (t-bot))) (t-if-neither)
+        (if (ty-high? p) (t-if-neither)
+          (let [f (ty-can-be-falsey? p) tr (ty-can-be-truthy? p)]
+            (if (and tr (not f)) (t-if-true)
+              (if (and f (not tr)) (t-if-false)
+                ; neither truthy nor falsey: the predicate holds no value, so neither arm runs
+                (if (or f tr) (t-if-both) (t-if-neither))))))))))
+
+;; A merge is reachable when ANY path into it is. Input 0 is unused and skipped.
+;;
+;; WHILE A PATH IS UNANALYSED THERE IS NO CLAIM TO MAKE. The meet below is seeded with `~ctrl`
+;; and `ty-meet-ctrl` gives meet(~ctrl, ANY) = ~ctrl (src/ty.coil), so without this guard a
+;; Region none of whose paths has a type yet reported `~ctrl`: PROVABLY UNREACHABLE, out of
+;; nothing. That is the answer four separate rewrites test for with `= (t-xctrl)` believing they
+;; had the proven one. `region-dead-path` dropped a live path and the matching Phi arm,
+;; `stop-idealize` dropped a live Return and the kill cascade took the whole program with it,
+;; `phi-single-input` collapsed a Phi onto one arm, `cproj-idealize` replaced a live projection
+;; with XCtrl. On the control axis "exactly ~ctrl" and "high" are the same thing when the
+;; producer is a Region, which is why switching those four from `ty-high?` to `= (t-xctrl)` did
+;; not close the hole.
+;;
+;; ANY is also what makes unanalysedness PROPAGATE: a merge above an unanalysed merge is itself
+;; ANY, so a Phi on it has an ANY input and `n-inputs-analysed?` can see it.
+(defn region-compute [(n i64)] (-> i64)
+  (if (n-in-progress? n) (t-ctrl)
+   (if (not (n-inputs-analysed? n)) (t-top)
+    (let [len (n-nins n) (mut t) (t-xctrl) (mut i) 1]
+      (loop
+        (if (>= (load i) len) (break)
+          (do (store! t (ty-meet (load t) (n-in-ty n (load i))))
+              (store! i (+ (load i) 1))
+              0)))
+      (load t)))))
+
+;; A loop is reachable exactly when its ENTRY is. Meeting the back edge in would make the
+;; loop's liveness depend on its own body, which is circular and never settles.
+(defn loop-compute [(n i64)] (-> i64)
+  (if (n-in-progress? n) (t-ctrl) (n-in-ty n 1)))
+
+(defn proj-compute [(n i64)] (-> i64)
+  (let [t (n-in-ty n 0) idx (n-aux n)]
+    (match (ty-get t)
+      (TTuple [off len] (if (< idx len) (ty-kid off idx) (t-bot)))
+      (TTop   [] (t-top))
+      (TXCtrl [] (t-top))
+      (TBot   [] (t-bot))
+      (TCtrl  [] (t-bot))
+      (TVal [v] (if (val-high? v) (t-top) (t-bot)))
+      ; A Proj reading a memory state is a malformed node: memory is not a multi-output. The answer
+      ; follows the TVal arm rather than inventing one, so an optimistic input still reports ANY and
+      ; only a settled one falls to ALL. Memory's own projections (a `New`'s per-alias outputs)
+      ; arrive in 4b as projections of a TUPLE, which the arm above already handles.
+      (TMem [a c] (if (ty-high? t) (t-top) (t-bot))))))
+
+;; A Phi's type is the meet over the paths that are actually LIVE, joined with its declared
+;; type (aux). Reading a dead path's value would poison the result with a value that cannot
+;; arrive, so the phi records a dependency on the region's control inputs: when a path dies,
+;; the phi has to be revisited.
+(defn phi-compute [(n i64)] (-> i64)
+  (let [r (n-in n 0)]
+    (if (or (= r NO-NODE) (not (op-merge? (n-op r))))
+        ; the region collapsed under us; hold the current answer unless control is gone
+        (if (= r NO-NODE) (t-top) (if (ty-high? (n-ty r)) (t-top) (n-ty n)))
+      (if (n-in-progress? r) (n-aux n)
+        (let [len (n-nins n) (mut t) (t-top) (mut i) 1]
+          (loop
+            (if (>= (load i) len) (break)
+              ; THE DEP GOES ON THE PATH, NOT ON THE REGION. Simple's PhiNode.compute does
+              ; `addDep(r.in(i))`, and this port had lost the `.in(i)`. A region already at
+              ; `ctrl` does NOT change type when a SECOND path goes live (meet(ctrl,ctrl) is
+              ; ctrl), so nothing re-queued the phi and it kept a type computed while that path
+              ; was still high: `if (p) x=8; else x=0;` settled at `int=8` on 5 of 40 seeds and
+              ; the analysis concluded the program always returns 9. A type that is too SPECIFIC
+              ; is the miscompile direction, and `n-set-ty-falling!` cannot catch it because the
+              ; stale type never changes at all.
+              (do (if (!= (n-in r (load i)) NO-NODE) (n-add-dep! (n-in r (load i)) n) 0)
+                  (if (ty-high? (n-in-ty r (load i))) 0
+                    (store! t (ty-meet (load t) (n-in-ty n (load i)))))
+                  (store! i (+ (load i) 1))
+                  0)))
+          (let [joined (ty-join (load t) (n-aux n))]
+            ; Around a loop, an induction variable's range would creep upward on every trip and
+            ; the analysis would never settle. Widening is what bounds it. This widens on any
+            ; change to a non-constant, which is blunter than it needs to be and loses some
+            ; loop ranges Simple keeps; termination is the property that matters here, and
+            ; sharpening it belongs with loop optimisation.
+            ;
+            ; Around a loop an induction variable's range grows on every trip, and widening is
+            ; what bounds it. The FUEL MUST COME FROM THE PHI'S OWN PREVIOUS TYPE, not from
+            ; `joined`. Integer arithmetic mints a fresh type (`t-int-range` sets the counter to
+            ; 0), so a phi reading its fuel out of the meet of its paths gets a full tank every
+            ; trip and the range creeps one step per round for ever. That bug was real and was
+            ; invisible on the eagerly-peepholed path, because the in-progress contract makes the
+            ; increment read the phi's DECLARED type and the very first `joined` is already at the
+            ; axis bottom. Building the same loop raw and running `g-analyze!` reached
+            ; `int=[0..6663]` after 20000 steps with zero rises, until the step cap fired. So the
+            ; eager path was terminating by accident of construction order rather than by design.
+            (if (and (and (= (n-op r) OP-LOOP) (!= joined (n-ty n))) (not (ty-const? joined)))
+                (ty-widen-from (n-ty n) joined)
+              joined)))))))
+
+;; Cast is the mechanism the entire guard design rests on: after a type test, the value on the
+;; taken edge is known to be narrower, and a Cast is how that knowledge enters the graph.
+(defn cast-compute [(n i64)] (-> i64)
+  (let [t (n-in-ty n 1) target (n-aux n) j (ty-join t target)]
+    ; A high join from a low input means the two disagree and no value satisfies the cast.
+    ; Reporting that would read as dead code and delete a live branch, so hold the prior
+    ; answer instead. This is Simple's "freeze" rule.
+    (if (and (ty-high? j) (not (ty-high? t)))
+        (if (= (n-ty n) (t-top)) target (n-ty n))
+      j)))
+
+; ============================================================================
+; Memory compute
+; ============================================================================
+;; WHAT A MEMORY STATE'S CONTENTS MEANS, decided here once because every one of the four computes
+;; below is an application of it: `TMem(aliases, contents)` says that every value held in any of
+;; those alias classes, at this point in the program, is described by `contents`. It is a claim
+;; about the WHOLE alias class and not about one object, because an alias class is exactly the
+;; granularity this IR resolves memory to.
+;;
+;; THAT IS WHY A STORE MEETS RATHER THAN REPLACES. `o.x = 5` leaves every OTHER object in alias
+;; x holding whatever it held, so the new state's contents is `meet(old, 5)` and not `5`. Taking
+;; `5` would be the precise answer for `o` and a lie about the class, and a `Load` reading it
+;; would fold a different object's field to a constant it never held. The cost is real and it is
+;; the reason 4c's forwarding is STRUCTURAL: `Load(p, Store(p, v))` is `v` because the pointers
+;; are the same NODE, which is a fact about the graph rather than about the lattice, and no
+;; alias-level type could ever have recovered it. So a load in 4b reports the union of everything
+;; its class holds, `tests/mem-test.coil` asserts that union exactly, and 4c is measured against
+;; it rather than against a claim this milestone could not make.
+;;
+;; The declared field type is deliberately NOT joined in. `shape-alias-ty` records what the front
+;; end SAID; the contents is what the analysis PROVED. In a dynamic language the two disagree
+;; routinely (a field declared `int` can be assigned a string), and joining a proof to a claim
+;; would either mint a high type for the disagreement, which reads as dead code (see
+;; `cast-compute`'s freeze rule for what that costs), or quietly make the front end's annotation
+;; load-bearing for correctness. D4 says a narrowing needs a guard, and a declared type is not one.
+
+;; ---------------------------------------------------------------------------
+;; The two questions every memory compute has to ask before it reads a contents
+;; ---------------------------------------------------------------------------
+;; DOES THIS STATE DESCRIBE THE CLASS I AM TOUCHING. `ty-mem-contents` is a projection: it hands
+;; back the contents field whatever the alias bitset says, so reading it for a class the bitset
+;; does not carry reports ANOTHER CLASS'S value. That is not imprecision, it is an
+;; UNDER-approximation: a type no proof supports, in the direction that miscompiles.
+;;
+;; It matters because of which consumer sees it first. `load-idealize` refuses this graph shape by
+;; comparing alias numbers, but `n-peephole` runs the constant fold BEFORE it ever calls
+;; `n-idealize`, so when the other class's contents happens to be a constant -- and `undefined`,
+;; the contents of every freshly allocated field, is one -- the Load is replaced by a Const and
+;; deleted, and the EV-MEM the interpreter owed that graph is gone with it. One verifier-clean
+;; graph then has two observable answers, which is LAW 10's differential oracle failing across a
+;; pass, and it is exactly the laundering the alias comparison was written to refuse.
+;;
+;; ANY, NOT ALL. An alias bitset only GROWS as a memory type falls (meet is OR), so "the class is
+;; absent" can only turn into "the class is present". A low answer here would have to RISE to the
+;; contents at that moment; ANY falls to it. The project's own `every_memory_compute_is_monotone_in_every_slot`
+;; catches the ALL version by name.
+(defn mem-in-misses-alias? [(t i64) (alias i64)] (-> bool)
+  (and (ty-mem? t) (= (& (ty-mem-aliases t) (<< 1 alias)) 0)))
+
+(defn mem-in-contents-for [(t i64) (alias i64)] (-> i64)
+  (if (mem-in-misses-alias? t alias) (t-top) (ty-mem-contents t)))
+
+;; DOES EVERY OBJECT THIS POINTER CAN BE CARRY THIS WORD. The other half of `ev-check-access`, and
+;; the reason `shape-field-by-alias` answers SHAPE-NO-FIELD rather than aborting.
+;;
+;; A fixed-offset access to a word the object does not have is a front end that emitted `o.y`
+;; without a shape guard, which D4 says is the bug rather than something the compiler should
+;; paper over. `load-compute` answering the class's contents anyway is what lets the fold delete
+;; the load and report `undefined`, which hides precisely the guard D4 requires. So the answer for
+;; a pointer that MISSES the word is ALL: no proof, nothing to fold, and the Load survives for the
+;; interpreter to refuse with EV-SHAPE.
+;;
+;; "SOME shape misses it" and not "no shape has it", and that is the monotone form. The shape
+;; bitset only grows as a pointer type falls, so a set that already contains a missing shape
+;; contains it for ever, and the answer can only stay at ALL. Requiring merely that SOME shape
+;; carries the word would flip back the other way the moment a second shape arrived.
+;;
+;; Only DEFINED shape ids are consulted. `t-kinds` mints its shape bitset as -1 (every shape:
+;; the bottom of that axis), so most low types name shapes that no transition ever allocated, and
+;; `shape-field-by-alias` has nothing to say about those. Newly defined shapes can only ADD a
+;; missing one, so the walk stays monotone as the table grows.
+(defn ptr-misses-alias? [(t i64) (alias i64)] (-> bool)
+  (let [bits (ty-shapes t) k (shape-count) (mut i) 0 (mut missing) false]
+    (loop
+      (if (or (>= (load i) k) (load missing)) (break)
+        (do (if (and (!= (& bits (<< 1 (load i))) 0)
+                     (= (shape-field-by-alias (load i) alias) SHAPE-NO-FIELD))
+                (store! missing true)
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load missing)))
+
+;; WILL THE PROGRAM REFUSE THIS ACCESS. The static twin of `ev-check-access`, asked of a Load's or
+;; a Store's own types: slots 1 and 2 are the memory state and the pointer for both ops, so one
+;; predicate covers both. `false` is not a promise that the access succeeds -- an alias bitset and
+;; a shape set are both unions over paths, so a state that carries the class statically may not
+;; carry it on the path taken -- but `true` means every path refuses it.
+;;
+;; IT EXISTS SO A REWRITE CANNOT CONSUME AN ACCESS THE PROGRAM WOULD REFUSE. Forwarding a load out
+;; of a store drops the store's last reader, the kill cascade collects the store, and the
+;; EV-SHAPE or EV-MEM that store owed the program disappears; the same program then answers 5
+;; before the pass and traps after it, or the other way round. Reading a type to DECLINE a rewrite
+;; is always sound, which is why this may look at a provisional answer where an irreversible
+;; rewrite may not (LAW 3).
+(defn access-refused? [(n i64)] (-> bool)
+  (or (mem-in-misses-alias? (n-in-ty n 1) (n-aux n))
+      (ptr-misses-alias? (n-in-ty n 2) (n-aux n))))
+
+;; A New's tuple is one slot per field plus the object, and the object's shape bitset bounds the
+;; field count, so this buffer cannot be overrun by a legal shape. The check below says so anyway,
+;; because "cannot" is a property of another file.
+(const NEW-TUPLE-MAX i64 65)
+
+;; Slot 0 is the object; slot 1+i is field i's memory AFTER the allocation. Every field of a fresh
+;; object holds `undefined`, which is what JavaScript says and what makes an allocation a link in
+;; each of its fields' memory chains: the incoming state for that alias is met with `undefined`
+;; rather than replaced, for the reason in the header above.
+(defn new-compute [(n i64)] (-> i64)
+  (let [s (n-aux n)]
+    (if (shape-defined? s) 0
+      (do (panic-corrupt "new-compute: a New whose aux is not a defined shape id") 0))
+    (let [k   (shape-field-count s)
+          buf (alloc-stack (array i64 65))
+          p   (cast (ptr i64) buf)
+          (mut i) 0]
+      (if (< (+ k 1) NEW-TUPLE-MAX) 0
+        (do (panic-corrupt "new-compute: a shape with more fields than the tuple buffer holds") 0))
+      (store! (index p 0) (t-obj-shape s))
+      (loop
+        (if (>= (load i) k) (break)
+          (do (store! (index p (+ (load i) 1))
+                      (t-mem-alias (shape-field-alias s (load i))
+                                   ; the incoming state has to be one that DESCRIBES this field's
+                                   ; class, or the meet would carry a sibling class's contents
+                                   ; into it; see `mem-in-contents-for`
+                                   (ty-meet (mem-in-contents-for (n-in-ty n (+ (load i) 1))
+                                                                 (shape-field-alias s (load i)))
+                                            (t-undef))))
+              (store! i (+ (load i) 1))
+              0)))
+      (t-tuple-list (slice-new [i64] p (+ k 1))))))
+
+;; A Load's value is what its memory input says the class holds. `ty-mem-contents` maps ANY to
+;; ANY, so an unanalysed memory edge leaves the load unanalysed rather than concluding anything,
+;; and a memory state at the top of its own sublattice (`t-mem-none`: the empty alias set) leaves
+;; it there too.
+;;
+;; A HIGH POINTER MEANS NO OBJECT REACHES THIS LOAD, so no value comes out of it. That is the
+;; ordinary optimistic answer and it falls to the contents as soon as the pointer does; it is what
+;; lets a load on a dead arm stay out of the meet at a Phi below it.
+;; A POINTER THAT MISSES THE WORD ANSWERS ALL, for the reason `ptr-misses-alias?` gives: the
+;; access is a front-end bug rather than a value, and reporting the class's contents would let the
+;; fold turn it into `undefined` and delete the node the oracle had to complain about.
+(defn load-compute [(n i64)] (-> i64)
+  (if (ty-high? (n-in-ty n 2)) (t-top)
+    (if (ptr-misses-alias? (n-in-ty n 2) (n-aux n)) (t-bot)
+      (mem-in-contents-for (n-in-ty n 1) (n-aux n)))))
+
+;; The pointer is deliberately NOT consulted here. A Store's result is a memory STATE, never a
+;; constant, so nothing can fold it away and there is no laundering to prevent; meeting the value
+;; into its own class is an over-approximation, which is the safe direction. What it does have to
+;; ask is the memory question: an incoming state that describes some other class says nothing
+;; about this one, and inheriting its contents would mint a state more specific than the truth.
+(defn store-compute [(n i64)] (-> i64)
+  (t-mem-alias (n-aux n)
+               (ty-meet (mem-in-contents-for (n-in-ty n 1) (n-aux n))
+                        ; a memory state is not a value, so it cannot BE a contents; `t-mem`
+                        ; panics on one and this compute has to stay total
+                        (ty-as-mem-value (n-in-ty n 3)))))
+
+;; The union of its inputs' alias classes, which is exactly `ty-meet` on the memory production:
+;; OR on the alias bitset, meet on the contents. Seeding at `t-mem-none` is seeding at the top of
+;; that sublattice, so it is the identity for the fold and a MemMerge with no memory inputs
+;; describes nothing rather than describing everything.
+;;
+;; This is the node that makes the bitset alias axis load-bearing rather than decorative: merging
+;; alias {0} with alias {1} has to yield {0,1}, and Simple's collapse rule would answer "all of
+;; memory" here (DESIGN.md section 4 has the arithmetic).
+(defn memmerge-compute [(n i64)] (-> i64)
+  (let [len (n-nins n) (mut t) (t-mem-none) (mut i) 1]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (store! t (ty-meet (load t) (n-in-ty n (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (load t)))
+
+;; A Return carries the program's final memory when it has one. It is optional because M0 to M3
+;; built Returns with two inputs and those graphs are still the corpus, and it exists at all
+;; because memory has to be ROOTED at the exit: with nothing reading the last store, the kill
+;; cascade collects the whole heap as unused and 4c's store elimination would be gated on a
+;; program whose stores were already gone. It is also the slot M6's calls need, one milestone
+;; early rather than retrofitted through every Return in the corpus.
+(defn return-compute [(n i64)] (-> i64)
+  (if (>= (n-nins n) 3)
+      (t-tuple3 (n-in-ty n 0) (n-in-ty n 1) (n-in-ty n 2))
+    (t-tuple2 (n-in-ty n 0) (n-in-ty n 1))))
+
+; ============================================================================
+; Control-flow idealize
+; ============================================================================
+(defn region-has-phi? [(n i64)] (-> bool)
+  (let [len (n-nouts n) (mut i) 0 (mut found) false]
+    (loop
+      (if (or (>= (load i) len) (load found)) (break)
+        (do (if (op-phi? (n-op (n-out n (load i)))) (store! found true) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+;; The index of a path that cannot be reached, or 0 for none. A Loop never gives up its entry:
+;; a loop whose entry died is handled by the loop dying, not by rewriting it into a region.
+(defn region-dead-path [(n i64)] (-> i64)
+  (let [len (n-nins n) (mut i) 1 (mut found) 0]
+    (loop
+      (if (or (>= (load i) len) (!= (load found) 0)) (break)
+        ; PROVEN unreachable. Dropping a path is irreversible and it drops an arm from every Phi
+        ; on this region with it, so a provisional `~ctrl` here is a miscompile: the arm that
+        ; should have run vanishes and the graph left behind is internally consistent, so
+        ; `g-verify` sees nothing wrong with it.
+        (do (if (and (n-in-proven-xctrl? n (load i))
+                     (not (and (= (n-op n) OP-LOOP) (= (load i) 1))))
+                (store! found (load i))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+;; Region and Phi arity is ONE invariant, not two. Dropping a region path without dropping the
+;; matching value from every Phi on that region leaves each Phi reading the wrong path, which
+;; is a miscompile that typechecks. They are removed together, here, or not at all.
+(defn region-remove-path! [(n i64) (path i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (n-nouts n)) (break)
+        (do (let [u (n-out n (load i))]
+              (if (and (op-phi? (n-op u)) (= (n-nins u) (n-nins n)))
+                  (do (n-del-def! u path) 0)
+                0))
+            (store! i (+ (load i) 1))
+            0))))
+  (n-del-def! n path)
+  n)
+
+;; `if(p) {} else {}` with nothing merged is not a branch at all: both paths come straight off
+;; the same If, so the merge is just that If's own control input.
+(defn region-collapse-diamond [(n i64)] (-> i64)
+  ; a Loop's two inputs are entry and back edge, never two arms of one branch
+  (if (or (= (n-op n) OP-LOOP) (or (!= (n-nins n) 3) (region-has-phi? n))) NO-NODE
+    (let [a (n-in n 1) b (n-in n 2)]
+      (if (or (= a NO-NODE) (= b NO-NODE)) NO-NODE
+        (if (and (and (= (n-op a) OP-CPROJ) (= (n-op b) OP-CPROJ))
+                 (and (= (n-in a 0) (n-in b 0)) (= (n-op (n-in a 0)) OP-IF)))
+            (n-in (n-in a 0) 0)
+          NO-NODE)))))
+
+(defn region-idealize [(n i64)] (-> i64)
+  (if (n-in-progress? n) NO-NODE
+    (if (<= (n-nins n) 1) (n-xctrl)                    ; no paths left: unreachable
+      (let [dead (region-dead-path n)]
+        (if (!= dead 0) (region-remove-path! n dead)
+          ; a single-path merge with nothing merged is not a merge; a Loop keeps its identity
+          (if (and (and (= (n-nins n) 2) (not (region-has-phi? n))) (!= (n-op n) OP-LOOP))
+              (n-in n 1)
+            (region-collapse-diamond n)))))))
+
+(defn cproj-idealize [(n i64)] (-> i64)
+  (let [m (n-in n 0) idx (n-aux n)]
+    (if (= m NO-NODE) NO-NODE
+      ; A LIVE projection whose multi node has been KILLED is graph corruption, and it is
+      ; reachable by building a multi's projections one at a time: peepholing the first one to
+      ; XCtrl drops the multi's last use, so the kill cascade takes the multi with it, and the
+      ; sibling is then peepholed against a corpse. `n-kill!` clears `ins` but leaves `ty`, so
+      ; the stale tuple below still matches and the read of input 0 returns a buffer word. Named
+      ; abort, not NO-NODE: NO-NODE would leave a live Return whose control is a dead node, which
+      ; is the miscompile (a whole arm of the program silently vanishes) rather than a warning.
+      ; The window that prevents it is `n-multi-open!`/`n-multi-close!`.
+      (if (n-dead? m)
+          (do (panic-corrupt "cproj-idealize: the multi node was killed before all of its projections existed; build them inside n-multi-open!/n-multi-close!")
+              NO-NODE)
+        (match (ty-get (n-ty m))
+          (TTuple [off len]
+            ; every read of the tuple is bounds-checked against the arity the TYPE declares: aux
+            ; is a slot index and a slot index past the end is a malformed node, not a rewrite
+            (if (or (< idx 0) (>= idx len)) NO-NODE
+              ; XCtrl AND PROVEN: see the notes on n-ty-proven? and phi-single-input. `if-compute`
+              ; used to report [~ctrl ~ctrl] for an If whose own control was merely unanalysed,
+              ; and this rewrite then replaced BOTH live projections with XCtrl, deleting the arms.
+              (if (not (n-ty-proven? m)) NO-NODE
+                (if (= (ty-kid off idx) (t-xctrl)) (n-xctrl)
+                  ; the sibling is dead, so the If does not branch: this projection IS its control
+                  (if (and (and (= (n-op m) OP-IF) (= len 2))
+                           (= (ty-kid off (- 1 idx)) (t-xctrl)))
+                      (n-in m 0)
+                    NO-NODE)))))
+          (TBot [] NO-NODE) (TTop [] NO-NODE) (TCtrl [] NO-NODE) (TXCtrl [] NO-NODE)
+          (TVal [v] NO-NODE) (TMem [a c] NO-NODE))))))
+
+;; The one value every live path contributes, ignoring self-references (a loop phi fed by its
+;; own back edge), or NO-NODE when the paths disagree.
+;; ANALYSIS versus TRANSFORMATION, and it matters here more than anywhere else in the file.
+;; `phi-compute` skips any path whose control is HIGH, which includes ANY, because an
+;; optimistic answer gets revisited when the control type falls. This function feeds an
+;; irreversible rewrite, so it may only skip a path that is provably unreachable: XCtrl. Using
+;; `ty-high?` here instead makes the result depend on worklist order, and a loop phi visited
+;; before its Loop's control was computed collapses to its entry value, turning the induction
+;; variable into a constant.
+(defn phi-single-input [(n i64) (r i64)] (-> i64)
+  (let [len (n-nins n) (mut live) NO-NODE (mut ok) true (mut i) 1]
+    (loop
+      (if (or (>= (load i) len) (not (load ok))) (break)
+        (do (let [v (n-in n (load i))]
+              (if (or (n-in-proven-xctrl? r (load i)) (= v n)) 0
+                (if (= (load live) NO-NODE) (store! live v)
+                  (if (!= (load live) v) (store! ok false) 0))))
+            (store! i (+ (load i) 1))
+            0)))
+    (if (load ok) (load live) NO-NODE)))
+
+(defn phi-idealize [(n i64)] (-> i64)
+  (let [r (n-in n 0)]
+    (if (or (= r NO-NODE) (not (op-merge? (n-op r)))) (n-in n 1)
+      (if (or (n-in-progress? r) (<= (n-nins r) 1)) NO-NODE
+        (let [u (phi-single-input n r)]
+          ; Only collapse when the survivor is at least as specific as the phi. Otherwise the
+          ; replacement would WIDEN the type at every use, losing what the join with the
+          ; declared type had established.
+          (if (and (!= u NO-NODE) (ty-isa (n-ty u) (n-ty n))) u NO-NODE))))))
+
+;; Stop drops a Return that cannot be reached. Without this, unreachable code is merely TYPED
+;; as unreachable and still prints, so "the dead branch is gone" would be a claim about the
+;; types rather than something visible in the program.
+(defn stop-idealize [(n i64)] (-> i64)
+  (let [len (n-nins n) (mut i) 0 (mut found) NO-NODE]
+    (loop
+      (if (or (>= (load i) len) (!= (load found) NO-NODE)) (break)
+        (do (let [r (n-in n (load i))]
+              ; XCtrl AND PROVEN. Dropping the last Return runs the kill cascade over the whole
+              ; program, so a provisional answer here compiles a valid program to nothing at all:
+              ; Stop with no inputs, which `g-verify` accepts because an empty graph is
+              ; structurally valid and the printer omits dead nodes, so the diagram shows Start
+              ; and Stop and nothing says a word. Simple does not delete a Return at all; this
+              ; rewrite is this project's own addition and carries its own obligation.
+              (if (and (!= r NO-NODE) (n-in-proven-xctrl? r 0))
+                  (store! found (load i))
+                0))
+            (store! i (+ (load i) 1))
+            0)))
+    (if (= (load found) NO-NODE) NO-NODE
+      (do (n-del-def! n (load found)) n))))
+
+(defn cast-idealize [(n i64)] (-> i64)
+  ; The cast is discharged: the input already satisfies it, so the check costs nothing. This is
+  ; how a proven type annotation disappears from the graph entirely.
+  ;
+  ; ANALYSIS versus TRANSFORMATION, for the fifth time in this file, and the most expensive one:
+  ; what this deletes is a TYPE CHECK, the only mechanism D4 gives for a guard. So it needs the
+  ; PROVEN answer, not a provisional one.
+  ;
+  ; `ty-isa` reads backwards from subtyping intuition: `isa a b` is `meet(a,b) == b`, and
+  ; `meet(ANY, x) == x`, so `ty-isa ANY t` is TRUE FOR EVERY TARGET t. An unanalysed input still
+  ; sits at ANY (that is what `n-new` seeds a type to, and what `n-in-ty` reports for a missing
+  ; input), so without a guard every Cast on a raw graph discharges itself. `t-top` alone is not
+  ; the test either: the whole HIGH half behaves the same way, and the extra cases are exactly
+  ; the contradiction cases a guard exists for. A phi whose declared `int` meets a `null` arm
+  ; reports `~dyn`, `ty-isa ~dyn int` is true, and the Cast that nothing satisfies disappears
+  ; instead of reporting that the compiler narrowed without proof.
+  ;
+  ; `cast-compute` twelve lines up already guards on exactly this condition (Simple's freeze
+  ; rule). The compute half was right and the irreversible half was not.
+  ;
+  ; AND `not ty-high?` IS STILL NOT THE PROVEN ANSWER, which the nested case showed: with
+  ;
+  ;   if (p) { a = 1; } else { if (q) a = null; else a = null; }  return (int)a;
+  ;
+  ; the outer merge's second path is the inner merge, `phi-compute` skips it while it is
+  ; unanalysed, and the Phi momentarily reports `int=1`. That is LOW, it satisfies the target, and
+  ; the check on a value nothing had proved anything about was deleted on 110 of 200 worklist
+  ; seeds. The surviving graph even printed the Phi's settled type as `null|int`, so the analysis
+  ; knew the Cast was unsatisfiable after the Cast was gone. A local "no region path of the input
+  ; phi is high" test would fix that fixture and not the next level down, because the arm can
+  ; itself be a provisional Phi while every region path already reads `ctrl`; the property needed
+  ; is transitive, so this asks `n-ty-proven?`.
+  (if (and (n-ty-proven? (n-in n 1))
+           (and (not (ty-high? (n-in-ty n 1))) (ty-isa (n-in-ty n 1) (n-aux n))))
+      (n-in n 1)
+    NO-NODE))
+
+;; THE SAME WORD OF THE SAME OBJECT, decided without reading a single type.
+;;
+;; Two conditions, and each of them is one half of "the same word". The alias class is the FIELD:
+;; this IR resolves memory to alias classes, one class is one field of one shape, and that is what
+;; takes the place of Simple's offset comparison. The pointer is the OBJECT, and it is compared by
+;; NODE IDENTITY: one node is one object because `op-gvn?` excludes `New`, so two structurally
+;; identical allocations stay two nodes and two objects, and therefore one node can only ever have
+;; been one allocation.
+(defn load-store-same-word? [(ld i64) (st i64) (p i64)] (-> bool)
+  (and (= (n-op st) OP-STORE)
+       (and (= (n-aux st) (n-aux ld)) (= (n-in st 2) p))))
+
+;; LOAD AFTER STORE. `Load(ptr=p, mem=Store(mem=_, ptr=p, val=v))` is `v`.
+;;
+;; IT IS STRUCTURAL, AND IT HAS TO BE. The memory compute header above says why: a memory type
+;; describes a whole alias CLASS, so `store-compute` MEETS the stored value into the incoming
+;; contents rather than replacing it, and the load on the smallest heap fixture is honestly typed
+;; `undefined|int=5`. No alias-level type can ever say that THIS pointer's word is the one the
+;; store wrote. Node identity can, and that is a fact about the graph rather than about the
+;; lattice, which is exactly why 4b pinned the union in `tests/mem-test.coil`: so this slice is
+;; measured against a number the analysis actually earned.
+;;
+;; SIMPLE'S OFFSET-OVERLAP TEST IS DELIBERATELY NOT PORTED. Chapter 24's `LoadNode.idealize` also
+;; forwards PAST a store when the two offsets provably cannot overlap, which asks whether two
+;; types are disjoint and then rewrites irreversibly: that is the exact shape D8 forbids acting on
+;; provisionally. Its other rule (forwarding past a store to a provably DIFFERENT allocation) is
+;; structural and would be legitimate here, but it needs a distinct-allocation predicate that does
+;; not exist yet, and pushing a load up through a Phi -- Simple's third rule -- builds a new Phi on
+;; the merge's region and so lands in region/phi arity lockstep (LAW 5). Both are later business.
+;;
+;; ANYTHING ELSE DECLINES: a Phi, a MemMerge, a `Proj` of a New, a Store naming a different class,
+;; a Store on a different pointer. Declining is unconditionally sound, because the load simply
+;; stays and reads its own memory edge.
+;;
+;; THE DECLINE RECORDS A DEP ON THE MEMORY NODE, which `wl-push-outs!` does not cover: that pushes
+;; the load when the memory node's TYPE moves, and this rule reads the memory node's OP and INPUTS.
+;; A Store whose pointer is later rewritten to `p` by some other peephole changes neither its own
+;; type nor the load's, and without the dep the load would never be reconsidered. `n-set-def!`
+;; flushes a node's deps, which is precisely the event that matters.
+(defn load-idealize [(n i64)] (-> i64)
+  (let [m (n-in n 1) p (n-in n 2)]
+    (if (or (= m NO-NODE) (= p NO-NODE)) NO-NODE
+      ; A dead memory input is graph corruption (VERR-DEAD-INPUT), not a rewrite opportunity, and
+      ; reporting it is `g-verify`'s job, with the offending node in hand. What must not happen is
+      ; reading `ins` out of a killed node: `n-kill!` clears that list, so the read would be either
+      ; a bounds panic or, worse, a stale id (see `cproj-idealize`).
+      (if (n-dead? m) NO-NODE
+        ;; PROVEN, and the reason is not the usual one, so it is worth writing down rather than
+        ;; copying. Every other guarded rewrite in this file asks `n-ty-proven?` because it READ a
+        ;; type and a provisional type is a lie. This one reads no type at all: node identity and an
+        ;; alias number are facts about the graph as it stands, and they cannot be provisional.
+        ;;
+        ;; It asks anyway, because the rewrite is IRREVERSIBLE and the graph it is reading is not
+        ;; finished. A Store sitting in a still-settling cone is a store the sweep may yet replace
+        ;; (GVN can fold it into an equal one; 4c-2 will delete it outright), and taking its value
+        ;; and deleting the load commits to that store's identity permanently. The load's cone
+        ;; being at a type fixpoint is the available proxy for "this part of the graph has stopped
+        ;; moving", and it is transitive, so it covers the store, its pointer and its value.
+        ;;
+        ;; It is also what makes the replacement's type safe to install. `load-compute` reports
+        ;; `t-top` while the pointer is high, and swapping in `v` under that would WIDEN the type at
+        ;; every use of the load. At a fixpoint the pointer is high only if no object reaches the
+        ;; load at all, and otherwise `v`'s type is a member of the contents `load-compute`
+        ;; reported, so the substitution narrows -- which is the direction `n-set-ty-falling!`
+        ;; allows across a rewrite.
+        ;; AND THE STORE'S OWN ACCESS MUST NOT BE ONE THE PROGRAM REFUSES. This load is the
+        ;; store's reader; taking its value drops that reader and the cascade collects the store,
+        ;; so a store the interpreter would have refused by name (EV-SHAPE for a word the object
+        ;; does not have, EV-MEM for a state that does not carry the class) turns into a plausible
+        ;; value with nothing reported anywhere. Same program, two builds, two answers. Declining
+        ;; costs nothing: the load simply stays and reads its own memory edge, and the graph is
+        ;; one `g-verify` will not save you from, so somebody has to notice.
+        (if (and (load-store-same-word? n m p) (n-ty-proven? n))
+            ;; ... AND THE STORE'S OWN ACCESS MUST NOT BE ONE THE PROGRAM REFUSES. Asked in its own
+            ;; `if` rather than folded into the condition above, because it may only be asked once
+            ;; `m` is known to be a Store: `access-refused?` reads `n-aux` as an alias number, and
+            ;; a Phi's aux is a declared TYPE.
+            (if (access-refused? m) (do (n-add-dep! m n) NO-NODE)
+              ;; COUNTED HERE AND NOWHERE ELSE. A store still being wired has no value yet, and
+              ;; `n-peephole` reads the NO-NODE this would return as "declined"; counting it would
+              ;; be counting a forwarding that never happened, which is exactly the kind of
+              ;; plausible number `g-forwards` exists to replace. So the count goes on the branch
+              ;; that hands back a real node.
+              (let [v (n-in m 3)]
+                (if (= v NO-NODE) NO-NODE (do (g-forwarded!) v))))
+          (do (n-add-dep! m n) NO-NODE))))))
+
+;; The store-after-store form of the same question, and it IS the same question. Both ops carry
+;; the alias class in `aux` and the pointer in slot 2, so `load-store-same-word?` reads nothing
+;; from its first argument that a Store does not have. It gets its own name so the call site below
+;; says what it is asking, and so that a day when the two ops' layouts diverge has ONE line to
+;; change rather than a call site somebody has to remember.
+(defn store-store-same-word? [(outer i64) (inner i64) (p i64)] (-> bool)
+  (load-store-same-word? outer inner p))
+
+;; IS THIS STORE THE ONLY THING THAT READS THAT MEMORY STATE. Simple's `checkOnlyUse`, and it is
+;; the one clause that makes 4c-2 harder than 4c-1.
+;;
+;; WHAT IT IS NOT FOR, said first because the obvious story is wrong and this was MEASURED rather
+;; than argued. Bypassing an inner store is not a value-level miscompile when somebody else reads
+;; it. In this IR a Store is a pure function from memory state to memory state, so
+;; `Store(p,v2,Store(p,v1,m))` and `Store(p,v2,m)` denote the SAME state -- the second write lands
+;; on the same word of the same object and the first is invisible in the result either way -- and
+;; the other reader goes on reading the inner store, which the bypass leaves untouched. The
+;; guarded fixture in the corpus was built expecting this clause to be the thing standing between
+;; the program and a wrong answer; deleting the clause and running the differential oracle over
+;; the fixture returns the identical answer on every seed. Writing "otherwise it returns 2 where
+;; the answer is 1" here would have been a plausible sentence that no gate could support.
+;;
+;; WHAT IT IS FOR is Simple's own reason, and it is about SERIALISABILITY rather than about values:
+;; "you get weird non-serializable memory effects in the worst case". Bypass a store somebody else
+;; still reads and the graph now holds TWO live writes to one word, both derived from the same
+;; incoming state, with no memory edge ordering them against each other. Nothing in the ideal
+;; graph is wrong, and the demand-driven interpreter cannot see it, because each state is a value.
+;; It stops being harmless the moment memory is one mutable heap and a scheduler has to pick an
+;; order for two writes the IR no longer orders (M10's GCM, and D2's safepoints on top of it).
+;; Refusing to create that shape is much cheaper than detecting it later.
+;;
+;; And it is what makes this rewrite a DELETION rather than an edge shuffle. `g-store-elims` counts
+;; stores that stopped existing; without this clause it would count edge rearrangements that
+;; removed nothing, which is exactly the sort of plausible number the counter was added to replace.
+;;
+;; PINNED COUNTS AS A CONSUMER. `keeps` is the ONLY signal in the graph that says "a use is
+;; coming": a fixture holds a memory state across the next line precisely because the `Return` that
+;; roots it does not exist yet (see `fx-object`'s note), and a store in that window has exactly one
+;; use and looks final. `n-del-use!` already reports a pinned node as still used, so without this
+;; clause the bypass would not kill the store -- it would silently rearrange a chain the builder is
+;; still holding open, and the builder's next line would root a state the write no longer reaches.
+;;
+;; THE DEP GOES ON EVERY OTHER USER. `wl-push-outs!` only re-queues this store when the inner
+;; store's TYPE moves, and this rule reads the inner store's USE COUNT. A user that stops reading
+;; the state changes neither type, so without the dep the rewrite is never reconsidered. That is
+;; Simple's reason for `addDep` in `checkOnlyUse` and it is the same reason `load-idealize` records
+;; one on decline. It is not a complete answer on its own: a user that is KILLED does not flush
+;; its own deps (`n-kill!` releases inputs, it does not move deps), so the backstop for that case
+;; is `iterate!`'s sweep, which re-pushes every live node whenever anything changed.
+(defn store-sole-consumer? [(inner i64) (outer i64)] (-> bool)
+  (let [len (n-nouts inner) (mut i) 0 (mut others) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (let [u (n-out inner (load i))]
+              (if (= u outer) 0
+                (do (n-add-dep! u outer)
+                    (store! others (+ (load others) 1))
+                    0)))
+            (store! i (+ (load i) 1))
+            0)))
+    (and (= (load others) 0) (= (n-keeps inner) 0))))
+
+;; STORE AFTER STORE. `Store(p, v2, mem=Store(p, v1, m))` becomes `Store(p, v2, mem=m)`: the inner
+;; write is overwritten before anything can read it, so it never happened.
+;;
+;; IT REWIRES IN PLACE AND RETURNS `n`. There is no replacement node to hand back -- the surviving
+;; store is this one -- so the rewrite is a `n-set-def!` on slot 1 and the inner store dies of
+;; having no uses left, through the ordinary cascade. That shape has three consequences, and each
+;; one is a line below rather than a comment:
+;;
+;;   - GVN GOES STALE. A Store is value-numbered (`op-gvn?` admits everything above `Stop` bar
+;;     `Arg` and `New`), and the table hashes the node's INPUTS out of the arena. Mutating an
+;;     installed node leaves an entry filed under a hash nothing will ever compute again, and the
+;;     next structurally identical Store either fails to dedup or, worse, dedups against a stale
+;;     bucket. `gvn-remove!` before the mutation, and `n-peephole`'s own `gvn!` re-files it after.
+;;   - PROGRESS HAS TO BE DECLARED. `n-peephole` counts an idealize as a change only when it
+;;     returns a DIFFERENT node, and `iterate!` stops sweeping when a sweep changed nothing. An
+;;     in-place rewrite that says nothing can therefore end a sweep with a newly enabled,
+;;     proof-gated rewrite still pending, which is an order-dependent graph. Hence `g-changed!`.
+;;     (`region-remove-path!` has exactly this shape and does NOT do it; that is a pre-existing
+;;     hazard, noted rather than copied.) No corpus fixture distinguishes it today: removing the
+;;     call leaves every count and every answer unchanged over 40 raw-then-`iterate!` seeds,
+;;     because something else in the same sweep always bumps `nchg`. It stays because being right
+;;     by construction costs one line and being right by coincidence costs a debugging session.
+;;   - THE STORE'S TYPE RISES, and that is correct. `store-compute` MEETS the stored value into the
+;;     incoming contents, so before the rewrite this store reports `meet(contents(m), v1, v2)` and
+;;     after it reports `meet(contents(m), v2)`, which is strictly MORE SPECIFIC. The old answer
+;;     was an over-approximation naming a value the class no longer holds anywhere; the new one is
+;;     the truth. A rewrite narrowing a type across `iterate!` is the direction the notes on
+;;     `n-ty-proven?` already allow (dropping a dead region path narrows a Phi the same way), and
+;;     `n-peephole` installs it with `n-set-ty!`. It is NOT allowed inside `g-analyze!`, which
+;;     rewrites nothing and would report it through `n-set-ty-falling!`.
+;;
+;; FOUR GUARDS, EACH IN ITS OWN `if`, so the reason for a decline is legible from the code:
+;;
+;;   1. STRUCTURAL same-word, decided without reading a single type: same alias class (the field)
+;;      and the same pointer NODE (the object). This is 4c-1's rule verbatim, and it is structural
+;;      for the same reason -- a memory type describes a whole alias CLASS, so no alias-level type
+;;      could ever say the two stores hit the same word.
+;;   2. ONLY MEMORY CONSUMER, above. It is the one guard here that is NOT a soundness condition on
+;;      the value the program computes; read its note for what it actually buys.
+;;   3. PROVEN, and the reason is 4c-1's rather than the type-disbelief one, so it is worth saying
+;;      again: this rule reads no type, so the guard is not about a provisional type being a lie.
+;;      It is that the rewrite is IRREVERSIBLE and the cone it is reading has not stopped moving.
+;;      A store in a still-settling cone is one the sweep may yet replace (GVN can fold it into an
+;;      equal one; a pointer can still be rewritten under it), and deleting a write on the strength
+;;      of a graph that is still being rearranged commits permanently to an arrangement that was
+;;      never final. `n-ty-proven?` is the available proxy for "this part of the graph has stopped
+;;      moving", and it is transitive, so it covers the inner store, the pointer and both values.
+;;      NOTHING IN THE CORPUS REFUSES ON THIS CLAUSE YET, and that is measured: instrumenting the
+;;      branch over the whole corpus plus 40 raw-then-`iterate!` seeds counted zero proof-gated
+;;      refusals here, for exactly the reason 4c-1 wrote down about its own version -- a fixture
+;;      that is ANALYSED before the first peephole has already settled the cone. The construction
+;;      that forces it is the UNANALYSED one (`a_refused_forwarding_is_deferred_and_lands_under_
+;;      every_seed` in tests/mem-test.coil builds it for a Load); the store analogue belongs in
+;;      the same place, and until it exists this branch is a rule with no witness.
+;;   4. NEITHER ACCESS IS ONE THE PROGRAM REFUSES. This one READS types inside an irreversible
+;;      rewrite, and it is sound only because its sole effect is to NOT FIRE (LAW 3: reading a
+;;      provisional type to decline is always safe). If the inner store is refused, the interpreter
+;;      owes the program an EV-SHAPE or EV-MEM at that node, and deleting it turns a trap into a
+;;      plausible answer -- the same program, two builds, two results. If the OUTER store is
+;;      refused the program traps here anyway and the inner write is not obviously dead, so
+;;      declining costs nothing. It is asked in its own `if`, AFTER the inner node is known to be a
+;;      Store, because `access-refused?` reads `n-aux` as an alias number and a Phi's aux is a
+;;      declared TYPE.
+(defn store-idealize [(n i64)] (-> i64)
+  (let [m (n-in n 1) p (n-in n 2)]
+    (if (or (= m NO-NODE) (= p NO-NODE)) NO-NODE
+      ; A dead memory input is graph corruption (VERR-DEAD-INPUT), not a rewrite opportunity, and
+      ; reading `ins` out of a killed node returns a stale id: `n-kill!` clears the list. Same
+      ; stance, and the same reason, as `load-idealize`.
+      (if (n-dead? m) NO-NODE
+        (if (not (store-store-same-word? n m p)) (do (n-add-dep! m n) NO-NODE)
+          ; The inner store's own memory is what this store inherits. A store still being wired
+          ; has none yet, and rewiring to NO-NODE would leave a Store with a null memory edge,
+          ; which is a malformed node rather than an optimisation.
+          (let [mm (n-in m 1)]
+            (if (or (= mm NO-NODE) (n-dead? mm)) (do (n-add-dep! m n) NO-NODE)
+              (if (not (store-sole-consumer? m n)) (do (n-add-dep! m n) NO-NODE)
+                (if (not (n-ty-proven? n)) (do (n-add-dep! m n) NO-NODE)
+                  (if (or (access-refused? n) (access-refused? m))
+                      (do (n-add-dep! m n) NO-NODE)
+                    (do (gvn-remove! n)
+                        (n-set-def! n 1 mm)
+                        (g-store-elim!)
+                        (g-changed!)
+                        n)))))))))))
+
+; ============================================================================
+; idealize: local rewrites
+; ============================================================================
+(defn n-idealize [(n i64)] (-> i64)
+  (case (n-op n)
+    OP-STOP   (stop-idealize n)
+    OP-REGION (region-idealize n)
+    OP-LOOP   (region-idealize n)
+    OP-CPROJ  (cproj-idealize n)
+    OP-PHI    (phi-idealize n)
+    OP-CAST   (cast-idealize n)
+    OP-ADD    (add-idealize n)
+    OP-SUB    (sub-idealize n)
+    OP-MUL    (mul-idealize n)
+    OP-MINUS  (minus-idealize n)
+    OP-EQ     (cmp-idealize n)
+    OP-LT     (cmp-idealize n)
+    OP-LE     (cmp-idealize n)
+    OP-LOAD   (load-idealize n)
+    OP-STORE  (store-idealize n)
+    NO-NODE))
+
+;; "This operand IS the integer k", which every identity rule below asks about the operand it is
+;; about to discard. IT IS A CLAIM ABOUT A TYPE, so it needs the proven answer too: a Phi
+;; momentarily reporting `int=0` (its region's other path unanalysed and skipped) is not the
+;; literal 0, and reading it as one is how the flat diamond `if (p) x = 8; else x = 0;
+;; return x + 1;` compiled to `return 1`. The Phi looked like a constant, `should-swap?` moved it
+;; to the right because constants belong on the right, and `x + 0 = x` then handed back the
+;; LITERAL 1 as the whole program's value. No fold and no control rewrite was involved, so the
+;; four guards on those did not see it.
+(defn n-int-con? [(n i64) (v i64)] (-> bool)
+  (let [t (n-ty n)]
+    (and (and (ty-int-only? t) (and (ty-const? t) (= (ty-int-lo t) v)))
+         (n-ty-proven? n))))
+
+;; Order the operands of a commutative op so that value numbering can see `a+b` and `b+a` as
+;; the same node. Constants go on the right, then lower node ids first: any total order works,
+;; it only has to be stable.
+(defn should-swap? [(n i64)] (-> bool)
+  (let [l (n-in n 1) r (n-in n 2)]
+    (if (or (= l NO-NODE) (= r NO-NODE)) false
+      (let [lc (ty-const? (n-ty l)) rc (ty-const? (n-ty r))]
+        (if (and lc (not rc)) true
+          (if (and rc (not lc)) false
+            (> l r)))))))
+
+(defn n-swap-args! [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    (al-set! [i64] (field (nd n) ins) 1 r)
+    (al-set! [i64] (field (nd n) ins) 2 l)
+    (store! (field (nd n) hash) 0)
+    n))
+
+;; AN IDENTITY IS AN IDENTITY OVER A DOMAIN, AND THE DOMAIN HAS TO BE PROVEN.
+;;
+;; This is a dynamic language: `+` on a non-number concatenates or calls valueOf, and `- * /`
+;; coerce. `arith-compute` already says so, which is why it reports `dyn` for a non-numeric `+`
+;; and `num` for the others. So none of the four identities below holds for an arbitrary operand:
+;; "3"+0 is "30", "3"-0 is the NUMBER 3, "3"*1 is 3, and -(-"3") is 3. Not one of those is the
+;; string "3".
+;;
+;; Replacing the node by its operand is irreversible, and it replaces a node whose type the
+;; lattice already computed with a node of a DIFFERENT type, so the graph afterwards claims a
+;; value the language does not produce. That is a miscompile, not a lost optimisation, and it is
+;; observable today: the interpreter reports EV-TYPE for arithmetic on a bool (rather than
+;; inventing an answer), while the unguarded peephole hands back the bool itself.
+;;
+;; `mul-idealize`'s `x * 0` and `cmp-idealize`'s `x == x` right below already carry the guard, so
+;; the missing ones were an inconsistency rather than a decision. `ty-int-only?` is the right
+;; test even where all numerics would be sound (x-0, x*1, -(-x)), because it is what the siblings
+;; use; and for `+` it is REQUIRED rather than merely consistent, since -0.0 + 0 is +0.0 and so 0
+;; is not an identity for floats either.
+;; AND THE DOMAIN HAS TO BE PROVEN, NOT MERELY REPORTED. Each of these reads a type and then
+;; irreversibly replaces a node, so it needs `n-ty-proven?` on top of `ty-int-only?`. A Phi that
+;; momentarily reports `int=1` because `phi-compute` skipped an unanalysed path makes
+;; `ty-int-only?` true while the Phi's settled type is `bool|int`, and `x + 0` then hands back the
+;; bool that `ev-arith` refuses. Measured on `if (p) x=1; else { if (q) x=true; else x=true; }
+;; return x + 0;`: the Add was lost on 99 of 200 worklist seeds and the program answered `true`
+;; where the only correct answer is a type error.
+(defn n-proven-int-only? [(n i64)] (-> bool)
+  (and (ty-int-only? (n-ty n)) (n-ty-proven? n)))
+
+(defn add-idealize [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    ; x + 0 = x, integers only: on a non-number `+` concatenates, and for floats -0.0 + 0 is +0.0
+    (if (and (n-int-con? r 0) (n-proven-int-only? l)) l NO-NODE)))
+
+(defn sub-idealize [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    (if (and (n-int-con? r 0) (n-proven-int-only? l)) l    ; x - 0 = x, numbers only: "3"-0 is 3
+      ; x - x = 0, but only for integers: NaN - NaN is NaN, not 0
+      (if (and (= l r) (n-proven-int-only? l)) (n-const (t-int-con 0))
+        NO-NODE))))
+
+(defn mul-idealize [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    (if (and (n-int-con? r 1) (n-proven-int-only? l)) l    ; x * 1 = x, numbers only
+      ; x * 0 = 0 only when x cannot be NaN or an infinity, so integers only
+      (if (and (n-int-con? r 0) (n-proven-int-only? l)) (n-const (t-int-con 0))
+        NO-NODE))))
+
+(defn minus-idealize [(n i64)] (-> i64)
+  ; -(-x) = x once x is known numeric; on a non-number the INNER minus already coerced, so the
+  ; pair is not the identity at all
+  (let [a (n-in n 1)]
+    (if (and (= (n-op a) OP-MINUS) (n-proven-int-only? (n-in a 1))) (n-in a 1) NO-NODE)))
+
+(defn cmp-idealize [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    ; x == x is true and x < x is false, for integers. Floats are excluded because NaN is not
+    ; equal to itself, which is exactly the trap this guard exists for.
+    (if (and (= l r) (n-proven-int-only? l))
+        (n-const (t-bool-con (!= (n-op n) OP-LT)))
+      NO-NODE)))
+
+; ============================================================================
+; peephole
+; ============================================================================
+;; Has every input this node reads actually been analysed? A NO-NODE input contributes nothing
+;; and is skipped; a real input still sitting at ANY means its type is not known yet.
+(defn n-inputs-analysed? [(n i64)] (-> bool)
+  (let [len (n-nins n) (mut i) 0 (mut ok) true]
+    (loop
+      (if (or (>= (load i) len) (not (load ok))) (break)
+        (do (let [d (n-in n (load i))]
+              (if (and (!= d NO-NODE) (ty-unanalysed? (n-ty d))) (store! ok false) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load ok)))
+
+;; IS THIS TYPE PROVEN, OR MERELY THE OPTIMISTIC ANSWER SO FAR? Every irreversible rewrite has
+;; to ask this and none of them may ask `n-inputs-analysed?` instead, because ONE INPUT DEEP IS
+;; NOT DEEP ENOUGH. The answer is "every node in this node's input cone is at its type fixpoint",
+;; and both halves of that (the whole cone, and fixpoint rather than merely analysed) were learned
+;; from a miscompile that survived the weaker version.
+;;
+;; The reason it has to be transitive is `phi-compute`. That compute deliberately SKIPS every
+;; region path whose control is still high, which is correct for an ANALYSIS (it gets revisited
+;; when the control falls) and is load-bearing for loops: a loop phi has to be able to report its
+;; entry value while the back edge is unanalysed, or the phi, the exit test and the back edge all
+;; sit at ANY forever waiting on each other. The cost is that a Phi's type is provisional while
+;; its own type is LOW and its inputs' types are low too, so provisionality does not show up
+;; anywhere a one-level check can see it:
+;;
+;;   if (p) x = 1; else { if (q) x = true; else x = true; }  return x + 0;
+;;
+;; The outer Phi momentarily reports `int=1` because the inner merge is unanalysed and that path
+;; is skipped. Its own inputs are all typed, so `n-inputs-analysed?` passed, and the Add folded
+;; to `Const int=1`. The Phi's final type is `bool|int` and `true + 0` is a type error, but the
+;; Add was already gone. The same provisional read defeated `ty-int-only?` in the five arithmetic
+;; identities and `cast-idealize`'s discharge, which DELETES A TYPE CHECK.
+;;
+;; AND "ANALYSED" IS NOT THE SAME AS "AT A FIXPOINT". A stale LOW type is every bit as provisional
+;; as ANY, and the first version of this predicate only looked for ANY, so a flat diamond still
+;; miscompiled: `if (p) x = 8; else x = 0; return x + 1;` built raw became `return 1` on 10 of 40
+;; seeds. The phi met `int=0` with an as-yet-unanalysed `8` (ANY is the identity for meet, so the
+;; phi reported `int=0`), the `8` was analysed a moment later, and the Add was popped before the
+;; phi could be revisited: at that instant nothing in the cone was ANY, yet the phi's stored type
+;; was one worklist step out of date.
+;;
+;; So the test is the FIXPOINT CONDITION ITSELF, asked of every node in the cone: does its stored
+;; type still equal what its compute says? A node's type is a function of its input cone alone, so
+;; a cone that is internally at a fixpoint cannot move, and a conclusion drawn from those types is
+;; a conclusion about the finished program. (Being on the worklist is the wrong proxy for this:
+;; `iterate!` sweeps by pushing every live node, so "pending" would be true of everything.)
+;;
+;; A later REWRITE can still narrow a type in the cone (dropping a dead region path removes an arm
+;; from a Phi, which is the type RISE `n-set-ty-falling!`'s comment allows across `iterate!`). That
+;; is sound to have acted on: the settled type was an over-approximation, and a rise only makes it
+;; more specific, so a constant folded from it is still that constant.
+;;
+;; Cost is one input-cone walk per query, with the mark array and the stack reused across calls.
+;; Cycles (a loop phi's back edge) are handled by the generation stamp: a node already visited in
+;; this walk is skipped, so the walk terminates and the cycle is not itself a reason to answer no.
+(defn n-proven-grow! [] (-> i64)
+  (let [p (graph) need (n-count)]
+    (loop
+      (if (>= (al-len [i64] (load (field p pmark))) need) (break)
+        (do (al-push! [i64] (field p pmark) 0) 0)))
+    0))
+
+(defn n-ty-settled? [(n i64)] (-> bool)
+  (and (not (ty-unanalysed? (n-ty n))) (= (n-ty n) (n-compute n))))
+
+(defn n-ty-proven? [(n i64)] (-> bool)
+  (let [p (graph) was (g-verifying?)]
+    ; The mark array and the stack are ONE buffer shared by every call, so a walk inside a walk would
+    ; silently truncate the outer one and answer "proven" for a cone it never finished looking at.
+    ; Nothing reentrant calls this today (`n-compute` below never asks for a proof), and a named abort
+    ; is what keeps that true rather than remembered.
+    (if (load (field p pbusy))
+        (do (panic-corrupt "n-ty-proven?: reentrant input-cone walk; the mark and stack buffers are shared") 0)
+      0)
+    (store! (field p pbusy) true)
+    (n-proven-grow!)
+    (store! (field p pgen) (+ (load (field p pgen)) 1))
+    ; Recomputing types is what this does, and `phi-compute` records a dependency as a side
+    ; effect. The same flag `g-verify` uses keeps a guard from being observable in later results.
+    (g-set-verifying! true)
+    (let [gen (load (field p pgen)) (mut ok) true]
+      (al-clear! [i64] (field p pstack))
+      (al-push! [i64] (field p pstack) n)
+      (loop
+        (let [depth (al-len [i64] (load (field p pstack)))]
+          (if (or (not (load ok)) (= depth 0)) (break)
+            (let [m (al-get (load (field p pstack)) (- depth 1))]
+              (al-pop! [i64] (field p pstack))
+              (if (= (al-get (load (field p pmark)) m) gen) 0
+                (do (al-set! [i64] (field p pmark) m gen)
+                    (if (not (n-ty-settled? m)) (store! ok false)
+                      (let [len (n-nins m) (mut i) 0]
+                        (loop
+                          (if (>= (load i) len) (break)
+                            (do (let [d (n-in m (load i))]
+                                  (if (!= d NO-NODE)
+                                      (do (al-push! [i64] (field p pstack) d) 0)
+                                    0))
+                                (store! i (+ (load i) 1))
+                                0)))
+                        0))
+                    0))))))
+      (g-set-verifying! was)
+      (store! (field p pbusy) false)
+      (load ok))))
+
+;; PROVEN dead, not merely reported dead. `= (t-xctrl)` alone is not proof: XCtrl is the HIGH
+;; element of the control axis, so meet(~ctrl, anything reachable) is `ctrl` and a node reporting
+;; `~ctrl` may still fall to `ctrl` later. It is proof only once nothing its type depends on is
+;; unanalysed. Every rewrite that deletes a control path goes through here.
+(defn n-in-proven-xctrl? [(n i64) (i i64)] (-> bool)
+  (and (= (n-in-ty n i) (t-xctrl)) (n-ty-proven? (n-in n i))))
+
+(defn n-const [(t i64)] (-> i64)
+  (n-peephole (n-new1 OP-CONST t (g-start))))
+
+;; Recompute the type, fold to a constant if the type says the value is known, idealize, then
+;; value-number. Returns the node to use from here on, which may not be `n`.
+(defn n-peephole [(n i64)] (-> i64)
+  (if (n-dead? n) n
+    (do
+      ; Canonical operand order for commutative ops, FIRST. It is what lets value numbering
+      ; see `a+b` and `b+a` as one node, and it means every identity rule below only has to
+      ; handle the constant-on-the-right form.
+      (if (and (op-commutes? (n-op n)) (should-swap? n)) (n-swap-args! n) 0)
+      (let [t (n-compute n)]
+        (if (!= t (n-ty n))
+            (do (n-set-ty! n t) (wl-push-outs! n) (n-move-deps! n) (g-changed!) 0)
+          0)
+        ;; ANALYSIS versus TRANSFORMATION again, and this was the third place it bit. Replacing a
+        ;; node by a constant is irreversible, so the constant answer has to be final, not
+        ;; provisional. An input still at ANY has not been analysed yet: around a loop, the phi
+        ;; is momentarily `int=0` because its back-edge value has no type yet, and folding there
+        ;; turns the induction variable into its initial value and deletes the loop. `t` being a
+        ;; constant is not enough on its own; see `n-ty-proven?` for why the test is transitive
+        ;; and why it asks for a fixpoint rather than only for "not ANY".
+        (if (and (and (op-foldable? (n-op n)) (ty-const? t)) (n-ty-proven? n))
+            (let [c (n-new1 OP-CONST t (g-start))]
+              (n-set-ty! c t)
+              (let [c2 (gvn! c)]
+                (if (!= c2 c) (do (n-kill! c) 0) 0)
+                (n-keep! c2) (n-subsume! n c2) (n-unkeep! c2)
+                (g-changed!)
+                c2))
+          (let [m (n-idealize n)]
+            (if (and (!= m NO-NODE) (!= m n))
+                (do (n-keep! m) (n-subsume! n m) (n-unkeep! m) (g-changed!) (n-peephole m))
+              (let [e (gvn! n)]
+                (if (!= e n)
+                    (do (n-keep! e) (n-subsume! n e) (n-unkeep! e) (g-changed!) e)
+                  n)))))))))
+
+;; How many peepholes actually changed something. `iterate!` compares it across a sweep, so it
+;; has to count every kind of change: a type falling, a fold, an idealize, a GVN replacement.
+(defn g-changes [] (-> i64) (load (field (graph) nchg)))
+(defn g-changed! [] (-> i64)
+  (store! (field (graph) nchg) (+ (load (field (graph) nchg)) 1)) 0)
+
+;; WHAT THE TWO MEMORY REWRITES ACTUALLY DID, counted by the engine rather than inferred from the
+;; graph afterwards. Each is bumped from exactly ONE line: the branch of `load-idealize` that hands
+;; back a stored value, and the branch of `store-idealize` that rewires past a dead store. Nothing
+;; else may bump them, because the whole point is that a gate can compare them to a number it
+;; derived independently and have a MISMATCH mean something.
+;;
+;; `g-verify` never runs `idealize` (see verify.coil: asking whether a node could be idealized
+;; means rewriting it), so verification cannot inflate either count. `g-analyze!` does not run it
+;; either. The only producer is `n-peephole`.
+(defn g-forwards    [] (-> i64) (load (field (graph) nfwd)))
+(defn g-store-elims [] (-> i64) (load (field (graph) nselim)))
+(defn g-forwarded!  [] (-> i64)
+  (store! (field (graph) nfwd) (+ (load (field (graph) nfwd)) 1)) 0)
+(defn g-store-elim! [] (-> i64)
+  (store! (field (graph) nselim) (+ (load (field (graph) nselim)) 1)) 0)
+
+(defn wl-push-live! [] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0 (wl-push! (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    0))
+
+(defn wl-drain! [] (-> i64)
+  (let [(mut steps) 0]
+    (loop
+      (let [n (wl-pop!)]
+        (if (= n NO-NODE) (break)
+          (do (if (n-dead? n) 0 (do (n-peephole n) 0))
+              (store! steps (+ (load steps) 1))
+              ; a runaway worklist is a bug in a peephole, not something to grind on
+              (if (> (load steps) 10000000)
+                  (do (panic-corrupt "iterate!: worklist did not converge") 0)
+                0)
+              0))))
+    (load steps)))
+
+;; Run peepholes to a fixpoint. Order comes from the seed; the result must not.
+;;
+;; IT SWEEPS, and it has to, because a rewrite may now be DEFERRED rather than declined. Any
+;; rewrite that needs a proven type (`n-ty-proven?`) is refused while the input cone is still
+;; settling, and nothing re-queues the node afterwards: the blocker's type may never change
+;; again, so neither `wl-push-outs!` nor the deps list will bring the node back. Draining the
+;; worklist once therefore reached a fixpoint of "what could be proven at the time", which is a
+;; function of the pop order, and `1 + 2*3` stayed unfolded on some seeds.
+;;
+;; So: drain, and if that drain changed anything, put every live node back and drain again. A
+;; sweep that changes nothing is the fixpoint. Each round needs the previous round to have made
+;; progress, and progress is monotone (types only fall, nodes only die), so this terminates.
+(defn iterate! [] (-> i64)
+  (let [(mut steps) 0 (mut sweeps) 0]
+    (loop
+      (let [before (g-changes)]
+        (wl-push-live!)
+        (store! steps (+ (load steps) (wl-drain!)))
+        (store! sweeps (+ (load sweeps) 1))
+        ; Each sweep needs the previous one to have changed something, and change is monotone
+        ; (types only fall, nodes only die, GVN only merges), so this terminates. A cap anyway:
+        ; two peepholes that undo each other would otherwise sweep for ever, and the per-drain
+        ; step cap cannot see it because each drain on its own converges.
+        (if (> (load sweeps) 10000)
+            (do (panic-corrupt "iterate!: sweeps did not converge; two peepholes are undoing each other") 0)
+          0)
+        (if (= (g-changes) before) (break) 0)))
+    (load steps)))
+
+;; Types WITHOUT rewriting: recompute every node's type to a fixpoint and change no edges.
+;; Two uses. It renders an honest "before" picture (raw construction leaves every type at ANY,
+;; which tells you nothing about the analysis), and it is the shape the optimistic
+;; interprocedural pass in M7 takes: seed high, propagate, never rewrite mid-flight.
+;;
+;; Termination rests on types only ever falling. M1 has no cycles in the graph at all; when
+;; M2 introduces loop phis, widening at those phis is what keeps the int axis from creeping
+;; forever. The step cap turns a non-converging compute into a named error, not a hang.
+;;
+;; TYPE MONOTONICITY, checked rather than assumed. "Every compute is monotone" is a claim about
+;; a SEQUENCE of types and so cannot be seen in any single graph snapshot: the verifier can only
+;; ever say the types are at a fixpoint. This is where it is observable, because `g-analyze!` is
+;; the one phase that changes no edges, so every type it writes must be at or below the type it
+;; replaces. A rise here means some `compute` is not monotone, which means the optimistic pass
+;; in M7 would neither terminate nor be sound, and it is worth an abort naming both types.
+;;
+;; It is deliberately NOT asserted across `iterate!`, where a type legitimately RISES: dropping
+;; a dead path from a Region removes an arm from every Phi on it, and a phi that loses its widest
+;; arm reports a MORE specific type than before. Asserting there would be asserting something
+;; false.
+(defn n-set-ty-falling! [(n i64) (t i64)] (-> i64)
+  (let [p (graph) old (n-ty n)]
+    (store! (field p achecks) (+ (load (field p achecks)) 1))
+    (if (ty-falls? old t) 0
+      (do (let [w (stderr)]
+            (ps w "type monotonicity violated at n")
+            (fmt w "{d} ({s}): " n (op-name (n-op n)))
+            (ty-print w old)
+            (ps w " rose to ")
+            (ty-print w t)
+            (ps w "\n"))
+          (panic-corrupt "g-analyze!: a node's type rose; some compute is not monotone")
+          0))
+    (n-set-ty! n t)))
+
+;; How many falling-type checks the last `g-analyze!` performed. A gate that only asserted "no
+;; violation" would pass just as well with the assertion deleted, so the count is exported and
+;; the gate can require the check to have actually run.
+(defn g-analyze-checks [] (-> i64) (load (field (graph) achecks)))
+
+(defn g-analyze! [] (-> i64)
+  (store! (field (graph) achecks) 0)
+  (wl-push-live!)
+  (let [(mut steps) 0]
+    (loop
+      (let [n (wl-pop!)]
+        (if (= n NO-NODE) (break)
+          (do (if (n-dead? n) 0
+                (let [t (n-compute n)]
+                  ; DEPS MUST BE FLUSHED HERE TOO. `n-peephole` calls `n-move-deps!` on a type
+                  ; change and this loop did not, so every dependency `phi-compute` records was
+                  ; recorded and never acted on: the mechanism was inert in exactly the phase
+                  ; documented as the shape M7's optimistic pass takes.
+                  (if (!= t (n-ty n))
+                      (do (n-set-ty-falling! n t) (wl-push-outs! n) (n-move-deps! n) 0)
+                    0)))
+              (store! steps (+ (load steps) 1))
+              (if (> (load steps) 10000000)
+                  (do (panic-corrupt "g-analyze!: types did not reach a fixpoint") 0)
+                0)
+              0))))
+    (load steps)))
+
+; ============================================================================
+; Reachability, for the leak check
+; ============================================================================
+(defn n-reachable-mark [(n i64) (seen (ptr (ArrayList bool)))] (-> i64)
+  (if (al-get (load seen) n) 0
+    (do (al-set! [bool] seen n true)
+        (let [(mut i) 0]
+          (loop
+            (if (>= (load i) (n-nins n)) (break)
+              (do (let [d (n-in n (load i))]
+                    (if (!= d NO-NODE) (do (n-reachable-mark d seen) 0) 0))
+                  (store! i (+ (load i) 1))
+                  0))))
+        0)))
+
+;; Every node that is neither reachable from Stop nor from Start must be dead. A live node
+;; nobody can reach is a leak, and the arena would grow forever across a real compile.
+(defn g-leaked-count [] (-> i64)
+  (let [n (n-count)
+        (mut seen) (al-new [bool] (malloc-allocator))
+        (mut i) 0]
+    (loop (if (>= (load i) n) (break)
+            (do (al-push! [bool] (mut seen) false) (store! i (+ (load i) 1)) 0)))
+    (n-reachable-mark (g-stop)  (mut seen))
+    (n-reachable-mark (g-start) (mut seen))
+    (let [(mut j) 0 (mut leaked) 0]
+      (loop
+        (if (>= (load j) n) (break)
+          (do (if (and (not (n-dead? (load j))) (not (al-get (load seen) (load j))))
+                  (store! leaked (+ (load leaked) 1))
+                0)
+              (store! j (+ (load j) 1))
+              0)))
+      (al-free! [bool] (mut seen))
+      (load leaked))))
+
+(defn g-live-count [] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut live) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0 (store! live (+ (load live) 1)))
+            (store! i (+ (load i) 1))
+            0)))
+    (load live)))
+
+; ============================================================================
+; Printing
+; ============================================================================
+;; Expression form recurses through DATA only. Control nodes and Phis print as a reference
+;; (`Region7`, `phi9`), because a loop phi can reach itself through its own back edge and an
+;; expression printer that followed that would not terminate. Once a program has control flow,
+;; the flat form below is the readable one and the Graphviz dump is better still.
+(defn cproj-label [(n i64)] (-> (slice u8))
+  (let [m (n-in n 0)]
+    (if (and (!= m NO-NODE) (= (n-op m) OP-IF))
+        (if (= (n-aux n) 0) "True" "False")
+      "CProj")))
+
+(defn n-print [(w (ptr Writer)) (n i64)] (-> i64)
+  (if (= n NO-NODE) (ps w "_")
+    (if (n-dead? n) (ps w "DEAD")
+      (case (n-op n)
+        OP-START  (ps w "Start")
+        OP-STOP   (stop-print w n)
+        OP-RETURN (do (ps w "return ") (n-print w (n-in n 1)) (ps w ";") 0)
+        OP-XCTRL  (ps w "#dead")
+        OP-IF     (do (ps w "if(") (n-print w (n-in n 1)) (ps w ")") 0)
+        OP-CPROJ  (do (ps w (cproj-label n)) (fmt w "{d}" n) 0)
+        OP-REGION (do (ps w "Region") (fmt w "{d}" n) 0)
+        OP-LOOP   (do (ps w "Loop") (fmt w "{d}" n) 0)
+        OP-PHI    (do (ps w "phi") (fmt w "{d}" n) 0)
+        OP-PROJ   (do (fmt w "n{d}.{d}" (n-in n 0) (n-aux n)) 0)
+        OP-CAST   (do (ps w "(") (ty-print w (n-aux n)) (ps w ")")
+                      (n-print w (n-in n 1)) 0)
+        OP-CONST  (ty-print w (n-ty n))
+        OP-ARG    (ps w "arg")
+        OP-ADD    (binop-print w n "+")
+        OP-SUB    (binop-print w n "-")
+        OP-MUL    (binop-print w n "*")
+        OP-DIV    (binop-print w n "/")
+        OP-MINUS  (do (ps w "(-") (n-print w (n-in n 1)) (ps w ")") 0)
+        OP-NOT    (do (ps w "(!") (n-print w (n-in n 1)) (ps w ")") 0)
+        OP-EQ     (binop-print w n "==")
+        OP-LT     (binop-print w n "<")
+        OP-LE     (binop-print w n "<=")
+        ;; A LOAD IS AN EXPRESSION AND A MEMORY STATE IS NOT, which is the whole of the
+        ;; convention here. `o.x` is what the source said and it recurses into the pointer like
+        ;; any other operand; a New, a Store and a MemMerge are states, and a state printed
+        ;; inline would read as though the program had a value there. They print as references
+        ;; with their id, exactly as a Region and a Phi do and for the same reason: the flat form
+        ;; and the diagram are where a state's edges are legible.
+        OP-LOAD   (do (n-print w (n-in n 2)) (ps w ".") (field-print w (n-aux n)) 0)
+        OP-STORE  (do (ps w "st") (fmt w "{d}" n) 0)
+        OP-NEW    (do (ps w "new") (fmt w "{d}#{d}" n (n-aux n)) 0)
+        OP-MEMMERGE (do (ps w "mem") (fmt w "{d}" n) 0)
+        (do (ps w (op-name (n-op n))) 0)))))
+
+;; An alias printed as the FIELD NAME it introduced. The number is in the flat form and in the
+;; type; a reader of an expression wants `o.x`.
+(defn field-print [(w (ptr Writer)) (alias i64)] (-> i64)
+  (if (shape-alias-defined? alias)
+      (do (print-str w (shape-name-bytes (shape-alias-name alias))) 0)
+    ; a printer is observation: an alias with no edge is exactly what you want to see
+    (do (ps w "a") (fmt w "{d}?" alias) 0)))
+
+(defn binop-print [(w (ptr Writer)) (n i64) (sym (slice u8))] (-> i64)
+  (ps w "(")
+  (n-print w (n-in n 1))
+  (ps w sym)
+  (n-print w (n-in n 2))
+  (ps w ")"))
+
+(defn stop-print [(w (ptr Writer)) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (n-nins n)) (break)
+        (do (if (> (load i) 0) (ps w " ") 0)
+            (n-print w (n-in n (load i)))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+;; Flat form, one line per live node, for when the expression form hides the bug: it shows
+;; ids, types and every edge.
+(defn g-print-flat [(w (ptr Writer))] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0
+              (do (fmt w "n{d}: " (load i))
+                  (ps w (op-name (n-op (load i))))
+                  ; aux is the slot index for projections and the target type for a cast; both
+                  ; change what the node MEANS, so a flat dump that hides them is misleading
+                  (if (or (= (n-op (load i)) OP-CPROJ) (= (n-op (load i)) OP-PROJ))
+                      (do (fmt w ".{d}" (n-aux (load i))) 0)
+                    (if (= (n-op (load i)) OP-CAST)
+                        (do (ps w " to ") (ty-print w (n-aux (load i))) 0)
+                      ; the shape a New allocates and the alias a Load or Store names change what
+                      ; the node MEANS just as much as a projection's slot does
+                      (if (or (= (n-op (load i)) OP-NEW)
+                              (or (= (n-op (load i)) OP-LOAD) (= (n-op (load i)) OP-STORE)))
+                          (do (fmt w "#{d}" (n-aux (load i))) 0)
+                        0)))
+                  (ps w " : ")
+                  (ty-print w (n-ty (load i)))
+                  (ps w "  <-")
+                  (let [(mut k) 0]
+                    (loop
+                      (if (>= (load k) (n-nins (load i))) (break)
+                        (do (let [d (n-in (load i) (load k))]
+                              (if (= d NO-NODE) (ps w " _") (do (fmt w " n{d}" d) 0)))
+                            (store! k (+ (load k) 1))
+                            0))))
+                  (ps w "\n")
+                  0))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+;; Render a node to a caller-owned buffer, so tests can compare printed IR as a string.
+(defn n-render [(n i64) (buf (ptr i8)) (cap i64)] (-> (slice u8))
+  (let [fb (alloc-stack FixBuf)
+        w  (alloc-stack Writer)]
+    (store! (field fb data) buf)
+    (store! (field fb cap)  cap)
+    (store! (field fb len)  0)
+    (fixed-buffer-writer w fb)
+    (n-print w n)
+    (slice-new [u8] (cast (ptr u8) buf) (load (field fb len)))))
+
+
+; ============================================================================
+; Dominators and the loop tree
+; ============================================================================
+;; Every consumer of this is later: global code motion needs dominators to place a node in its
+;; shallowest legal block and loop nesting to weigh blocks, loop optimisation needs the tree, and
+;; the never-exit-loop rewrite needs both. It is built now because it is small, because the
+;; visualizer can annotate nesting depth immediately, and because dominators computed against a
+;; stale CFG are a classic source of scheduling bugs that only appear under optimisation.
+;;
+;; There is NO incremental maintenance. `g-build-loop-tree!` computes both tables, and reading
+;; either one after a control edge changed is a hard error rather than a wrong answer.
+
+;; A CFG node's control predecessors live in a half-open input range that depends on its op: a
+;; merge's paths start at 1, Stop's returns start at 0, and everything else has exactly input 0.
+(defn n-cpred-lo [(n i64)] (-> i64) (if (op-merge? (n-op n)) 1 0))
+(defn n-cpred-hi [(n i64)] (-> i64)
+  (if (op-merge? (n-op n)) (n-nins n)
+    (if (= (n-op n) OP-STOP) (n-nins n)
+      (if (or (= (n-op n) OP-START) (= (n-op n) OP-XCTRL)) 0
+        1))))
+
+(defn g-idep-raw [(n i64)] (-> i64) (al-get (load (field (graph) idep)) n))
+
+(defn g-dom-fresh? [] (-> bool)
+  (let [p (graph)] (= (load (field p domver)) (load (field p cfgver)))))
+
+(defn g-dom-check-fresh [] (-> i64)
+  (if (g-dom-fresh?) 0
+    (do (panic-corrupt "dominator tables are stale: call g-build-loop-tree! after changing control edges") 0)))
+
+;; Both tables describe CONTROL nodes. A data node has no dominator depth and no loop membership
+;; until a scheduler assigns it one, so asking is a caller bug rather than a question with a
+;; harmless default answer.
+(defn g-dom-check-cfg [(n i64)] (-> i64)
+  (if (op-control? (n-op n)) 0
+    (do (panic-corrupt "idepth/loop-depth asked of a non-control node") 0)))
+
+(defn g-idepth [(n i64)] (-> i64)
+  (g-dom-check-fresh) (g-dom-check-cfg n) (g-idep-raw n))
+(defn g-loop-depth [(n i64)] (-> i64)
+  (g-dom-check-fresh) (g-dom-check-cfg n)
+  (al-get (load (field (graph) ldep)) n))
+
+;; The immediate dominator. A Loop is dominated by its ENTRY alone: the back edge does not
+;; dominate the header, and counting it would neither terminate nor mean anything.
+(defn n-idom [(n i64)] (-> i64)
+  (case (n-op n)
+    OP-START  NO-NODE
+    OP-XCTRL  NO-NODE
+    OP-LOOP   (n-in n 1)
+    OP-REGION (cfg-lca-of-preds n)
+    OP-STOP   (cfg-lca-of-preds n)
+    (n-in n 0)))
+
+;; Walk the deeper of the two up the dominator tree until they meet: the standard lowest common
+;; ancestor, using idepth as the ranking.
+(defn cfg-lca [(a i64) (b i64)] (-> i64)
+  (if (= a NO-NODE) b
+    (if (= b NO-NODE) a
+      (let [(mut x) a (mut y) b]
+        (loop
+          (if (or (= (load x) (load y))
+                  (or (= (load x) NO-NODE) (= (load y) NO-NODE))) (break)
+            (let [dx (g-idep-raw (load x)) dy (g-idep-raw (load y))]
+              (if (>= dx dy) (store! x (n-idom (load x))) 0)
+              (if (<= dx dy) (store! y (n-idom (load y))) 0)
+              0)))
+        (if (= (load x) (load y)) (load x) NO-NODE)))))
+
+(defn cfg-lca-of-preds [(n i64)] (-> i64)
+  (let [lo (n-cpred-lo n) hi (n-cpred-hi n) (mut acc) NO-NODE (mut i) lo]
+    (loop
+      (if (>= (load i) hi) (break)
+        (do (let [d (n-in n (load i))]
+              ; a path that cannot be reached dominates nothing
+              (if (or (= d NO-NODE) (= (n-ty d) (t-xctrl))) 0
+                (store! acc (cfg-lca (load acc) d))))
+            (store! i (+ (load i) 1))
+            0)))
+    (load acc)))
+
+;; idepth by relaxation to a fixpoint. Start is 0; every other CFG node is one deeper than its
+;; deepest reachable predecessor. Excluding a Loop's back edge is what makes the dependency
+;; graph acyclic, so this converges.
+(defn g-compute-idepth! [] (-> i64)
+  (let [p (graph) n (n-count) (mut i) 0]
+    (al-clear! [i64] (field p idep))
+    (loop
+      (if (>= (load i) n) (break)
+        (do (al-push! [i64] (field p idep) -1) (store! i (+ (load i) 1)) 0)))
+    (al-set! [i64] (field p idep) (g-start) 0)
+    (let [(mut changed) true (mut rounds) 0]
+      (loop
+        (if (not (load changed)) (break)
+          (do (store! changed false)
+              (store! rounds (+ (load rounds) 1))
+              (if (> (load rounds) (+ n 2))
+                  (do (panic-corrupt "idepth did not converge") 0)
+                0)
+              (let [(mut k) 0]
+                (loop
+                  (if (>= (load k) n) (break)
+                    (do (if (or (n-dead? (load k)) (not (op-control? (n-op (load k))))) 0
+                          (if (= (load k) (g-start)) 0
+                            (let [d (idepth-of-preds (load k))]
+                              (if (and (!= d -1) (!= d (g-idep-raw (load k))))
+                                  (do (al-set! [i64] (field p idep) (load k) d)
+                                      (store! changed true)
+                                      0)
+                                0))))
+                        (store! k (+ (load k) 1))
+                        0))))
+              0))))
+    0))
+
+;; One deeper than the deepest predecessor that actually dominates. A Loop consults its entry
+;; only; anything with no known predecessor yet reports -1 so relaxation revisits it.
+(defn idepth-of-preds [(n i64)] (-> i64)
+  (if (= (n-op n) OP-LOOP)
+      (let [e (n-in n 1)]
+        (if (= e NO-NODE) -1 (let [d (g-idep-raw e)] (if (= d -1) -1 (+ d 1)))))
+    (let [lo (n-cpred-lo n) hi (n-cpred-hi n) (mut best) -1 (mut i) lo]
+      (loop
+        (if (>= (load i) hi) (break)
+          (do (let [d (n-in n (load i))]
+                (if (or (= d NO-NODE) (= (n-ty d) (t-xctrl))) 0
+                  (let [dd (g-idep-raw d)]
+                    (if (and (!= dd -1) (> (+ dd 1) (load best)))
+                        (store! best (+ dd 1))
+                      0))))
+              (store! i (+ (load i) 1))
+              0)))
+      (load best))))
+
+;; Natural loop bodies. For a Loop header L whose back edge comes from B, the body is L together
+;; with every CFG node that reaches B without passing through L. Each node's loop depth is the
+;; number of bodies containing it, which for reducible control flow is exactly its nesting.
+(defn g-compute-loop-depth! [] (-> i64)
+  (let [p (graph) n (n-count) (mut i) 0]
+    (al-clear! [i64] (field p ldep))
+    (loop
+      (if (>= (load i) n) (break)
+        (do (al-push! [i64] (field p ldep) 0) (store! i (+ (load i) 1)) 0)))
+    (let [(mut h) 0]
+      (loop
+        (if (>= (load h) n) (break)
+          (do (if (and (not (n-dead? (load h))) (= (n-op (load h)) OP-LOOP))
+                  (mark-loop-body! (load h))
+                0)
+              (store! h (+ (load h) 1))
+              0))))
+    0))
+
+(defn mark-loop-body! [(header i64)] (-> i64)
+  (let [p (graph) n (n-count)
+        (mut seen) (al-new [bool] (malloc-allocator))
+        (mut stack) (al-new [i64] (malloc-allocator))
+        (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (al-push! [bool] (mut seen) false) (store! i (+ (load i) 1)) 0)))
+    ; the header is in its own body, and the walk stops there
+    (al-set! [bool] (mut seen) header true)
+    (al-set! [i64] (field p ldep) header (+ (al-get (load (field p ldep)) header) 1))
+    (let [back (if (>= (n-nins header) 3) (n-in header 2) NO-NODE)]
+      (if (!= back NO-NODE) (do (al-push! [i64] (mut stack) back) 0) 0))
+    (loop
+      (if (= (al-len [i64] (load stack)) 0) (break)
+        (let [k (al-get (load stack) (- (al-len [i64] (load stack)) 1))]
+          (al-pop! [i64] (mut stack))
+          (if (or (al-get (load seen) k) (n-dead? k)) 0
+            (do (al-set! [bool] (mut seen) k true)
+                (al-set! [i64] (field p ldep) k (+ (al-get (load (field p ldep)) k) 1))
+                (let [lo (n-cpred-lo k) hi (n-cpred-hi k) (mut j) lo]
+                  (loop
+                    (if (>= (load j) hi) (break)
+                      (do (let [d (n-in k (load j))]
+                            (if (= d NO-NODE) 0 (do (al-push! [i64] (mut stack) d) 0)))
+                          (store! j (+ (load j) 1))
+                          0))))
+                0))
+          0)))
+    (al-free! [bool] (mut seen))
+    (al-free! [i64] (mut stack))
+    0))
+
+(defn g-build-loop-tree! [] (-> i64)
+  (g-compute-idepth!)
+  (g-compute-loop-depth!)
+  (store! (field (graph) domver) (load (field (graph) cfgver)))
+  0)

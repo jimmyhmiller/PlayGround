@@ -493,7 +493,7 @@ pub fn step_instruction<M: Machine>(m: &mut M, instr: &Instruction) -> Result<Fl
         Instruction::Return { value } => {
             let result = rd(m, *value)?;
             let (function_id, version) = m.current();
-            if let crate::FunctionState::Ready(f) = &m.world().functions[&(function_id, version)] {
+            if let Some(crate::FunctionState::Ready(f)) = m.world().functions.get(&(function_id, version)) {
                 let result_ty = f.result.clone();
                 if !m.heap().value_ok(&result, &result_ty) {
                     return Err(type_err(

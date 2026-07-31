@@ -15,7 +15,19 @@ export function round(value, digits = 1) {
 // Execute a bundle under node and return the printed integer. Throws unless
 // stdout is exactly one safe integer.
 export function executeNumericBundle(file) {
-  const stdout = execFileSync("node", [file], { encoding: "utf8" }).trim();
+  // FORCE_COLOR / a TTY makes node ANSI-colorize `console.log(<number>)`, so the
+  // printed value arrives as "\u001b[33m499500\u001b[39m" and parses as NaN. That
+  // used to fail verification, which the runner reports as EXCLUDED — a whole
+  // corpus silently vanishing from the results table for an environment variable
+  // that has nothing to do with any bundler. Both halves are fixed: the child is
+  // told not to colorize, and any escape that still arrives is stripped.
+  const stdout = execFileSync("node", [file], {
+    encoding: "utf8",
+    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+  })
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .trim();
   const value = Number(stdout);
   if (!Number.isSafeInteger(value)) {
     throw new Error(`bundle output of ${file} is not a safe integer: ${JSON.stringify(stdout)}`);

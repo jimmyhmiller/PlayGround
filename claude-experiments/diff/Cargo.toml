@@ -12,11 +12,15 @@ license = "MIT"
 memory-accounting = []
 
 [dependencies]
+# The same glob matcher oxc_resolver matches tsconfig `include`/`exclude` with, so
+# `src/jsx_project_config.rs` reads a config's file set exactly as the resolver does.
+fast-glob = "1.0.1"
 markdown = "1.0"
 oxc_allocator = "0.140.0"
 oxc_ast = "0.140.0"
 oxc_ast_visit = "0.140.0"
 oxc_codegen = "0.140.0"
+oxc_diagnostics = "0.140.0"
 oxc_ecmascript = "0.140.0"
 oxc_parser = "0.140.0"
 oxc_resolver = "11.24.2"
@@ -30,6 +34,13 @@ notify = "8.2.0"
 rayon = "1.11.0"
 oxc_minifier = "0.140.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# WOFF2 payloads are a single raw Brotli stream; decompressing one is the only way to
+# reach the `head`/`hhea`/`hmtx`/`cmap` tables `next/font/local` derives its fallback
+# metrics from. Decompression only — no encoder.
+brotli-decompressor = { version = "5.0.3", default-features = false, features = ["std"] }
+# WOFF (v1) compresses each table with zlib. Already in the tree via `image`'s png
+# decoder; named directly here because `src/font_file.rs` depends on it.
+flate2 = "1.1.9"
 
 [dev-dependencies]
 tempfile = "3.23.0"

@@ -65,7 +65,10 @@ pub enum Value {
     /// A native pointer behind a kind tag. Passed to and returned from foreign
     /// calls; stored in globals and object fields like any other value. Opaque
     /// to the GC — `ptr` is never dereferenced or traced by the runtime.
-    Foreign { kind: ForeignKind, ptr: u64 },
+    Foreign {
+        kind: ForeignKind,
+        ptr: u64,
+    },
 }
 
 impl PartialEq for Value {
@@ -78,10 +81,7 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::FnRef(a), Value::FnRef(b)) => a == b,
             (Value::Ref(a), Value::Ref(b)) => a == b,
-            (
-                Value::Foreign { kind: ak, ptr: ap },
-                Value::Foreign { kind: bk, ptr: bp },
-            ) => ak == bk && ap == bp,
+            (Value::Foreign { kind: ak, ptr: ap }, Value::Foreign { kind: bk, ptr: bp }) => ak == bk && ap == bp,
             _ => false,
         }
     }
@@ -183,6 +183,13 @@ pub enum MigrationSource {
         type_id: DefId,
         field: FieldId,
         source: FieldId,
+    },
+    /// Run a checked, pure language function from one old field value to the
+    /// new field value. The function is frozen into the migration plan, so a
+    /// later function redefinition cannot change historical migration meaning.
+    Transform {
+        source: FieldId,
+        function: Box<Function>,
     },
 }
 

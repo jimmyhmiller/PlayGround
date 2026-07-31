@@ -1,0 +1,8 @@
+(module ifcombineon)
+; Register the if-combining rules. Load with --use; nothing has to opt in:
+;   coil lint app.coil --use ifcombine-on.coil          # report + `help: try:`
+;   coil lint app.coil --use ifcombine-on.coil --fix
+; Run this BEFORE condlint-on.coil: a chain whose arms share a body is an (or), and
+; once the chain rule has made it a `cond` no checker can see it again.
+(import "ifcombine.coil" :use *)
+(checker lint-combine-ifs)

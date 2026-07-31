@@ -6,6 +6,7 @@ pub enum Tok {
     // keywords
     Struct,
     Enum,
+    Migrate,
     Match,
     Fn,
     Let,
@@ -98,7 +99,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     out.push(Token { tok: Tok::EqEq, line });
                     i += 2;
                 } else if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                    out.push(Token { tok: Tok::FatArrow, line });
+                    out.push(Token {
+                        tok: Tok::FatArrow,
+                        line,
+                    });
                     i += 2;
                 } else {
                     push(&mut out, Tok::Eq, line, &mut i);
@@ -127,10 +131,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                                 b'"' => '"',
                                 b'\\' => '\\',
                                 other => {
-                                    return Err(format!(
-                                        "line {line}: unknown escape '\\{}'",
-                                        other as char
-                                    ));
+                                    return Err(format!("line {line}: unknown escape '\\{}'", other as char));
                                 }
                             });
                             i += 1;
@@ -147,7 +148,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                         }
                     }
                 }
-                out.push(Token { tok: Tok::Str(text), line });
+                out.push(Token {
+                    tok: Tok::Str(text),
+                    line,
+                });
             }
             '!' => two(&mut out, bytes, &mut i, line, b'=', Tok::BangEq, Tok::Bang),
             '<' => two(&mut out, bytes, &mut i, line, b'=', Tok::Le, Tok::Lt),
@@ -166,10 +170,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     i += 1;
                 }
                 // `1.5` is a float; `1.foo` stays Int + Dot + Ident.
-                if i + 1 < bytes.len()
-                    && bytes[i] == b'.'
-                    && (bytes[i + 1] as char).is_ascii_digit()
-                {
+                if i + 1 < bytes.len() && bytes[i] == b'.' && (bytes[i + 1] as char).is_ascii_digit() {
                     i += 1;
                     while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
                         i += 1;
@@ -177,7 +178,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     let x: f64 = src[start..i]
                         .parse()
                         .map_err(|_| format!("line {line}: bad float literal"))?;
-                    out.push(Token { tok: Tok::Float(x), line });
+                    out.push(Token {
+                        tok: Tok::Float(x),
+                        line,
+                    });
                 } else {
                     let n: i64 = src[start..i]
                         .parse()
@@ -187,15 +191,14 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
-                while i < bytes.len()
-                    && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
                 let word = &src[start..i];
                 let tok = match word {
                     "struct" => Tok::Struct,
                     "enum" => Tok::Enum,
+                    "migrate" => Tok::Migrate,
                     "match" => Tok::Match,
                     "fn" => Tok::Fn,
                     "let" => Tok::Let,

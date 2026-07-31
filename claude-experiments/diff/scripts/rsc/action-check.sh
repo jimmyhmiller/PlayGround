@@ -4,7 +4,8 @@
 # implementation and returns its real result, against the pinned
 # react-server-dom-webpack runtime. Native transforms; node is only the oracle.
 # Exit 0 = gate PASS.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="${1:-$repo/integration/rsc-action}"

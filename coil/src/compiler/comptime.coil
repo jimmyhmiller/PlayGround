@@ -1,0 +1,3482 @@
+; src/compiler/comptime.coil — self-host Coil compiler, comptime module.
+(module comptime)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "hashmap.coil" :use *)  ; the module_fns set index (module-fns-has)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "ast.coil" :use *)
+(import "ctval.coil" :use *)  ; CtVal / EnvBind / CtCtx — the value model, now on its own
+(import "check.coil" :use *)
+(import "expander.coil" :use *)
+(import "loader.coil" :use *)
+(import "parser.coil" :use *)
+(import "reader.coil" :use *)
+(import "resolve.coil" :use *)
+
+(defn is-aggregate [(c (ptr CtVal))] (-> bool)
+  (match (load c)
+    (CStruct [name fields] true)
+    (CArray [elem cells] true)
+    (CSum [variant fields] true)
+    (CInt [v] false)
+    (CBool [b] false)
+    (CFloat [x] false)
+    (CStr [s] false)
+    (CCode [f] false)
+    (CRef [cell] false)))
+(defn clone-cells [(cells (ptr (ArrayList (ptr CtVal))))] (-> (ptr (ArrayList (ptr CtVal))))
+  (let [a (malloc-allocator)
+        n (al-len [(ptr CtVal)] (load cells))
+        (mut out) (al-new [(ptr CtVal)] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (al-push! (mut out) (new-cell (deep-clone (al-get [(ptr CtVal)] (load cells) (load i)))))
+                (store! i (iadd (load i) 1)))))
+    (box-al [(ptr CtVal)] a (load out))))
+(defn deep-clone [(c (ptr CtVal))] (-> CtVal)
+  (match (load c)
+    (CStruct [name fields] (CStruct name (clone-cells fields)))
+    (CArray [elem cells] (CArray elem (clone-cells cells)))
+    (CSum [variant fields] (CSum variant (clone-cells fields)))
+    (CInt [v] (CInt v))
+    (CBool [b] (CBool b))
+    (CFloat [x] (CFloat x))
+    (CStr [s] (CStr s))
+    (CCode [f] (CCode f))
+    (CRef [cell] (CRef cell))))
+(defn to-content [(c (ptr CtVal))] (-> CtVal)
+  (match (load c)
+    (CRef [cell] (deep-clone cell))
+    (CInt [v] (CInt v))
+    (CBool [b] (CBool b))
+    (CFloat [x] (CFloat x))
+    (CStr [s] (CStr s))
+    (CCode [f] (CCode f))
+    (CStruct [name fields] (CStruct name fields))
+    (CArray [elem cells] (CArray elem cells))
+    (CSum [variant fields] (CSum variant fields))))
+(defn cell-value [(cell (ptr CtVal))] (-> CtVal)
+  (if (is-aggregate cell) (CRef cell) (load cell)))
+(defsum Flow
+  (FVal [(v CtVal)])
+  (FBrk [(value (Option CtVal)) (label (Option (slice u8)))])
+  (FCont [(label (Option (slice u8)))]))
+(defstruct CtFoldHook [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))])
+(defn ct-fold-hook [] (-> (ptr CtFoldHook))
+  (alloc-static CtFoldHook))
+(defn set-comptime-fold-hook! [(fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))] (-> i64)
+  (let [b (ct-fold-hook)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+; A CAPABILITY gap — the interpreter says "isn't supported yet" for a construct real
+; codegen CAN do (sizeof/alignof/offsetof, a generic call, a string, a bitfield op, a
+; function pointer, an aggregate-const ref, a trait call, …). ONLY those are routed to
+; the compiled engine; a genuine SEMANTIC error (division by zero, an arithmetic type
+; mismatch, a non-place target) must stand exactly as the interpreter reported it — the
+; compiled engine would silently compute a target-specific value (arm64 idiv-by-0 = 0)
+; or crash, masking the bug. The "supported yet" wording is the interpreter's own
+; convention for "valid code I can't evaluate", so it is a reliable discriminator.
+(defn ct-tag [(v CtVal)] (-> i64)
+  (match v
+    (CInt [n] 0)
+    (CBool [b] 1)
+    (CFloat [x] 2)
+    (CStr [s] 3)
+    (CCode [f] 4)
+    (CStruct [a b] 5)
+    (CArray [a b] 6)
+    (CSum [a b] 7)
+    (CRef [c] 8)))
+(defn cint-of [(v CtVal)] (-> i64)
+  (match v
+    (CInt [n] n)
+    (CBool [b] 0)
+    (CFloat [x] 0)
+    (CStr [s] 0)
+    (CCode [f] 0)
+    (CStruct [a b] 0)
+    (CArray [a b] 0)
+    (CSum [a b] 0)
+    (CRef [c] 0)))
+(defn cfloat-of [(v CtVal)] (-> f64)
+  (match v
+    (CFloat [x] x)
+    (CInt [n] 0.0)
+    (CBool [b] 0.0)
+    (CStr [s] 0.0)
+    (CCode [f] 0.0)
+    (CStruct [a b] 0.0)
+    (CArray [a b] 0.0)
+    (CSum [a b] 0.0)
+    (CRef [c] 0.0)))
+(defn cbool-of [(v CtVal)] (-> bool)
+  (match v
+    (CBool [b] b)
+    (CInt [n] false)
+    (CFloat [x] false)
+    (CStr [s] false)
+    (CCode [f] false)
+    (CStruct [a b] false)
+    (CArray [a b] false)
+    (CSum [a b] false)
+    (CRef [c] false)))
+(defn bits->f64 [(n i64)] (-> f64)
+  (let [p (alloc-stack i64)] (store! p n) (load (cast (ptr f64) p))))
+(defn trunc [(n i64) (bits i64) (signed bool)] (-> i64)
+  (if (icmp-ge bits 64)
+      n
+      (let [mask (isub (ishl 1 bits) 1)
+            masked (iand n mask)]
+        (if (and signed (icmp-ne (iand masked (ishl 1 (isub bits 1))) 0))
+            (isub masked (ishl 1 bits))
+            masked))))
+(defn icmp-ord [(x i64) (y i64)] (-> i64)
+  (if (icmp-lt x y) -1 (when (icmp-gt x y) 1)))
+(defn fcmp-ord [(x f64) (y f64)] (-> i64)
+  (cond (fcmp-lt x y) -1 (fcmp-eq x y) 0 (fcmp-gt x y) 1 :else -1))
+(defn bool-ord [(x bool) (y bool)] (-> i64)
+  (if (and (not x) y) -1 (when (and x (not y)) 1)))
+(defn cmp-apply [(op i64) (ord i64)] (-> bool)
+  (cond (icmp-eq op 0) (icmp-eq ord -1)
+        (icmp-eq op 1) (icmp-ne ord 1)
+        (icmp-eq op 2) (icmp-eq ord 1)
+        (icmp-eq op 3) (icmp-ne ord -1)
+        (icmp-eq op 4) (icmp-eq ord 0)
+        :else (icmp-ne ord 0)))
+(defn ct-divzero-msg [(rem bool)] (-> (slice u8))
+  (if rem "comptime: remainder by zero" "comptime: division by zero"))
+(defn wrap-mut [(v CtVal)] (-> CtVal)
+  (if (icmp-eq (ct-tag v) 8) v (CRef (new-cell v))))
+(defn cast-trunc [(n i64) (ty Type)] (-> CtVal)
+  (match ty
+    (TInt [bits signed] (CInt (trunc n bits signed)))
+    (TFloat [b] (CInt n))
+    (TBool [] (CInt n))
+    (TVoid [] (CInt n))
+    (TPtr [i] (CInt n))
+    (TRef [m i] (CInt n))
+    (TStruct [nm] (CInt n))
+    (TArray [e k] (CInt n))
+    (TSlice [e] (CInt n))
+    (TVec [e k] (CInt n))
+    (TFn [c p r] (CInt n))
+    (TApp [nm ar] (CInt n))
+    (TNever [] (CInt n))
+    (TCode [] (CInt n))
+    (TExternRef [] (CInt n))))
+(defn cref-cell [(v CtVal)] (-> (ptr CtVal))
+  (match-else v (CRef [c] c) (_ (cast (ptr CtVal) 0))))
+(defn cstruct-name [(v CtVal)] (-> (slice u8))
+  (match-else v (CStruct [nm f] nm) (_ "")))
+(defn cstruct-fields [(v CtVal)] (-> (ptr (ArrayList (ptr CtVal))))
+  (match-else v (CStruct [nm f] f) (_ (cast (ptr (ArrayList (ptr CtVal))) 0))))
+(defn carray-cells [(v CtVal)] (-> (ptr (ArrayList (ptr CtVal))))
+  (match-else v (CArray [el c] c) (_ (cast (ptr (ArrayList (ptr CtVal))) 0))))
+(defn csum-variant [(v CtVal)] (-> (slice u8))
+  (match-else v (CSum [vr f] vr) (_ "")))
+(defn csum-fields [(v CtVal)] (-> (ptr (ArrayList (ptr CtVal))))
+  (match-else v (CSum [vr f] f) (_ (cast (ptr (ArrayList (ptr CtVal))) 0))))
+(defn is-aggregate-v [(c CtVal)] (-> bool)
+  (let [t (ct-tag c)] (or (icmp-eq t 5) (or (icmp-eq t 6) (icmp-eq t 7)))))
+(defn to-content-v [(v CtVal)] (-> CtVal)
+  (to-content (new-cell v)))
+(defn opt-ctval-or [(o (Option CtVal))] (-> CtVal)
+  (match o (Some [v] v) (None [] (CInt 0))))
+(defn lbl-match [(l (Option (slice u8))) (label (Option (slice u8)))] (-> bool)
+  (match l
+    (None [] true)
+    (Some [ls] (match label (None [] false) (Some [lab] (str-eq ls lab))))))
+(defn diag-some? [(o (Option Diag))] (-> bool)
+  (match o (Some [d] true) (None [] false)))
+(defn dec->str [(a (ptr Allocator)) (n i64)] (-> (slice u8))
+  (if (icmp-eq n 0)
+      "0"
+      (let [neg (icmp-lt n 0)
+            (mut m) (if neg (isub 0 n) n)
+            tmp (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 24 1)))
+            (mut cnt) 0]
+        (loop (if (icmp-eq (load m) 0)
+                  (break)
+                  (do
+                    (store! (index tmp (load cnt)) (cast u8 (iadd (urem (load m) 10) 48)))
+                    (store! cnt (iadd (load cnt) 1))
+                    (store! m (udiv (load m) 10)))))
+        (let [extra (when neg 1)
+              total (iadd (load cnt) extra)
+              out (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a total 1)))
+              (mut j) (when neg 1)
+              (mut k) (load cnt)]
+          (when neg (store! (index out 0) (cast u8 45)) 0)
+          (loop (if (icmp-eq (load k) 0)
+                    (break)
+                    (do
+                      (store! k (isub (load k) 1))
+                      (store! (index out (load j)) (load (index tmp (load k))))
+                      (store! j (iadd (load j) 1)))))
+          (slice-new [u8] out total)))))
+(defn ct-struct-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr StructDef))
+  (let [lst (load (field cx structs))
+        n (al-len [StructDef] (load lst))
+        (mut i) 0
+        (mut r) (cast (ptr StructDef) 0)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (str-eq (load (field (al-elem [StructDef] lst (load i)) name)) name)
+                      (store! r (al-elem [StructDef] lst (load i)))
+                      0)
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn is-u8 [(t Type)] (-> bool)
+  (match-else t (TInt [bits signed] (icmp-eq bits 8)) (_ false)))
+(defn zeroed-struct-cells [(flds (ptr (ArrayList Field))) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList (ptr CtVal)))
+                                                                                        Diag))
+  (let [a (load (field cx a))
+        nf (al-len [Field] (load flds))
+        (mut out) (al-new [(ptr CtVal)] a)
+        (mut i) 0
+        (mut errf) (None [Diag])]
+    (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nf))
+              (break)
+              (do
+                (match (zeroed-content (load (field (al-elem [Field] flds (load i)) ty)) cx)
+                  (Err [d] (do (store! errf (Some d)) 0))
+                  (Ok [c] (do (al-push! (mut out) (new-cell c)) 0)))
+                (store! i (iadd (load i) 1)))))
+    (match (load errf)
+      (Some [d] (Err [(ptr (ArrayList (ptr CtVal))) Diag] d))
+      (None [] (Ok [(ptr (ArrayList (ptr CtVal))) Diag] (box-al [(ptr CtVal)] a (load out)))))))
+(defn zeroed-array-cells [(el Type) (k i64) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList (ptr CtVal))) Diag))
+  (let [a (load (field cx a))
+        (mut out) (al-new [(ptr CtVal)] a)
+        (mut i) 0
+        (mut errf) (None [Diag])]
+    (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) k))
+              (break)
+              (do
+                (match (zeroed-content el cx)
+                  (Err [d] (do (store! errf (Some d)) 0))
+                  (Ok [c] (do (al-push! (mut out) (new-cell c)) 0)))
+                (store! i (iadd (load i) 1)))))
+    (match (load errf)
+      (Some [d] (Err [(ptr (ArrayList (ptr CtVal))) Diag] d))
+      (None [] (Ok [(ptr (ArrayList (ptr CtVal))) Diag] (box-al [(ptr CtVal)] a (load out)))))))
+; T := concrete substitution built from a generic def's type params and the type
+; args of an application, so `(ArrayList i64)` can be zeroed by zeroing ArrayList's
+; fields with T bound to i64.
+(defn subst-from-targs [(a (ptr Allocator)) (tps (ptr (ArrayList (slice u8)))) (targs (ptr (ArrayList Type)))] (-> (ptr (ArrayList SubstEntry)))
+  (let [s (subst-new a)
+        ntp (al-len [(slice u8)] (load tps))
+        nta (al-len [Type] (load targs))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) ntp)
+              (break)
+              (do
+                (when (icmp-lt (load i) nta)
+                      (subst-insert! s (al-get [(slice u8)] (load tps) (load i)) (al-elem [Type] targs (load i))))
+                (store! i (iadd (load i) 1)))))
+    s))
+(defn zeroed-struct-cells-subst [(flds (ptr (ArrayList Field))) (subst (ptr (ArrayList SubstEntry))) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList (ptr CtVal)))
+                                                                                                                                   Diag))
+  (let [a (load (field cx a))
+        nf (al-len [Field] (load flds))
+        (mut out) (al-new [(ptr CtVal)] a)
+        (mut i) 0
+        (mut errf) (None [Diag])]
+    (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nf))
+              (break)
+              (do
+                (match (zeroed-content (subst-apply a (field (al-elem [Field] flds (load i)) ty) subst) cx)
+                  (Err [d] (do (store! errf (Some d)) 0))
+                  (Ok [c] (do (al-push! (mut out) (new-cell c)) 0)))
+                (store! i (iadd (load i) 1)))))
+    (match (load errf)
+      (Some [d] (Err [(ptr (ArrayList (ptr CtVal))) Diag] d))
+      (None [] (Ok [(ptr (ArrayList (ptr CtVal))) Diag] (box-al [(ptr CtVal)] a (load out)))))))
+(defn zeroed-content [(ty Type) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (match ty
+      (TInt [bits signed] (Ok [CtVal Diag] (CInt 0)))
+      (TBool [] (Ok [CtVal Diag] (CBool false)))
+      (TFloat [bits] (Ok [CtVal Diag] (CFloat 0.0)))
+      (TSlice [el]
+              (if (is-u8 (load el))
+                  (Ok [CtVal Diag] (CStr ""))
+                  (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet"))))
+      (TStruct [n]
+               (let [sd (ct-struct-find cx n)]
+                 (if (icmp-eq (cast i64 sd) 0)
+                     (Err [CtVal Diag] (derr (sconcat3 a "comptime: unknown struct '" n "'")))
+                     (match (zeroed-struct-cells (load (field sd fields)) cx)
+                       (Err [d] (Err [CtVal Diag] d))
+                       (Ok [cells] (Ok [CtVal Diag] (CStruct n cells)))))))
+      (TArray [el k]
+              (match (zeroed-array-cells (load el) k cx)
+                (Err [d] (Err [CtVal Diag] d))
+                (Ok [cells] (Ok [CtVal Diag] (CArray (load el) cells)))))
+      (TVoid [] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
+      ; A zeroed pointer is NULL. Represented as CInt 0 — the interpreter models a
+      ; live pointer as CRef (a cell), which a null pointer by definition has not got.
+      ; Needed because every generic container has a `(ptr T)` data field.
+      (TPtr [i] (Ok [CtVal Diag] (CInt 0)))
+      (TRef [m i] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
+      (TVec [e k] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
+      ; A zeroed function pointer is NULL, same as TPtr. `Allocator` is a struct of
+      ; fnptr fields, so every allocator-shaped value needs this to be zeroable.
+      (TFn [c p r] (Ok [CtVal Diag] (CInt 0)))
+      ; A generic struct application, e.g. (ArrayList i64): find the generic def and
+      ; zero its fields under T := the type args.
+      (TApp [nm ar]
+            (let [sd (ct-struct-find cx nm)]
+              (if (icmp-eq (cast i64 sd) 0)
+                  (Err [CtVal Diag] (derr (sconcat3 a "comptime: unknown generic struct '" nm "'")))
+                  (match (zeroed-struct-cells-subst (load (field sd fields))
+                                                    (subst-from-targs a (load (field sd type_params)) ar)
+                                                    cx)
+                    (Err [d] (Err [CtVal Diag] d))
+                    (Ok [cells] (Ok [CtVal Diag] (CStruct nm cells)))))))
+      (TNever [] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
+      (TCode [] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
+      (TExternRef [] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet"))))))
+(defn zeroed-value [(ty Type) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (match (zeroed-content ty cx)
+    (Err [d] (Err [CtVal Diag] d))
+    (Ok [c] (Ok [CtVal Diag] (if (is-aggregate-v c) (CRef (new-cell c)) c)))))
+(defn vals->cells [(vals (ptr (ArrayList CtVal))) (a (ptr Allocator))] (-> (ptr (ArrayList (ptr CtVal))))
+  (let [n (al-len [CtVal] (load vals))
+        (mut out) (al-new [(ptr CtVal)] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (al-push! (mut out) (new-cell (to-content-v (al-get [CtVal] (load vals) (load i)))))
+                (store! i (iadd (load i) 1)))))
+    (box-al [(ptr CtVal)] a (load out))))
+(defn match-arm-find [(arms (ptr (ArrayList Arm))) (variant (slice u8))] (-> (ptr Arm))
+  (let [n (al-len [Arm] (load arms))
+        (mut i) 0
+        (mut r) (cast (ptr Arm) 0)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (str-eq (load (field (al-elem [Arm] arms (load i)) variant)) variant)
+                      (store! r (al-elem [Arm] arms (load i)))
+                      (break))
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+(defsum ArgsOut
+  (AOK [(vals (ptr (ArrayList CtVal)))])
+  (AFlow [(f Flow)]))
+(defsum LoopStep
+  (LSAgain [])
+  (LSDone [(v CtVal)])
+  (LSProp [(f Flow)]))
+(defstruct GsCell [(n i64)])
+(defn gensym-cell [] (-> (ptr GsCell))
+  (alloc-static GsCell))
+(defn next-gensym [] (-> i64)
+  (let [c (gensym-cell)
+        v (load (field c n))]
+    (store! (field c n) (iadd v 1))
+    v))
+; ── compile-time diagnostic collector for `(warn …)`/`(report …)` from checkers.
+; Both COLLECT (non-aborting) so a checker surfaces EVERY warning and error in one
+; run; the build fails afterward iff any error-severity diagnostic was reported.
+(defstruct WarnBox [(init i64) (lst (ptr (ArrayList Diag))) (errs i64)])
+(defn warn-box [] (-> (ptr WarnBox))
+  (alloc-static WarnBox))
+(defn warn-list [] (-> (ptr (ArrayList Diag)))
+  (let [b (warn-box)]
+    (when (icmp-eq (load (field b init)) 0)
+          (store! (field b lst) (unwrap-ptr [(ArrayList Diag)] (create [(ArrayList Diag)] (malloc-allocator))))
+          (store! (load (field b lst)) (al-new [Diag] (malloc-allocator)))
+          (store! (field b init) 1)
+          0)
+    (load (field b lst))))
+(defn warn-push [(d Diag)] (-> i64)
+  (al-push! (warn-list) d)
+  0)
+(defn diag-errs [] (-> i64)
+  (let [b (warn-box)] (unless (icmp-eq (load (field b init)) 0) (load (field b errs)))))
+(defn diag-err-bump [] (-> i64)
+  (let [_ (warn-list)
+        b (warn-box)]
+    (store! (field b errs) (iadd (load (field b errs)) 1))
+    0))
+; ── source table for `(code-file NODE)` — lets a checker tell WHICH file a node is
+; from (a real path = user code; "<bundled …>"/"<prelude>" = stdlib) so a linter can
+; scope itself. Set once before checkers run.
+; `own` holds the table BY VALUE and `lst` points at it. The caller's `ArrayList`
+; header lives in an `LS` on the pipeline's stack — and the pipeline runs on its own
+; pthread, so that stack is gone the moment it returns. Keeping the caller's pointer
+; therefore left a dangling read for anything that consults the table AFTER a run,
+; which is exactly what `coil lint --fix` does when it goes to write the files back.
+; Copying the header is enough: the elements themselves are malloc'd and outlive the
+; run, and the table is complete before this is called (every source is registered
+; during load, which finishes before expansion starts).
+(defstruct SrcBox [(lst (ptr (ArrayList Source))) (own (ArrayList Source))])
+(defn src-box [] (-> (ptr SrcBox))
+  (alloc-static SrcBox))
+(defn set-cli-sources [(ss (ptr (ArrayList Source)))] (-> i64)
+  (let [b (src-box)]
+    (store! (field b own) (load ss))
+    (store! (field b lst) (field b own))
+    0))
+(defn code-file-of [(node Sexp)] (-> (slice u8))
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (if (icmp-eq (cast i64 lst) 0)
+        ""
+        (let [sid (sx-source node)]
+          (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
+              ""
+              (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid)) (load (field sp name))))))))
+; `(code-from-user? NODE)` — is this node from a real file the user wrote, rather than
+; the bundled stdlib/prelude? Those are registered under a `<…>` pseudo-name, so the
+; test is "has a name that doesn't start with `<`". One definition: op 34 answers with
+; it, and the autofix filter refuses to edit anything it says false to.
+(defn code-from-user-node? [(node Sexp)] (-> bool)
+  (let [nm (code-file-of node)]
+    (and (icmp-gt (slice-len [u8] nm) 0) (icmp-ne (cast i64 (slice-get [u8] nm 0)) 60))))
+; `(code-line NODE)` — the 1-based source LINE of a node's span, so a macro (e.g.
+; src/stdlib/assert.coil) can bake `file:line` into the code it emits, matching the span
+; machinery diag.coil's `locate` uses. Same source table as `code-file-of` (set once
+; before expansion/checkers run); 0 when the node has no known source.
+(defn ct-line-at [(src (slice u8)) (off0 i64)] (-> i64)
+  (let [n (slice-len [u8] src)
+        off (if (icmp-gt off0 n) n off0)
+        (mut line) 1
+        (mut k) 0]
+    (loop (if (icmp-ge (load k) off)
+              (break)
+              (do
+                (when (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10) (store! line (iadd (load line) 1)))
+                (store! k (iadd (load k) 1)))))
+    (load line)))
+(defn code-line-of [(node Sexp)] (-> i64)
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (unless (icmp-eq (cast i64 lst) 0)
+            (let [sid (sx-source node)]
+              (unless (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
+                      (let [sp (alloc-stack Source)]
+                        (store! sp (al-get [Source] (load lst) sid))
+                        (ct-line-at (load (field sp text)) (sx-lo node))))))))
+; `(code-col NODE)` — the 1-based source COLUMN of a node's span (chars since the last
+; newline before `lo`). Mirrors code-line; together they give `file:line:col` for a node.
+(defn ct-col-at [(src (slice u8)) (off0 i64)] (-> i64)
+  (let [n (slice-len [u8] src)
+        off (if (icmp-gt off0 n) n off0)
+        (mut col) 1
+        (mut k) 0]
+    (loop (if (icmp-ge (load k) off)
+              (break)
+              (do
+                (if (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10)
+                    (store! col 1)
+                    (store! col (iadd (load col) 1)))
+                (store! k (iadd (load k) 1)))))
+    (load col)))
+(defn code-col-of [(node Sexp)] (-> i64)
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (unless (icmp-eq (cast i64 lst) 0)
+            (let [sid (sx-source node)]
+              (unless (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
+                      (let [sp (alloc-stack Source)]
+                        (store! sp (al-get [Source] (load lst) sid))
+                        (ct-col-at (load (field sp text)) (sx-lo node))))))))
+; `(code-src NODE)` — the raw SOURCE TEXT of a node's span (lo..hi), so a macro can
+; show the user exactly what they wrote.
+; Empty when the node has no known source or a dummy span.
+(defn code-src-of [(node Sexp)] (-> (slice u8))
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (if (icmp-eq (cast i64 lst) 0)
+        ""
+        (let [sid (sx-source node)
+              lo (sx-lo node)
+              hi (sx-hi node)]
+          (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
+              ""
+              (let [sp (alloc-stack Source)]
+                (store! sp (al-get [Source] (load lst) sid))
+                (let [txt (load (field sp text))
+                      n (slice-len [u8] txt)]
+                  (if (or (icmp-lt lo 0) (or (icmp-gt hi n) (icmp-gt lo hi)))
+                      ""
+                      (subslice [u8] txt lo hi)))))))))
+; ---- doc comments (`;;`) ------------------------------------------------------
+; A DOC COMMENT is a run of lines whose first non-blank characters are `;;`,
+; immediately above a form. A single `;` stays an ordinary throwaway comment, so
+; documenting something is opt-in and an incidental note never becomes API docs.
+; The reader discards all comments, so the doc is recovered from the SOURCE TEXT by
+; scanning backwards from the node's `lo` — no new AST field, one definition of a
+; doc (the source itself), and nothing to keep in sync.
+
+; Offset of the first byte of the line containing `off` (0 if on line 1).
+(defn ct-line-start [(src (slice u8)) (off i64)] (-> i64)
+  (let [(mut k) off]
+    (loop (if (or (icmp-le (load k) 0) (icmp-eq (cast i64 (slice-get [u8] src (isub (load k) 1))) 10))
+              (break)
+              (store! k (isub (load k) 1))))
+    (load k)))
+
+; If the line starting at `ls` is a `;;` doc line, return the offset just past its
+; `;;` (and one optional following space); otherwise -1. A line of only whitespace,
+; or one holding code, is not a doc line.
+(defn ct-doc-line-body [(src (slice u8)) (ls i64)] (-> i64)
+  (let [n (slice-len [u8] src)
+        (mut k) ls]
+    (loop (if (icmp-ge (load k) n)
+              (break)
+              (let [c (cast i64 (slice-get [u8] src (load k)))]
+                (if (or (icmp-eq c 32) (icmp-eq c 9)) (store! k (iadd (load k) 1)) (break)))))
+    (if (or (icmp-ge (iadd (load k) 1) n)
+            (not (and (icmp-eq (cast i64 (slice-get [u8] src (load k))) 59)
+                      (icmp-eq (cast i64 (slice-get [u8] src (iadd (load k) 1))) 59))))
+        -1
+        (let [(mut b) (iadd (load k) 2)]
+          ; a third `;` is still a doc line (`;;;` banners); skip the run
+          (loop (if (icmp-ge (load b) n)
+                    (break)
+                    (if (icmp-eq (cast i64 (slice-get [u8] src (load b))) 59) (store! b (iadd (load b) 1)) (break))))
+          (if (and (icmp-lt (load b) n) (icmp-eq (cast i64 (slice-get [u8] src (load b))) 32))
+              (iadd (load b) 1)
+              (load b))))))
+
+; End offset (exclusive) of the line starting at `ls`, not counting its newline.
+(defn ct-line-end [(src (slice u8)) (ls i64)] (-> i64)
+  (let [n (slice-len [u8] src)
+        (mut k) ls]
+    (loop (if (or (icmp-ge (load k) n) (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10))
+              (break)
+              (store! k (iadd (load k) 1))))
+    (load k)))
+
+; The doc comment attached to `off`: the contiguous `;;` block ending on the line
+; directly above it, joined with newlines. "" when there is none.
+(defn ct-doc-at [(a (ptr Allocator)) (src (slice u8)) (off i64)] (-> (slice u8))
+  (let [n (slice-len [u8] src)]
+    (if (or (icmp-lt off 0) (icmp-gt off n))
+        ""
+        (let [(mut ls) (ct-line-start src off)
+              (mut lines) (al-new [(slice u8)] a)]
+          ; walk upwards while the previous line is a doc line
+          (loop (if (icmp-le (load ls) 0)
+                    (break)
+                    (let [pls (ct-line-start src (isub (load ls) 1))
+                          body (ct-doc-line-body src pls)]
+                      (if (icmp-lt body 0)
+                          (break)
+                          (do
+                            (al-push! (mut lines) (subslice [u8] src body (ct-line-end src pls)))
+                            (store! ls pls))))))
+          (let [cnt (al-len [(slice u8)] lines)]
+            (if (icmp-eq cnt 0)
+                ""
+                ; collected bottom-up; emit top-down
+                (let [(mut out) (sb-new a)
+                      (mut i) cnt]
+                  (loop (if (icmp-le (load i) 0)
+                            (break)
+                            (do
+                              (store! i (isub (load i) 1))
+                              (sb-push-str! (mut out) (al-get [(slice u8)] lines (load i)))
+                              (when (icmp-gt (load i) 0) (sb-push-byte! (mut out) (cast u8 10))))))
+                  (sb-str (load out)))))))))
+
+; `(code-doc NODE)` — the `;;` doc comment written above NODE, or "" if it has none
+; (including any macro-generated node, which has no source of its own).
+(defn code-doc-of [(node Sexp)] (-> (slice u8))
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (if (icmp-eq (cast i64 lst) 0)
+        ""
+        (let [sid (sx-source node)]
+          (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
+              ""
+              (let [sp (alloc-stack Source)]
+                (store! sp (al-get [Source] (load lst) sid))
+                (ct-doc-at (malloc-allocator) (load (field sp text)) (sx-lo node))))))))
+
+; ── autofix: `(suggest NODE MSG REPLACEMENT)` ─────────────────────────────────
+; A checker only ever RECORDS a proposed rewrite; nothing here opens a file, and
+; every build that is not `coil lint --fix` drops this table on the floor. That
+; keeps `coil build` pure by construction rather than by convention. The suggestion
+; also emits an ordinary `(warn …)`, so the `help: try:` line shows up whether or
+; not anyone ever runs `--fix`. See docs/archive/AUTOFIX.md.
+;
+; `diag` is the index of that warning in `warn-list`, which is how the printer
+; pairs a suggestion with the diagnostic it belongs under.
+(defstruct Suggestion
+  [(source i64) (lo i64) (hi i64) (col i64) (repl Sexp) (msg (slice u8)) (diag i64)])
+(defstruct SugBox [(init i64) (lst (ptr (ArrayList Suggestion)))])
+(defn sug-box [] (-> (ptr SugBox))
+  (alloc-static SugBox))
+(defn sug-list [] (-> (ptr (ArrayList Suggestion)))
+  (let [b (sug-box)]
+    (when (icmp-eq (load (field b init)) 0)
+          (store! (field b lst)
+                  (unwrap-ptr [(ArrayList Suggestion)] (create [(ArrayList Suggestion)] (malloc-allocator))))
+          (store! (load (field b lst)) (al-new [Suggestion] (malloc-allocator)))
+          (store! (field b init) 1)
+          0)
+    (load (field b lst))))
+(defn sug-push [(s Suggestion)] (-> i64)
+  (al-push! (sug-list) s)
+  0)
+(defn sug-count [] (-> i64)
+  (al-len [Suggestion] (load (sug-list))))
+(defn sug-at [(i i64)] (-> Suggestion)
+  (al-get [Suggestion] (load (sug-list)) i))
+; `coil lint --fix` re-analyses the program after every round; both collectors are
+; per-round state, so a round starts from empty rather than re-reporting the last one.
+(defn sug-reset [] (-> i64)
+  (let [b (sug-box)]
+    (unless (icmp-eq (load (field b init)) 0) (store! (load (field b lst)) (al-new [Suggestion] (malloc-allocator))) 0)))
+; `coil lint --fix` re-analyses the program once per round; printing every round's
+; diagnostics would repeat the same list N times and bury the one that matters. The
+; rounds run quiet and the final pass reports.
+(defstruct DiagQuietCell [(on i64)])
+(defn diag-quiet-cell [] (-> (ptr DiagQuietCell))
+  (alloc-static DiagQuietCell))
+(defn set-diag-quiet [(on bool)] (-> i64)
+  (store! (field (diag-quiet-cell) on) (when on 1))
+  0)
+(defn diag-quiet? [] (-> bool)
+  (icmp-ne (load (field (diag-quiet-cell) on)) 0))
+(defn diag-reset [] (-> i64)
+  (let [b (warn-box)]
+    (unless (icmp-eq (load (field b init)) 0)
+            (store! (load (field b lst)) (al-new [Diag] (malloc-allocator)))
+            (store! (field b errs) 0)
+            0)))
+
+; The text of the source file a node came from, or "" — the raw material both the
+; column lookup and the verbatim printer below work over.
+(defn sug-file-text [(source i64)] (-> (slice u8))
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (if (or (icmp-eq (cast i64 lst) 0) (or (icmp-lt source 0) (icmp-ge source (al-len [Source] (load lst)))))
+        ""
+        (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) source)) (load (field sp text))))))
+
+; The path of the source file a node came from, or "" — what `coil lint --fix`
+; writes back to.
+(defn sug-file-name [(source i64)] (-> (slice u8))
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (if (or (icmp-eq (cast i64 lst) 0) (or (icmp-lt source 0) (icmp-ge source (al-len [Source] (load lst)))))
+        ""
+        (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) source)) (load (field sp name))))))
+
+; 0-based column of byte `off` in `txt` — how far it sits past the last newline.
+(defn sug-col-at [(txt (slice u8)) (off i64)] (-> i64)
+  (let [n (slice-len [u8] txt)
+        (mut i) (if (icmp-gt off n) n off)
+        (mut c) 0]
+    (loop (if (or (icmp-le (load i) 0) (icmp-eq (cast i64 (slice-get [u8] txt (isub (load i) 1))) 10))
+              (break)
+              (do (store! c (iadd (load c) 1)) (store! i (isub (load i) 1)))))
+    (load c)))
+
+; ---- rendering a replacement back to source text ----------------------------
+; THE rule that makes a fix surgical: a node that CAME FROM SOURCE is emitted as
+; its ORIGINAL bytes, and only a freshly-built node is pretty-printed. So a fix
+; that reuses the author's subexpressions preserves them byte-for-byte — comments,
+; string escapes, line breaks and all — and only what actually changed is new text.
+;
+; This is a different job from `sx-emit` (expander.coil), which reprints the whole
+; expanded program for `coil expand`: that one is a debugging view with no source to
+; be faithful to, this one edits a file the author has to keep reading.
+(defn sug-verbatim [(node Sexp)] (-> (slice u8))
+  ; ctxt ≠ 0 = macro-generated: its span points at the macro or the call site, so
+  ; those bytes are NOT this node's text and must never be copied.
+  (if (icmp-ne (sx-ctxt node) 0) "" (code-src-of node)))
+
+(defn sug-has-nl [(s (slice u8))] (-> bool)
+  (let [n (slice-len [u8] s)
+        (mut i) 0
+        (mut r) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get [u8] s (load i))) 10)
+                  (do (store! r true) (break))
+                  (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; Width of `x` rendered on one line. Verbatim text that already spans lines can
+; never be flattened, so it reports a width nothing fits in — the same trick
+; src/compiler/formatter/doc.coil's `doc-inf` uses to force every enclosing form to break.
+(defn sug-width [(a (ptr Allocator)) (x Sexp)] (-> i64)
+  (let [v (sug-verbatim x)]
+    (if (icmp-gt (slice-len [u8] v) 0)
+        (if (sug-has-nl v) 1000000000 (slice-len [u8] v))
+        (let [tg (sx-tag x)]
+          ; NOTE: written with cond's flat trailing-else, NOT `:else` — the bootstrap
+          ; seed predates `:else`, and compiler source has to build under it.
+          (cond (icmp-eq tg 0) (slice-len [u8] (i64->str a (sx-ival x)))
+                (icmp-eq tg 2) (slice-len [u8] (sx-sval x))
+                (icmp-eq tg 3) (iadd 1 (slice-len [u8] (sx-sval x)))
+                (icmp-eq tg 4) (iadd 2 (slice-len [u8] (sx-sval x)))
+                (icmp-eq tg 5) (iadd 3 (slice-len [u8] (sx-sval x)))
+                (or (icmp-eq tg 6) (icmp-eq tg 7))
+                  (let [items (sx-items x)
+                        n (sx-len items)
+                        (mut w) 2
+                        (mut i) 0]
+                    (loop (if (icmp-ge (load i) n)
+                              (break)
+                              (do
+                                (store! w
+                                        (iadd (iadd (load w) (when (icmp-gt (load i) 0) 1))
+                                              (sug-width a (sx-at items (load i)))))
+                                (store! i (iadd (load i) 1)))))
+                    (load w))
+                3)))))
+
+(defn sug-spaces! [(buf (mut (ArrayList u8))) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut buf) (cast u8 32)) (store! i (iadd (load i) 1))))))
+  0)
+
+; Copy verbatim text that was written at column `from` into a form now sitting at
+; column `to`. Lisp alignment is column-based, so every line after the first is
+; shifted by the difference: a form that moves left (an `if` chain collapsing into
+; a `cond`) takes its whole body with it instead of stranding it at the old indent.
+; A leftward shift only ever removes SPACES, so it can't eat code.
+(defn sug-put-reindent! [(buf (mut (ArrayList u8))) (s (slice u8)) (from i64) (to i64)] (-> i64)
+  (let [n (slice-len [u8] s)
+        delta (isub to from)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [c (cast i64 (slice-get [u8] s (load i)))]
+                (al-push! (mut buf) (cast u8 c))
+                (store! i (iadd (load i) 1))
+                (when (icmp-eq c 10)
+                      (if (icmp-gt delta 0)
+                          (sug-spaces! (mut buf) delta)
+                          (let [drop (isub 0 delta)
+                                (mut k) 0]
+                            (loop (if (icmp-ge (load k) drop)
+                                      (break)
+                                      (if (and (icmp-lt (load i) n)
+                                               (icmp-eq (cast i64 (slice-get [u8] s (load i))) 32))
+                                          (do (store! i (iadd (load i) 1)) (store! k (iadd (load k) 1)))
+                                          (break))))
+                            0))))))
+    0))
+
+(defn sug-atom! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (x Sexp)] (-> i64)
+  (let [tg (sx-tag x)]
+    (cond (icmp-eq tg 0) (append-bytes! (mut buf) (i64->str a (sx-ival x)))
+          (icmp-eq tg 2) (append-bytes! (mut buf) (sx-sval x))
+          (icmp-eq tg 3) (do (al-push! (mut buf) (cast u8 58)) (append-bytes! (mut buf) (sx-sval x)))
+          (icmp-eq tg 4)
+            (do
+              (al-push! (mut buf) (cast u8 34))
+              (append-bytes! (mut buf) (sx-sval x))
+              (al-push! (mut buf) (cast u8 34)))
+          (icmp-eq tg 5)
+            (do
+              (al-push! (mut buf) (cast u8 99))
+              (al-push! (mut buf) (cast u8 34))
+              (append-bytes! (mut buf) (sx-sval x))
+              (al-push! (mut buf) (cast u8 34)))
+          (append-bytes! (mut buf) "<?>"))
+    0))
+
+; The head symbol of a list, or "" — the one thing layout dispatches on.
+(defn sug-head [(x Sexp)] (-> (slice u8))
+  (let [items (sx-items x)]
+    (if (icmp-eq (sx-len items) 0)
+        ""
+        (let [h (sx-at items 0)] (if (icmp-eq (sx-tag h) 2) (sx-sval h) "")))))
+
+; `cond`/`case` lay their tail out as test/body PAIRS, one clause per line, aligned
+; past the head — the same shape `coil fmt` gives them (src/compiler/formatter/rules.coil layout-clauses,
+; nest = headlen + 2), so a fixed file is already fmt-clean.
+(defn sug-clause-style? [(h (slice u8))] (-> bool)
+  (or (str-eq h "cond") (or (str-eq h "case") (str-eq h "case-by"))))
+
+(defn sug-newline! [(buf (mut (ArrayList u8))) (col i64)] (-> i64)
+  (al-push! (mut buf) (cast u8 10))
+  (sug-spaces! (mut buf) col)
+  0)
+
+; `coil fmt`'s line budget, so a rendered replacement breaks where fmt would.
+(defn sug-width-budget [] (-> i64)
+  120)
+
+; The column the NEXT byte written to `buf` will land in, given that the buffer's own
+; first byte sits at column `start`. Derived from the buffer rather than threaded
+; through the recursion: a node's true column depends on everything already written
+; before it, and passing an estimate down is how re-indentation silently goes wrong.
+(defn sug-cur-col [(buf (ArrayList u8)) (start i64)] (-> i64)
+  (let [s (al-slice [u8] buf)
+        n (slice-len [u8] s)
+        (mut i) n]
+    (loop (if (or (icmp-le (load i) 0) (icmp-eq (cast i64 (slice-get [u8] s (isub (load i) 1))) 10))
+              (break)
+              (store! i (isub (load i) 1))))
+    (if (icmp-eq (load i) 0) (iadd start n) (isub n (load i)))))
+
+; ---- carrying the author's comments across a rewrite ------------------------
+; A replacement is assembled from the author's own nodes, so anything INSIDE a node
+; is copied verbatim and survives on its own. What no Code value records is the text
+; BETWEEN nodes — and in a Lisp the text between two nodes is the comments. Closing
+; an `if` staircase into a `cond` closes exactly those gaps, so left alone the
+; rewrite would quietly delete them.
+;
+; So the renderer walks the ORIGINAL span alongside the replacement it is building:
+; a cursor tracks how far into the source the nodes emitted so far have reached, and
+; whenever the next node starts past the cursor, the comments in the text skipped
+; over are written out first. Every fix that reuses the author's nodes emits them in
+; source order, so the cursor only moves forward; a node that would move it backwards
+; carries nothing rather than duplicating text that was already written.
+(defstruct SugGap [(on i64) (source i64) (at i64) (end i64) (brk i64)])
+(defn sug-gap-cell [] (-> (ptr SugGap))
+  (alloc-static SugGap))
+(defn sug-gap-begin [(source i64) (lo i64) (hi i64)] (-> i64)
+  (let [g (sug-gap-cell)
+        src (sug-file-text source)
+        n (slice-len [u8] src)
+        span (if (or (icmp-lt lo 0) (or (icmp-gt hi n) (icmp-gt lo hi))) "" (subslice [u8] src lo hi))]
+    (store! (field g on) 1)
+    (store! (field g source) source)
+    (store! (field g at) lo)
+    (store! (field g end) hi)
+    ; A comment ends its line, so a replacement carrying one CANNOT be laid out flat.
+    ; The width pass runs before the carry and would never find out on its own, so the
+    ; whole rendering is put in broken layout up front — the same thing verbatim text
+    ; containing a newline already does by reporting an unfittable width.
+    (store! (field g brk) (when (icmp-gt (sug-comment-marks span) 0) 1))
+    0))
+(defn sug-gap-end [] (-> i64)
+  (store! (field (sug-gap-cell) on) 0)
+  0)
+(defn sug-gap-break? [] (-> bool)
+  (let [g (sug-gap-cell)] (and (icmp-ne (load (field g on)) 0) (icmp-ne (load (field g brk)) 0))))
+
+; Write every comment in `s` into `buf`, each on its own line at column `col`. A `;`
+; in the gap between two nodes can only start a comment: a string or a char literal
+; is a node in its own right and would never sit loose in a gap.
+;
+; `lead` says which side the line break goes on. Mid-form the buffer is already
+; indented and waiting for the node that follows, so the break comes AFTER each
+; comment (leaving that indent behind for it). After the form there is nothing to
+; follow, so the break comes BEFORE — otherwise the edit ends in trailing blanks.
+(defn sug-put-comments! [(buf (mut (ArrayList u8))) (s (slice u8)) (col i64) (lead bool)] (-> i64)
+  (let [n (slice-len [u8] s)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-ne (cast i64 (slice-get [u8] s (load i))) 59)
+                  (store! i (iadd (load i) 1))
+                  (let [start (load i)
+                        (mut e) (load i)]
+                    (when lead (sug-newline! (mut buf) col))
+                    ; a comment runs to end of line
+                    (loop (if (or (icmp-ge (load e) n) (icmp-eq (cast i64 (slice-get [u8] s (load e))) 10))
+                              (break)
+                              (store! e (iadd (load e) 1))))
+                    ; ...minus any trailing blanks, which would become dangling
+                    ; whitespace once the line is re-laid-out somewhere else
+                    (let [(mut t) (load e)]
+                      (loop (if (icmp-le (load t) start)
+                                (break)
+                                (let [c (cast i64 (slice-get [u8] s (isub (load t) 1)))]
+                                  (if (or (icmp-eq c 32) (or (icmp-eq c 9) (icmp-eq c 13)))
+                                      (store! t (isub (load t) 1))
+                                      (break)))))
+                      (append-bytes! (mut buf) (subslice [u8] s start (load t))))
+                    (unless lead (sug-newline! (mut buf) col))
+                    (store! i (load e))))))
+    0))
+
+; The source text between where the cursor stopped and where `x` begins: the gap the
+; rewrite is about to close, and the only place the author's text can go missing.
+; Empty when `x` sits behind the cursor — a fix that reordered the author's nodes,
+; where carrying would re-emit text already written.
+(defn sug-gap-before [(x Sexp)] (-> (slice u8))
+  (let [g (sug-gap-cell)]
+    (if (or (icmp-eq (load (field g on)) 0) (icmp-ne (sx-source x) (load (field g source))))
+        ""
+        (let [lo (sx-lo x)
+              at (load (field g at))
+              src (sug-file-text (load (field g source)))
+              n (slice-len [u8] src)]
+          ; The node must lie INSIDE the span being replaced. A replacement also
+          ; contains nodes from the RULE's own quasiquote — the `if`/`cond` head it
+          ; writes — and when a rule is applied to the very file it is written in,
+          ; those share a source id with the target while sitting somewhere else
+          ; entirely. Without this test the cursor would "catch up" to one of them and
+          ; dump every comment in between into the middle of the replacement.
+          (if (or (icmp-lt lo at)
+                  (or (icmp-gt (sx-hi x) (load (field g end))) (or (icmp-gt lo n) (icmp-gt at n))))
+              ""
+              (subslice [u8] src at lo))))))
+
+(defn sug-gap-commented? [(x Sexp)] (-> bool)
+  (icmp-gt (sug-comment-marks (sug-gap-before x)) 0))
+
+; Carry the comments sitting in front of `x`, leaving the buffer indented at `col` for
+; `x` itself, and move the cursor past `x` so nothing is written twice.
+(defn sug-carry-at! [(buf (mut (ArrayList u8))) (x Sexp) (col i64)] (-> i64)
+  (let [g (sug-gap-cell)]
+    (sug-put-comments! (mut buf) (sug-gap-before x) col false)
+    ; Only a node from INSIDE the replaced span may move the cursor. One borrowed from
+    ; elsewhere in the same file — the rule's own quasiquoted head — would otherwise
+    ; shove it past the end of the span and silence every carry after it.
+    (when (and (and (icmp-ne (load (field g on)) 0)
+                    (and (icmp-eq (sx-source x) (load (field g source)))
+                         (icmp-le (sx-hi x) (load (field g end)))))
+               (icmp-gt (sx-hi x) (load (field g at))))
+          (store! (field g at) (sx-hi x)))
+    0))
+
+; Comments inside the replaced span but after the last node the replacement reused
+; would otherwise go out with the closing parens. They are written after the rendered
+; form, on their own line — the one place left that is still inside the edit.
+(defn sug-carry-tail! [(buf (mut (ArrayList u8))) (hi i64) (col i64)] (-> i64)
+  (let [g (sug-gap-cell)]
+    (unless (icmp-eq (load (field g on)) 0)
+            (let [at (load (field g at))
+                  src (sug-file-text (load (field g source)))
+                  n (slice-len [u8] src)]
+              (unless (or (icmp-ge at hi) (icmp-gt hi n)) (sug-put-comments! (mut buf) (subslice [u8] src at hi) col true))))))
+
+; Render `x` into `buf` as source text. `start` is the column `buf`'s first byte
+; occupies, which is all the renderer needs to know about the text around it.
+(defn sug-emit! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (x Sexp) (start i64)] (-> i64)
+  (let [v (sug-verbatim x)]
+    (if (icmp-gt (slice-len [u8] v) 0)
+        ; A node that came from source. Carry the comments skipped over on the way to
+        ; it FIRST — that may open a new line, so its landing column has to be read
+        ; from the buffer afterwards rather than before.
+        (do
+          (sug-carry-at! (mut buf) x (sug-cur-col (load buf) start))
+          (sug-put-reindent! (mut buf)
+                             v
+                             (sug-col-at (sug-file-text (sx-source x)) (sx-lo x))
+                             (sug-cur-col (load buf) start)))
+        (let [col (sug-cur-col (load buf) start)
+              tg (sx-tag x)]
+          (if (not (or (icmp-eq tg 6) (icmp-eq tg 7)))
+              (sug-atom! a (mut buf) x)
+              (let [items (sx-items x)
+                    n (sx-len items)
+                    open (if (icmp-eq tg 7) 91 40)
+                    close (if (icmp-eq tg 7) 93 41)]
+                (if (icmp-eq n 0)
+                    (do (al-push! (mut buf) (cast u8 open)) (al-push! (mut buf) (cast u8 close)) 0)
+                    (do
+                      (al-push! (mut buf) (cast u8 open))
+                      (if (and (not (sug-gap-break?)) (icmp-le (iadd col (sug-width a x)) (sug-width-budget)))
+                          ; fits: one line, single spaces
+                          (let [(mut i) 0]
+                            (loop (if (icmp-ge (load i) n)
+                                      (break)
+                                      (do
+                                        (when (icmp-gt (load i) 0) (al-push! (mut buf) (cast u8 32)))
+                                        (sug-emit! a (mut buf) (sx-at items (load i)) start)
+                                        (store! i (iadd (load i) 1))))))
+                          ; breaks: the head (or a vector's first element) stays on this
+                          ; line and everything after aligns under the first argument —
+                          ; fmt's CALL shape. `cond`/`case` additionally pair up.
+                          (let [h (if (icmp-eq tg 6) (sug-head x) "")
+                                pairs (and (icmp-eq tg 6) (sug-clause-style? h))
+                                ind (if (icmp-eq tg 7) (iadd col 1) (iadd (iadd col (slice-len [u8] h)) 2))
+                                step (if pairs 2 1)]
+                            (sug-emit! a (mut buf) (sx-at items 0) start)
+                            (let [(mut i) 1]
+                              (loop (if (icmp-ge (load i) n)
+                                        (break)
+                                        (do
+                                          (if (icmp-eq (load i) 1)
+                                              (al-push! (mut buf) (cast u8 32))
+                                              (sug-newline! (mut buf) ind))
+                                          ; one clause: test, then its body — on the same
+                                          ; line if it still fits, else broken onto the
+                                          ; next one indented two past the clause column,
+                                          ; which is where fmt puts a body it cannot fit
+                                          ; (src/compiler/formatter/rules.coil layout-clauses).
+                                          (let [(mut k) 0]
+                                            (loop (if (or (icmp-ge (load k) step) (icmp-ge (iadd (load i) (load k)) n))
+                                                      (break)
+                                                      (let [it (sx-at items (iadd (load i) (load k)))]
+                                                        (when (icmp-gt (load k) 0)
+                                                              (if (sug-gap-commented? it)
+                                                                  ; src/compiler/formatter/rules.coil: a comment BETWEEN a clause
+                                                                  ; test and its body forces the hang — two
+                                                                  ; spaces, the comment, then the body alone on
+                                                                  ; the next line. Nothing may share that line.
+                                                                  (do
+                                                                    (al-push! (mut buf) (cast u8 32))
+                                                                    (al-push! (mut buf) (cast u8 32))
+                                                                    (sug-carry-at! (mut buf) it (iadd ind 2)))
+                                                                  (if (icmp-le (iadd (iadd (sug-cur-col (load buf) start)
+                                                                                           1)
+                                                                                     (sug-width a it))
+                                                                               (sug-width-budget))
+                                                                      (al-push! (mut buf) (cast u8 32))
+                                                                      (sug-newline! (mut buf) (iadd ind 2)))))
+                                                        (sug-emit! a (mut buf) it start)
+                                                        (store! k (iadd (load k) 1))))))
+                                          (store! i (iadd (load i) step))))))))
+                      (al-push! (mut buf) (cast u8 close))
+                      0)))))))
+  0)
+; ---- the comment guard ------------------------------------------------------
+; A replacement is assembled from the author's own nodes, so anything INSIDE a node
+; survives. What does not survive is text between nodes — and in a Lisp the text
+; between two nodes is a comment. Nothing in a Code value records it, so a rule that
+; drops a clause boundary would delete the author's comment with it.
+;
+; Rather than let that happen quietly, the fix is checked before it is applied: count
+; the comment marks in the span being replaced and in the text replacing it, and if
+; any went missing the rewrite is not a rewrite the author would accept. `;` inside a
+; string literal is not a comment, so string state is tracked.
+(defn sug-comment-marks [(s (slice u8))] (-> i64)
+  (let [n (slice-len [u8] s)
+        (mut i) 0
+        (mut instr) false
+        (mut count) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [c (cast i64 (slice-get [u8] s (load i)))]
+                (if (load instr)
+                    (if (icmp-eq c 92)
+                        (store! i (iadd (load i) 2))  ; escape: skip the escaped byte
+                        (do (when (icmp-eq c 34) (store! instr false)) (store! i (iadd (load i) 1))))
+                    (do
+                      (if (icmp-eq c 34)
+                          (store! instr true)
+                          (when (icmp-eq c 59) (store! count (iadd (load count) 1))))
+                      (store! i (iadd (load i) 1)))))))
+    (load count)))
+
+; Would splicing `repl` over [lo,hi) of `src` lose a comment?
+(defn sug-drops-comment? [(src (slice u8)) (lo i64) (hi i64) (repl (slice u8))] (-> bool)
+  (let [n (slice-len [u8] src)]
+    (if (or (icmp-lt lo 0) (or (icmp-gt hi n) (icmp-gt lo hi)))
+        false
+        (icmp-gt (sug-comment-marks (subslice [u8] src lo hi)) (sug-comment-marks repl)))))
+
+; ── the files that supply the RULES are not targets ──────────────────────────
+; A rule loaded with `--use` is an INPUT to the analysis, and `--fix` re-analyses
+; after every round. If a rule matches its own source, the first round rewrites the
+; file the rule was compiled from; the Code literals its replacements are built out of
+; (the `if`/`and` heads in its own quasiquotes) still carry spans into the text as it
+; was BEFORE that edit. Rendering then reads the right byte count at the wrong offset
+; and splices mangled identifiers into the file — which is exactly the failure a
+; source-rewriting tool must not have. Caught here, at the same place as the other
+; filters, so such a fix is never even recorded.
+(defstruct RuleSrcBox [(init i64) (lst (ptr (ArrayList i64)))])
+(defn rule-src-box [] (-> (ptr RuleSrcBox))
+  (alloc-static RuleSrcBox))
+(defn rule-srcs [] (-> (ptr (ArrayList i64)))
+  (let [b (rule-src-box)]
+    (when (icmp-eq (load (field b init)) 0)
+          (store! (field b lst) (unwrap-ptr [(ArrayList i64)] (create [(ArrayList i64)] (malloc-allocator))))
+          (store! (load (field b lst)) (al-new [i64] (malloc-allocator)))
+          (store! (field b init) 1)
+          0)
+    (load (field b lst))))
+(defn rule-src-add [(sid i64)] (-> i64)
+  (unless (icmp-lt sid 0) (al-push! (rule-srcs) sid) 0))
+(defn rule-src-reset [] (-> i64)
+  (let [b (rule-src-box)]
+    (unless (icmp-eq (load (field b init)) 0) (store! (load (field b lst)) (al-new [i64] (malloc-allocator))) 0)))
+(defn rule-src? [(sid i64)] (-> bool)
+  (let [l (rule-srcs)
+        n (al-len [i64] (load l))
+        (mut i) 0
+        (mut r) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (al-get [i64] (load l) (load i)) sid)
+                  (do (store! r true) (break))
+                  (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; Record a proposed rewrite. The filters live HERE rather than at apply time, so a
+; node a fix could never legally touch never advertises one either:
+;   * ctxt ≠ 0     — macro-generated. Its span points at the macro or the call site,
+;                    so "fixing" it would write nonsense into an unrelated form. This
+;                    filter is not optional and not configurable.
+;   * not user code — a bundled stdlib node has no file on disk to edit.
+;   * a rule's own source — see above; the analysis may not rewrite its own input.
+(defn cop-record-fix [(node Sexp) (repl Sexp) (msg (slice u8)) (di i64)] (-> i64)
+  (unless (or (icmp-ne (sx-ctxt node) 0)
+              (or (not (code-from-user-node? node)) (rule-src? (sx-source node))))
+          (let [s (alloc-stack Suggestion)]
+            (store! (field s source) (sx-source node))
+            (store! (field s lo) (sx-lo node))
+            (store! (field s hi) (sx-hi node))
+            (store! (field s col) (sug-col-at (sug-file-text (sx-source node)) (sx-lo node)))
+            (store! (field s repl) repl)
+            (store! (field s msg) msg)
+            (store! (field s diag) di)
+            (sug-push (load s))
+            0)))
+
+; ops 32 `(warn NODE MSG)` and 44 `(suggest NODE MSG REPLACEMENT)`. Both record a
+; located, non-fatal warning at NODE — that half is identical, so it is written once —
+; and `suggest` additionally records the rewrite it proposes.
+(defn cop-warn-or-suggest [(a (ptr Allocator)) (op i64) (args (ptr (ArrayList CtVal)))] (-> (Result CtVal Diag))
+  (let [fixing (icmp-eq op 44)
+        nm (if fixing "suggest" "warn")
+        usage
+          (if fixing
+              "suggest: expects (suggest NODE MSG REPLACEMENT), REPLACEMENT a Code value"
+              "warn: expects (warn NODE MSG)")
+        repl
+          (if fixing
+              (match (cv-get args 2)
+                (None [] (None [Sexp]))
+                (Some [rv] (if (is-ccode rv) (Some (ccode-of rv)) (None [Sexp]))))
+              (None [Sexp]))]
+    (if (and fixing (not (some? [Sexp] repl)))
+        (Err [CtVal Diag] (derr usage))
+        (match (cv-get args 0)
+          (None [] (Err [CtVal Diag] (derr usage)))
+          (Some [nodev]
+                (if (not (is-ccode nodev))
+                    (Err [CtVal Diag] (derr (sconcat a nm ": first arg must be a Code node")))
+                    (match (cv-get args 1)
+                      (None [] (Err [CtVal Diag] (derr usage)))
+                      (Some [msgv]
+                            (if (not (is-cstr msgv))
+                                (Err [CtVal Diag] (derr (sconcat a nm ": message must be a string")))
+                                (let [node (ccode-of nodev)
+                                      d (alloc-stack Diag)
+                                      di (al-len [Diag] (load (warn-list)))]
+                                  (store! (field d lo) (sx-lo node))
+                                  (store! (field d hi) (sx-hi node))
+                                  (store! (field d msg) (sconcat a "warning: " (cstr-of msgv)))
+                                  (store! (field d source) (sx-source node))
+                                  (store! (field d ctxt) 0)
+                                  (warn-push (load d))
+                                  (match repl
+                                    (None [] 0)
+                                    (Some [r] (cop-record-fix node r (cstr-of msgv) di)))
+                                  (Ok [CtVal Diag] (CInt 0))))))))))))
+
+; A suggestion's replacement as text, laid out as if it began at column `col`.
+(defn sug-render-at [(a (ptr Allocator)) (s Suggestion) (col i64)] (-> (slice u8))
+  (let [sp (alloc-stack Suggestion)
+        (mut buf) (al-new [u8] a)]
+    (store! sp s)
+    ; the cursor runs over the span being replaced, so the comments in the gaps the
+    ; rewrite closes come along with the nodes it reuses
+    (sug-gap-begin (load (field sp source)) (load (field sp lo)) (load (field sp hi)))
+    (sug-emit! a (mut buf) (load (field sp repl)) col)
+    (sug-carry-tail! (mut buf) (load (field sp hi)) col)
+    (sug-gap-end)
+    (al-slice [u8] (load buf))))
+
+; The text that would be spliced over the suggestion's own span.
+(defn sug-render [(a (ptr Allocator)) (s Suggestion)] (-> (slice u8))
+  (let [sp (alloc-stack Suggestion)] (store! sp s) (sug-render-at a s (load (field sp col)))))
+
+; Print `help: try: …` for any suggestion attached to warning `di`. This is where
+; most of autofix's value lands: the proposed rewrite is visible from an ordinary
+; build, whether or not anyone ever runs `coil lint --fix`. Continuation lines are
+; laid out to align under the start of the replacement, past the `help: try: ` label.
+(defn sug-print-help [(w (ptr Writer)) (a (ptr Allocator)) (di i64)] (-> i64)
+  (let [n (sug-count)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [sp (alloc-stack Suggestion)]
+                  (store! sp (sug-at (load i)))
+                  (when (icmp-eq (load (field sp diag)) di)
+                        (ps w "help: try: ")
+                        (ps w (sug-render-at a (load sp) 11))
+                        (wb w 10)
+                        0))
+                (store! i (iadd (load i) 1))))))
+  0)
+
+; case it exists for: cross-compiling. A macro branching on it baked the host branch
+; into a wasm build, silently. The arch is one value per compile, set from the resolved
+; --target triple before expansion runs (like the nid/gensym counters, it is a
+; per-process global — the compiler builds one target per invocation).
+; C `access(path, 0)` — F_OK. Module-qualified so the name cannot collide;
+; the backends link the LAST dot component, i.e. the C symbol `access`.
+(extern comptime.access :cc c [(ptr i8) i64] (-> i32))
+(defstruct TargetArchCell [(set i64) (arch (slice u8)) (os (slice u8))])
+(defn target-arch-cell [] (-> (ptr TargetArchCell))
+  (alloc-static TargetArchCell))
+
+(defn arch-of-triple [(triple (ptr i8))] (-> (slice u8))
+  (if (icmp-eq (cast i64 triple) 0)
+      "aarch64"  ; null = host default
+      (let [t (cstr->slice triple)]
+        (cond (starts-with t "wasm32") "wasm32"
+              (starts-with t "wasm64") "wasm64"
+              (starts-with t "x86_64") "x86_64"
+              (starts-with t "aarch64") "aarch64"
+              (starts-with t "arm64") "aarch64"
+              "aarch64"))))  ; unknown → host default
+
+; The OS half of the same story, and it exists for the same reason the arch does:
+; a library that branches on the platform — open() flags, dylib suffixes, syscall
+; numbers — must branch on the platform being COMPILED FOR, not the one running
+; the compiler. Without this a `const` folded at compile time silently records
+; the build host, so cross-compiling to darwin from Linux bakes in Linux answers.
+; (src/stdlib/fs.coil hit exactly that: 512 is O_CREAT on darwin and O_TRUNC on Linux.)
+;
+; Kept in the same cell as the arch: one target per compiler invocation, set from
+; the resolved --target triple before expansion runs.
+(defn has-sub? [(hay (slice u8)) (needle (slice u8))] (-> bool)
+  (match (str-find hay needle) (Some [i] true) (None [] false)))
+
+(defn os-of-triple [(triple (ptr i8))] (-> (slice u8))
+  (if (icmp-eq (cast i64 triple) 0)
+      (host-os-str)  ; null = "no --target", i.e. build for the host
+      (let [t (cstr->slice triple)]
+        ; match on the triple's os field, which is the component after the vendor
+        ; ("x86_64-pc-linux-gnu", "aarch64-apple-darwin24.0.0", "wasm64-unknown-unknown").
+        (cond (has-sub? t "linux") "linux"
+              (has-sub? t "darwin") "darwin"
+              (has-sub? t "macos") "darwin"
+              (starts-with t "wasm") "wasm"
+              (host-os-str)))))  ; unknown → assume the host
+
+; The HOST os, for when no --target was given. /proc/self/maps exists on every
+; Linux and never on macOS — the same probe metaengine.coil uses to pick the
+; dylib extension and link command.
+(defn host-os-str [] (-> (slice u8))
+  (if (icmp-eq (cast i64 (comptime.access c"/proc/self/maps" 0)) 0) "linux" "darwin"))
+
+(defn set-target-arch! [(triple (ptr i8))] (-> i64)
+  (let [c (target-arch-cell)]
+    (store! (field c arch) (arch-of-triple triple))
+    (store! (field c os) (os-of-triple triple))
+    (store! (field c set) 1)
+    0))
+
+(defn target-arch-str [] (-> (slice u8))
+  (let [c (target-arch-cell)]
+    (if (icmp-eq (load (field c set)) 0) "aarch64" (load (field c arch)))))
+
+(defn target-os-str [] (-> (slice u8))
+  (let [c (target-arch-cell)]
+    (if (icmp-eq (load (field c set)) 0) (host-os-str) (load (field c os)))))
+
+; `(debug-checks?)` — the --debug-checks build-mode predicate (mem-2/6/7/8), a code op
+; (39) so it works in BOTH engines with no seed refresh: the interpreter answers it here
+; in `code-op`, and the compiled engine routes back through `code-op` via metahost. Set
+; from the driver before expansion (like the target arch); off (false) by default, so a
+; library's `(if (debug-checks?) …checked… …plain…)` guard MACRO expands to the plain
+; form and costs nothing. Per-process global — one build mode per compile.
+(defstruct DebugChecksCell [(on i64)])
+(defn debug-checks-cell [] (-> (ptr DebugChecksCell))
+  (alloc-static DebugChecksCell))
+(defn set-debug-checks! [(on i64)] (-> i64)
+  (store! (field (debug-checks-cell) on) on)
+  0)
+(defn debug-checks-on? [] (-> bool)
+  (icmp-ne (load (field (debug-checks-cell) on)) 0))
+
+; ── S1 semantic layer for `(code-decl NODE)`: read the compiler's AUTHORITATIVE
+; work. Checkers run AFTER resolve + typecheck (see expander.coil::run-registered-
+; checkers and driver.coil::run-pipeline), so a checker reads the real checked
+; Program — fully-qualified names and real signatures — NOT a parallel resolver.
+; `set-sem-model` stashes that Program before checkers run; `code-decl` answers
+; WHERE a name is defined (its module) and, for a function, its SIGNATURE.
+(defstruct SemModelBox [(init i64) (prog (ptr Program))])
+(defn sem-model-box [] (-> (ptr SemModelBox))
+  (alloc-static SemModelBox))
+(defn set-sem-model [(p (ptr Program))] (-> i64)
+  (let [b (sem-model-box)] (store! (field b prog) p) (store! (field b init) 1) 0))
+; No authoritative program available this round (the current program does not yet
+; typecheck) — `code-decl` and friends then answer `:unresolved`. A transform can
+; still rewrite syntactically until the program becomes valid.
+(defn clear-sem-model [] (-> i64)
+  (set-sem-model (cast (ptr Program) 0)))
+(defn sem-model [] (-> (ptr Program))
+  (let [b (sem-model-box)] (if (icmp-eq (load (field b init)) 0) (cast (ptr Program) 0) (load (field b prog)))))
+; ── S2: the TYPE MAP — per-expression inferred types for `(type-of NODE)`.
+; The type-checker records, at `do-synth` (its single per-expression entry), the
+; inferred Type keyed by the expression's source span. A metaprogram then asks
+; `(type-of NODE)` for the type of any expression it sees (the surface Code node
+; shares the span the checker recorded). Reset at the start of each check pass.
+(defstruct TypeMapEntry [(nid i64) (ty Type)])
+(defstruct TypeMapBox [(init i64) (lst (ptr (ArrayList TypeMapEntry)))])
+(defn type-map-box [] (-> (ptr TypeMapBox))
+  (alloc-static TypeMapBox))
+(defn type-map-list [] (-> (ptr (ArrayList TypeMapEntry)))
+  (let [b (type-map-box)]
+    (when (icmp-eq (load (field b init)) 0)
+          (store! (field b lst)
+                  (unwrap-ptr [(ArrayList TypeMapEntry)] (create [(ArrayList TypeMapEntry)] (malloc-allocator))))
+          (store! (load (field b lst)) (al-new [TypeMapEntry] (malloc-allocator)))
+          (store! (field b init) 1)
+          0)
+    (load (field b lst))))
+(defn type-map-reset [] (-> i64)
+  (let [_ (type-map-list)
+        b (type-map-box)]
+    (store! (load (field b lst)) (al-new [TypeMapEntry] (malloc-allocator)))
+    0))
+(defn type-map-record [(nid i64) (ty Type)] (-> i64)
+  (unless (icmp-le nid 0)
+          ; skip synthesized nodes (nid -1) / the "no id" sentinel
+          (let [e (alloc-stack TypeMapEntry)]
+            (store! (field e nid) nid)
+            (store! (field e ty) ty)
+            (al-push! (type-map-list) (load e))
+            0)))
+; Look up a node id's type; scan from the END so the last (most-refined) record wins.
+(defn type-map-lookup [(nid i64)] (-> (Option Type))
+  (if (icmp-le nid 0)
+      (None [Type])
+      (let [lst (type-map-list)
+            n (al-len [TypeMapEntry] (load lst))
+            (mut i) (isub n 1)
+            (mut r) (None [Type])]
+        (loop (if (icmp-lt (load i) 0)
+                  (break)
+                  (do
+                    (let [e (al-elem [TypeMapEntry] lst (load i))]
+                      (when (icmp-eq (load (field e nid)) nid) (store! r (Some (load (field e ty)))) (break)))
+                    (store! i (isub (load i) 1)))))
+        (load r))))
+; ── S3: the BINDING MAP — per-reference local-binding identity for a borrow/
+; ownership checker. The type-checker records, at every resolved `EVar`, the ID
+; of the LET-binding or parameter it resolves to (0 = a global const/function or
+; unbound). Two references with the same positive id name the SAME local — so
+; shadowing is exact, which name-matching cannot do. `(binding-of NODE)` reads it.
+; The counter is monotonic and reset per check pass, so ids are deterministic
+; across identical rebuilds (the fixpoint holds).
+(defstruct BidCell [(n i64)])
+(defn bid-cell [] (-> (ptr BidCell))
+  (alloc-static BidCell))
+(defn next-bid [] (-> i64)
+  (let [c (bid-cell)
+        v (iadd (load (field c n)) 1)]
+    (store! (field c n) v)
+    v))
+(defstruct BindMapEntry [(nid i64) (bid i64)])
+(defstruct BindMapBox [(init i64) (lst (ptr (ArrayList BindMapEntry)))])
+(defn bind-map-box [] (-> (ptr BindMapBox))
+  (alloc-static BindMapBox))
+(defn bind-map-list [] (-> (ptr (ArrayList BindMapEntry)))
+  (let [b (bind-map-box)]
+    (when (icmp-eq (load (field b init)) 0)
+          (store! (field b lst)
+                  (unwrap-ptr [(ArrayList BindMapEntry)] (create [(ArrayList BindMapEntry)] (malloc-allocator))))
+          (store! (load (field b lst)) (al-new [BindMapEntry] (malloc-allocator)))
+          (store! (field b init) 1)
+          0)
+    (load (field b lst))))
+(defn bind-map-reset [] (-> i64)
+  (let [_ (bind-map-list)
+        b (bind-map-box)
+        c (bid-cell)]
+    (store! (load (field b lst)) (al-new [BindMapEntry] (malloc-allocator)))
+    (store! (field c n) 0)
+    0))
+(defn bind-map-record [(nid i64) (bid i64)] (-> i64)
+  (unless (icmp-le nid 0)
+          (let [e (alloc-stack BindMapEntry)]
+            (store! (field e nid) nid)
+            (store! (field e bid) bid)
+            (al-push! (bind-map-list) (load e))
+            0)))
+(defn bind-map-lookup [(nid i64)] (-> i64)
+  (unless (icmp-le nid 0)
+          (let [lst (bind-map-list)
+                n (al-len [BindMapEntry] (load lst))
+                (mut i) (isub n 1)
+                (mut r) 0]
+            (loop (if (icmp-lt (load i) 0)
+                      (break)
+                      (do
+                        (let [e (al-elem [BindMapEntry] lst (load i))]
+                          (when (icmp-eq (load (field e nid)) nid) (store! r (load (field e bid))) (break)))
+                        (store! i (isub (load i) 1)))))
+            (load r))))
+(defn cop-binding-of [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (match (cv-get args 0)
+    (Some [v]
+          (if (is-ccode v)
+              (Ok [CtVal Diag] (CInt (bind-map-lookup (sx-nid (ccode-of v)))))
+              (Err [CtVal Diag] (derr "binding-of: expects a Code node"))))
+    (None [] (Err [CtVal Diag] (derr "binding-of: expects (binding-of NODE)")))))
+(defn cop-type-of [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (match (cv-get args 0)
+      (None [] (Err [CtVal Diag] (derr "type-of: expects (type-of NODE)")))
+      (Some [nodev]
+            (if (not (is-ccode nodev))
+                (Err [CtVal Diag] (derr "type-of: expects a Code node"))
+                (let [node (ccode-of nodev)]
+                  (match (type-map-lookup (sx-nid node))
+                    (None [] (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unknown") -1 -1))))
+                    (Some [t] (Ok [CtVal Diag] (CCode (ty->sexp a (box-type a t))))))))))))
+; ── S0/S1: the RESOLUTION MAP — call node id → the callee's fully-qualified name,
+; recorded at do-synth once the checker has the resolved ECall. Lets `(code-decl NODE)`
+; on a CALL answer with the EXACT callee (the one resolution actually picked), instead
+; of a name-based lookup that goes `:ambiguous` when the simple name lives in >1 module.
+(defstruct ResMapEntry [(nid i64) (name (slice u8))])
+(defstruct ResMapBox [(init i64) (lst (ptr (ArrayList ResMapEntry)))])
+(defn res-map-box [] (-> (ptr ResMapBox))
+  (alloc-static ResMapBox))
+(defn res-map-list [] (-> (ptr (ArrayList ResMapEntry)))
+  (let [b (res-map-box)]
+    (when (icmp-eq (load (field b init)) 0)
+          (store! (field b lst)
+                  (unwrap-ptr [(ArrayList ResMapEntry)] (create [(ArrayList ResMapEntry)] (malloc-allocator))))
+          (store! (load (field b lst)) (al-new [ResMapEntry] (malloc-allocator)))
+          (store! (field b init) 1)
+          0)
+    (load (field b lst))))
+(defn res-map-reset [] (-> i64)
+  (let [_ (res-map-list)
+        b (res-map-box)]
+    (store! (load (field b lst)) (al-new [ResMapEntry] (malloc-allocator)))
+    0))
+(defn res-map-record [(nid i64) (name (slice u8))] (-> i64)
+  (unless (icmp-le nid 0)
+          (let [e (alloc-stack ResMapEntry)]
+            (store! (field e nid) nid)
+            (store! (field e name) name)
+            (al-push! (res-map-list) (load e))
+            0)))
+(defn res-map-lookup [(nid i64)] (-> (slice u8))
+  (if (icmp-le nid 0)
+      ""
+      (let [lst (res-map-list)
+            n (al-len [ResMapEntry] (load lst))
+            (mut i) (isub n 1)
+            (mut r) ""]
+        (loop (if (icmp-lt (load i) 0)
+                  (break)
+                  (do
+                    (let [e (al-elem [ResMapEntry] lst (load i))]
+                      (when (icmp-eq (load (field e nid)) nid) (store! r (load (field e name))) (break)))
+                    (store! i (isub (load i) 1)))))
+        (load r))))
+; The module part of a fully-qualified name `mod.simple` → "mod" (before last dot), else "".
+(defn qual-module-of [(name (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] name)
+        (mut i) (isub n 1)
+        (mut at) -1]
+    (loop (if (icmp-lt (load i) 0)
+              (break)
+              (do
+                (when (icmp-eq (cast i64 (slice-get name (load i))) 46) (store! at (load i)) (break))
+                (store! i (isub (load i) 1)))))
+    (if (icmp-lt (load at) 0) "" (subslice [u8] name 0 (load at)))))
+; The simple (module-stripped, alias-stripped) name a query symbol refers to.
+(defn decl-simple-name [(q (slice u8))] (-> (slice u8))
+  (let [sl (find-slash q)]
+    (after-last-dot (if (icmp-ge sl 0) (subslice [u8] q (iadd sl 1) (slice-len [u8] q)) q))))
+; If the query was module-qualified (`mod.name`, no alias slash), the module part.
+(defn decl-qual-module [(q (slice u8))] (-> (slice u8))
+  (if (icmp-ge (find-slash q) 0) "" (qual-module-of q)))
+; Does an authoritative qualified name match the queried simple name (+ optional module)?
+(defn cp-name-match [(qname (slice u8)) (simple (slice u8)) (wantmod (slice u8))] (-> bool)
+  (and (str-eq (after-last-dot qname) simple)
+       (or (icmp-eq (slice-len [u8] wantmod) 0) (str-eq (qual-module-of qname) wantmod))))
+; The symbol a Code node names: a bare symbol is itself; a call/list uses its head.
+(defn decl-node-name [(node Sexp)] (-> (slice u8))
+  (if (icmp-eq (sx-tag node) 2)
+      (sx-sval node)
+      (if (icmp-eq (sx-tag node) 6)
+          (let [it (sx-items node)]
+            (if (icmp-ge (sx-len it) 1) (let [h (sx-at it 0)] (if (icmp-eq (sx-tag h) 2) (sx-sval h) "")) ""))
+          "")))
+; Reconstruct a Type as Code (the inverse of parse-type); mirrors ty-str's spelling.
+(defn ty-list2 [(a (ptr Allocator)) (head (slice u8)) (x Sexp)] (-> Sexp)
+  (let [(mut it) (al-new [Sexp] a)]
+    (al-push! (mut it) (sx-sym head))
+    (al-push! (mut it) x)
+    (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
+(defn ty-list3 [(a (ptr Allocator)) (head (slice u8)) (x Sexp) (y Sexp)] (-> Sexp)
+  (let [(mut it) (al-new [Sexp] a)]
+    (al-push! (mut it) (sx-sym head))
+    (al-push! (mut it) x)
+    (al-push! (mut it) y)
+    (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
+(defn ty-app-sexp [(a (ptr Allocator)) (t (ptr Type))] (-> Sexp)
+  (let [(mut it) (al-new [Sexp] a)
+        args (t-fn-params t)
+        n (al-len [Type] (load args))
+        (mut i) 0]
+    (al-push! (mut it) (sx-sym (t-app-name t)))
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (al-push! (mut it) (ty->sexp a (al-elem [Type] args (load i)))) (store! i (iadd (load i) 1)))))
+    (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
+(defn ty-fn-sexp [(a (ptr Allocator)) (t (ptr Type))] (-> Sexp)
+  (let [(mut it) (al-new [Sexp] a)
+        ps (t-fn-params t)
+        n (al-len [Type] (load ps))
+        (mut i) 0
+        (mut pv) (al-new [Sexp] a)]
+    (al-push! (mut it) (sx-sym "fnptr"))
+    (al-push! (mut it) (sx-sym (t-fn-cc t)))
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (al-push! (mut pv) (ty->sexp a (al-elem [Type] ps (load i)))) (store! i (iadd (load i) 1)))))
+    (al-push! (mut it) (mk-sexp (KVec (box-al [Sexp] a (load pv))) -1 -1))
+    (al-push! (mut it) (ty->sexp a (t-fn-ret t)))
+    (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
+(defn ty->sexp [(a (ptr Allocator)) (t (ptr Type))] (-> Sexp)
+  (let [tg (type-tag t)]
+    (cond (icmp-eq tg 0) (sx-sym (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t))))
+          (icmp-eq tg 1) (sx-sym (sconcat a "f" (i64->str a (t-int-bits t))))
+          (icmp-eq tg 2) (sx-sym "bool")
+          (icmp-eq tg 3) (sx-sym "void")
+          (icmp-eq tg 4) (ty-list2 a "ptr" (ty->sexp a (t-inner t)))
+          (icmp-eq tg 5) (ty-list2 a (if (t-ref-mut t) "mut" "ref") (ty->sexp a (t-inner t)))
+          (icmp-eq tg 6) (sx-sym (type-struct-name t))
+          (icmp-eq tg 7) (ty-list3 a "array" (ty->sexp a (t-inner t)) (sx-mkint (t-arrn t)))
+          (icmp-eq tg 8) (ty-list2 a "slice" (ty->sexp a (t-inner t)))
+          (icmp-eq tg 9) (ty-list3 a "vec" (ty->sexp a (t-inner t)) (sx-mkint (t-arrn t)))
+          (icmp-eq tg 12) (sx-sym "!")
+          (icmp-eq tg 13) (sx-sym "code")
+          (icmp-eq tg 14) (sx-sym "externref")
+          (icmp-eq tg 11) (ty-app-sexp a t)
+          (icmp-eq tg 10) (ty-fn-sexp a t)
+          :else (sx-sym "?"))))
+; The params-vector `[T…]` of a function's signature, as Code.
+(defn fn-params-vec [(a (ptr Allocator)) (fp (ptr Func))] (-> Sexp)
+  (let [ps (load (field fp params))
+        n (al-len [Param] (load ps))
+        (mut items) (al-new [Sexp] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (al-push! (mut items) (ty->sexp a (field (al-elem [Param] ps (load i)) ty)))
+                (store! i (iadd (load i) 1)))))
+    (mk-sexp (KVec (box-al [Sexp] a (load items))) -1 -1)))
+; The `(decl MODULE fn [param-types] ret)` record for a checked function.
+(defn fn-decl-record [(a (ptr Allocator)) (fp (ptr Func))] (-> Sexp)
+  (let [(mut items) (al-new [Sexp] a)]
+    (al-push! (mut items) (sx-sym "decl"))
+    (al-push! (mut items) (sx-sym (qual-module-of (load (field fp name)))))
+    (al-push! (mut items) (sx-sym "fn"))
+    (al-push! (mut items) (fn-params-vec a fp))
+    (al-push! (mut items) (ty->sexp a (field fp ret)))
+    (mk-sexp (KList (box-al [Sexp] a (load items))) -1 -1)))
+; The `(decl MODULE KIND)` record for a struct/sum/trait/const/extern.
+(defn kind-decl-record [(a (ptr Allocator)) (module (slice u8)) (kind (slice u8))] (-> Sexp)
+  (let [(mut items) (al-new [Sexp] a)]
+    (al-push! (mut items) (sx-sym "decl"))
+    (al-push! (mut items) (sx-sym module))
+    (al-push! (mut items) (sx-sym kind))
+    (mk-sexp (KList (box-al [Sexp] a (load items))) -1 -1)))
+; Search the checked Program for a FUNCTION by simple name (+ optional module).
+; status 0 found (fn set), 1 none, 2 ambiguous.
+(defstruct CpFn [(status i64) (fn (ptr Func))])
+(defn cp-find-fn [(p (ptr Program)) (simple (slice u8)) (wantmod (slice u8))] (-> CpFn)
+  (let [fs (load (field p funcs))
+        n (al-len [Func] fs)
+        (mut i) 0
+        (mut cnt) 0
+        (mut first) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [f (al-elem [Func] fs (load i))]
+                  (when (cp-name-match (load (field f name)) simple wantmod)
+                        (when (icmp-eq (cast i64 (load first)) 0) (store! first f) 0)
+                        (store! cnt (iadd (load cnt) 1))
+                        0))
+                (store! i (iadd (load i) 1)))))
+    (let [r (alloc-stack CpFn)]
+      (store! (field r fn) (load first))
+      (store! (field r status) (if (icmp-eq (load cnt) 0) 1 (unless (icmp-eq (load cnt) 1) 2)))
+      (load r))))
+; Find a function by its EXACT fully-qualified name (what resolution recorded).
+(defn cp-find-fn-exact [(p (ptr Program)) (qname (slice u8))] (-> (ptr Func))
+  (let [fs (load (field p funcs))
+        n (al-len [Func] fs)
+        (mut i) 0
+        (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [f (al-elem [Func] fs (load i))]
+                  (when (str-eq (load (field f name)) qname) (store! r f) (break)))
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+; The qualified name of the SUM that owns a variant whose qualified name is `qname`,
+; or "" if none. (Variant constructions resolve their ECall.func to the variant.)
+(defn cp-sum-of-variant [(p (ptr Program)) (qname (slice u8))] (-> (slice u8))
+  (let [sums (load (field p sums))
+        n (al-len [SumDef] sums)
+        (mut i) 0
+        (mut r) ""]
+    (loop (if (or (icmp-gt (slice-len [u8] (load r)) 0) (icmp-ge (load i) n))
+              (break)
+              (do
+                (let [sd (al-elem [SumDef] sums (load i))
+                      vs (load (field sd variants))
+                      nv (al-len [Variant] vs)
+                      (mut j) 0]
+                  (loop (if (icmp-ge (load j) nv)
+                            (break)
+                            (do
+                              (when (str-eq (load (field (al-elem [Variant] vs (load j)) name)) qname)
+                                    (store! r (load (field sd name)))
+                                    (break))
+                              (store! j (iadd (load j) 1))))))
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+; A resolved decl: found=false → not in cp (caller falls back to name-based lookup).
+(defstruct CpDecl [(found bool) (rec Sexp)])
+; Build the decl record for the entity whose EXACT qualified name resolution recorded.
+; Searches functions, then struct/sum/trait/const/extern, then sum variants.
+(defn cp-find-exact-decl [(a (ptr Allocator)) (p (ptr Program)) (qname (slice u8))] (-> CpDecl)
+  (let [r (alloc-stack CpDecl)
+        fn (cp-find-fn-exact p qname)]
+    (store! (field r found) false)
+    (if (icmp-ne (cast i64 fn) 0)
+        (do (store! (field r found) true) (store! (field r rec) (fn-decl-record a fn)) 0)
+        (let [nks (cp-kind-decls a p)
+              n (al-len [NamedKind] (load nks))
+              (mut i) 0]
+          (loop (if (or (load (field r found)) (icmp-ge (load i) n))
+                    (break)
+                    (do
+                      (let [e (al-elem [NamedKind] nks (load i))]
+                        (when (str-eq (load (field e name)) qname)
+                              (store! (field r found) true)
+                              (store! (field r rec) (kind-decl-record a (qual-module-of qname) (load (field e kind))))
+                              0))
+                      (store! i (iadd (load i) 1)))))
+          (unless (load (field r found))
+                  (let [sq (cp-sum-of-variant p qname)]  ; variant construction → its sum
+                    (when (icmp-gt (slice-len [u8] sq) 0)
+                          (store! (field r found) true)
+                          (store! (field r rec) (kind-decl-record a (qual-module-of sq) "sum"))
+                          0)))))
+    (load r)))
+; A (qualified-name, kind) pair, for the non-function declaration kinds.
+(defstruct NamedKind [(name (slice u8)) (kind (slice u8))])
+(defn nk-push [(dst (ptr (ArrayList NamedKind))) (name (slice u8)) (kind (slice u8))] (-> i64)
+  (let [e (alloc-stack NamedKind)] (store! (field e name) name) (store! (field e kind) kind) (al-push! dst (load e)) 0))
+; Collect every struct/sum/trait/const/extern as a (qualified-name, kind) pair.
+(defn cp-kind-decls [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr (ArrayList NamedKind)))
+  (let [(mut out) (al-new [NamedKind] a)
+        ss (load (field p structs))
+        sums (load (field p sums))
+        tr (load (field p traits))
+        cs (load (field p consts))
+        ex (load (field p externs))
+        (mut i) 0]
+    (store! i 0)
+    (loop (if (icmp-ge (load i) (al-len [StructDef] ss))
+              (break)
+              (do
+                (nk-push (mut out) (load (field (al-elem [StructDef] ss (load i)) name)) "struct")
+                (store! i (iadd (load i) 1)))))
+    (store! i 0)
+    (loop (if (icmp-ge (load i) (al-len [SumDef] sums))
+              (break)
+              (do
+                (nk-push (mut out) (load (field (al-elem [SumDef] sums (load i)) name)) "sum")
+                (store! i (iadd (load i) 1)))))
+    (store! i 0)
+    (loop (if (icmp-ge (load i) (al-len [TraitDef] tr))
+              (break)
+              (do
+                (nk-push (mut out) (load (field (al-elem [TraitDef] tr (load i)) name)) "trait")
+                (store! i (iadd (load i) 1)))))
+    (store! i 0)
+    (loop (if (icmp-ge (load i) (al-len [Const] cs))
+              (break)
+              (do
+                (nk-push (mut out) (load (field (al-elem [Const] cs (load i)) name)) "const")
+                (store! i (iadd (load i) 1)))))
+    (store! i 0)
+    (loop (if (icmp-ge (load i) (al-len [Extern] ex))
+              (break)
+              (do
+                (nk-push (mut out) (load (field (al-elem [Extern] ex (load i)) name)) "extern")
+                (store! i (iadd (load i) 1)))))
+    (box-al [NamedKind] a (load out))))
+(defn cop-decl [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))
+        p (sem-model)]
+    (match (cv-get args 0)
+      (None [] (Err [CtVal Diag] (derr "code-decl: expects (code-decl NODE)")))
+      (Some [nodev]
+            (if (not (is-ccode nodev))
+                (Err [CtVal Diag] (derr "code-decl: expects a Code node"))
+                (if (icmp-eq (cast i64 p) 0)
+                    (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
+                    ; EXACT path first: if this node is a reference the checker resolved — an
+                    ; expression ref (call, fn-ptr, variant) via its node id, or a TYPE ref via
+                    ; its (module, raw-name) → use the recorded qualified name. No ambiguity,
+                    ; cross-module correct.
+                    (let [node (ccode-of nodev)
+                          rq0 (res-map-lookup (sx-nid node))
+                          rqn
+                            (if (icmp-gt (slice-len [u8] rq0) 0)
+                                rq0
+                                (type-res-lookup (src-mod-lookup (sx-source node)) (decl-node-name node)))
+                          rd (alloc-stack CpDecl)]
+                      (store! rd
+                              (if (icmp-gt (slice-len [u8] rqn) 0)
+                                  (cp-find-exact-decl a p rqn)
+                                  (let [z (alloc-stack CpDecl)] (store! (field z found) false) (load z))))
+                      (if (load (field rd found))
+                          (Ok [CtVal Diag] (CCode (load (field rd rec))))
+                          (let [nm (decl-node-name (ccode-of nodev))]
+                            (if (icmp-eq (slice-len [u8] nm) 0)
+                                (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
+                                (let [simple (decl-simple-name nm)
+                                      wantmod (decl-qual-module nm)
+                                      fr (alloc-stack CpFn)]
+                                  (store! fr (cp-find-fn p simple wantmod))
+                                  (if (icmp-eq (load (field fr status)) 2)
+                                      (Ok [CtVal Diag] (CCode (mk-sexp (KKw "ambiguous") -1 -1)))
+                                      (if (icmp-eq (load (field fr status)) 0)
+                                          (Ok [CtVal Diag] (CCode (fn-decl-record a (load (field fr fn)))))
+                                          ; not a function — scan the kind-only declarations
+                                          (let [nks (cp-kind-decls a p)
+                                                n (al-len [NamedKind] (load nks))
+                                                (mut i) 0
+                                                (mut cnt) 0
+                                                (mut fk) ""
+                                                (mut fm) ""]
+                                            (loop (if (icmp-ge (load i) n)
+                                                      (break)
+                                                      (do
+                                                        (let [e (al-elem [NamedKind] nks (load i))]
+                                                          (when (cp-name-match (load (field e name)) simple wantmod)
+                                                                (when (icmp-eq (load cnt) 0)
+                                                                      (store! fk (load (field e kind)))
+                                                                      (store! fm (qual-module-of (load (field e name))))
+                                                                      0)
+                                                                (store! cnt (iadd (load cnt) 1))
+                                                                0))
+                                                        (store! i (iadd (load i) 1)))))
+                                            (if (icmp-eq (load cnt) 0)
+                                                (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
+                                                (if (icmp-gt (load cnt) 1)
+                                                    (Ok [CtVal Diag] (CCode (mk-sexp (KKw "ambiguous") -1 -1)))
+                                                    (Ok [CtVal Diag] (CCode (kind-decl-record a (load fm) (load fk))))))))))))))))))))
+(defn ct-sum-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr SumDef))
+  (let [lst (load (field cx sums))
+        n (al-len [SumDef] (load lst))
+        (mut i) 0
+        (mut r) (cast (ptr SumDef) 0)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (str-eq (load (field (al-elem [SumDef] lst (load i)) name)) name)
+                      (store! r (al-elem [SumDef] lst (load i)))
+                      0)
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn ct-trait-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr TraitDef))
+  (let [lst (load (field cx traits))
+        n (al-len [TraitDef] (load lst))
+        (mut i) 0
+        (mut r) (cast (ptr TraitDef) 0)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (str-eq (load (field (al-elem [TraitDef] lst (load i)) name)) name)
+                      (store! r (al-elem [TraitDef] lst (load i)))
+                      0)
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn cstr-of [(v CtVal)] (-> (slice u8))
+  (match-else v (CStr [s] s) (_ "")))
+(defn is-cstr [(v CtVal)] (-> bool)
+  (match-else v (CStr [s] true) (_ false)))
+(defn is-ccode [(v CtVal)] (-> bool)
+  (match-else v (CCode [c] true) (_ false)))
+(defn ccode-of [(v CtVal)] (-> Sexp)
+  (match-else v (CCode [c] c) (_ (zeroed Sexp))))
+(defn sx-sym [(s (slice u8))] (-> Sexp)
+  (mk-sexp (KSym s) -1 -1))
+(defn sx-mkstr [(s (slice u8))] (-> Sexp)
+  (mk-sexp (KStr s) -1 -1))
+(defn sx-mkint [(n i64)] (-> Sexp)
+  (mk-sexp (KInt n) -1 -1))
+(defn sx-mklist [(items (ptr (ArrayList Sexp)))] (-> Sexp)
+  (mk-sexp (KList items) -1 -1))
+(defn intw-name [(a (ptr Allocator)) (pre (slice u8)) (b i64)] (-> (slice u8))
+  (sconcat a pre (dec->str a b)))
+(defn type-kind-tag [(t Type) (cx (ptr CtCtx))] (-> i64)
+  (match-else t
+              (TInt [b s] 0)
+              (TFloat [b] 1)
+              (TBool [] 2)
+              (TStruct [n]
+                       (if (icmp-ne (cast i64 (ct-struct-find cx n)) 0)
+                           3
+                           (if (icmp-ne (cast i64 (ct-sum-find cx n)) 0) 4 8)))
+              (TApp [n a]
+                    (if (icmp-ne (cast i64 (ct-struct-find cx n)) 0)
+                        3
+                        (if (icmp-ne (cast i64 (ct-sum-find cx n)) 0) 4 8)))
+              (TPtr [i] 5)
+              (TRef [m i] 5)
+              (TArray [e k] 6)
+              (TSlice [e] 7)
+              (_ 8)))
+(defn type-name-str [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
+  (match-else (load t)
+              (TInt [b s] (if s (intw-name a "i" b) (intw-name a "u" b)))
+              (TFloat [b] (intw-name a "f" b))
+              (TBool [] "bool")
+              (TStruct [n] (after-last-dot n))
+              (TApp [n ar] (after-last-dot n))
+              (TPtr [i] "ptr")
+              (TRef [m i] "ptr")
+              (TArray [e k] "array")
+              (TSlice [e] "slice")
+              (_ (do (unimplemented "comptime/type_name_str: Debug form of exotic type") ""))))
+(defn type->code [(t (ptr Type))] (-> Sexp)
+  (let [a (malloc-allocator)]
+    (match (load t)
+      (TInt [b s] (sx-sym (if s (intw-name a "i" b) (intw-name a "u" b))))
+      (TFloat [b] (sx-sym (intw-name a "f" b)))
+      (TBool [] (sx-sym "bool"))
+      (TVoid [] (sx-sym "void"))
+      (TCode [] (sx-sym "Code"))
+      (TExternRef [] (sx-sym "externref"))
+      (TNever [] (sx-sym "Never"))
+      (TStruct [n] (sx-sym n))
+      (TPtr [i]
+            (let [(mut xs) (al-new [Sexp] a)]
+              (al-push! (mut xs) (sx-sym "ptr"))
+              (al-push! (mut xs) (type->code i))
+              (sx-mklist (box-al [Sexp] a (load xs)))))
+      (TRef [m i]
+            (let [(mut xs) (al-new [Sexp] a)]
+              (al-push! (mut xs) (sx-sym (if m "mut" "ref")))
+              (al-push! (mut xs) (type->code i))
+              (sx-mklist (box-al [Sexp] a (load xs)))))
+      (TSlice [i]
+              (let [(mut xs) (al-new [Sexp] a)]
+                (al-push! (mut xs) (sx-sym "slice"))
+                (al-push! (mut xs) (type->code i))
+                (sx-mklist (box-al [Sexp] a (load xs)))))
+      (TArray [i n]
+              (let [(mut xs) (al-new [Sexp] a)]
+                (al-push! (mut xs) (sx-sym "array"))
+                (al-push! (mut xs) (type->code i))
+                (al-push! (mut xs) (sx-mkint n))
+                (sx-mklist (box-al [Sexp] a (load xs)))))
+      (TVec [i n]
+            (let [(mut xs) (al-new [Sexp] a)]
+              (al-push! (mut xs) (sx-sym "vec"))
+              (al-push! (mut xs) (type->code i))
+              (al-push! (mut xs) (sx-mkint n))
+              (sx-mklist (box-al [Sexp] a (load xs)))))
+      (TFn [cc p r]
+           (let [(mut pv) (al-new [Sexp] a)
+                 np (al-len [Type] (load p))
+                 (mut j) 0]
+             (loop (if (icmp-ge (load j) np)
+                       (break)
+                       (do (al-push! (mut pv) (type->code (al-elem [Type] p (load j)))) (store! j (iadd (load j) 1)))))
+             (let [(mut xs) (al-new [Sexp] a)]
+               (al-push! (mut xs) (sx-sym "fnptr"))
+               (al-push! (mut xs) (sx-sym cc))
+               (al-push! (mut xs) (mk-sexp (KVec (box-al [Sexp] a (load pv))) -1 -1))
+               (al-push! (mut xs) (type->code r))
+               (sx-mklist (box-al [Sexp] a (load xs))))))
+      (TApp [n ar]
+            (let [(mut xs) (al-new [Sexp] a)
+                  na (al-len [Type] (load ar))
+                  (mut j) 0]
+              (al-push! (mut xs) (sx-sym n))
+              (loop (if (icmp-ge (load j) na)
+                        (break)
+                        (do (al-push! (mut xs) (type->code (al-elem [Type] ar (load j)))) (store! j (iadd (load j) 1)))))
+              (sx-mklist (box-al [Sexp] a (load xs))))))))
+(defn ty-is-named [(t Type)] (-> bool)
+  (match-else t (TStruct [n] true) (TApp [n a] true) (_ false)))
+(defn ty-name-opt [(t Type)] (-> (slice u8))
+  (match-else t (TStruct [n] n) (TApp [n a] n) (_ "")))
+(defn type-query [(q i64) (ty Type) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [named (ty-is-named ty)
+        nm (ty-name-opt ty)]
+    (cond (icmp-eq q 0)
+            (let [sd (if named (ct-struct-find cx nm) (cast (ptr StructDef) 0))]
+              (if (icmp-eq (cast i64 sd) 0)
+                  (Err [CtVal Diag] (derr "field-count: type is not a struct"))
+                  (Ok [CtVal Diag] (CInt (al-len [Field] (load (field sd fields)))))))
+          (icmp-eq q 1)
+            (let [sd (if named (ct-sum-find cx nm) (cast (ptr SumDef) 0))]
+              (if (icmp-eq (cast i64 sd) 0)
+                  (Err [CtVal Diag] (derr "variant-count: type is not a sum"))
+                  (Ok [CtVal Diag] (CInt (al-len [Variant] (load (field sd variants)))))))
+          (icmp-eq q 2) (Ok [CtVal Diag] (CBool (and named (icmp-ne (cast i64 (ct-struct-find cx nm)) 0))))
+          (icmp-eq q 3) (Ok [CtVal Diag] (CBool (and named (icmp-ne (cast i64 (ct-sum-find cx nm)) 0))))
+          (icmp-eq q 4) (Ok [CtVal Diag] (CBool (match-else ty (TInt [b s] true) (_ false))))
+          (icmp-eq q 5) (Ok [CtVal Diag] (CBool (match-else ty (TFloat [b] true) (_ false))))
+          (icmp-eq q 6) (Ok [CtVal Diag] (CBool (match-else ty (TPtr [i] true) (TRef [m i] true) (_ false))))
+          :else (Ok [CtVal Diag] (CBool (match-else ty (TArray [e k] true) (_ false)))))))
+(defn field-meta [(meta i64) (ty Type) (i i64) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (if (not (ty-is-named ty))
+        (Err [CtVal Diag] (derr "field reflection: type is not a struct"))
+        (let [sd (ct-struct-find cx (ty-name-opt ty))]
+          (if (icmp-eq (cast i64 sd) 0)
+              (Err [CtVal Diag] (derr "field reflection: not a struct"))
+              (let [flds (load (field sd fields))
+                    nf (al-len [Field] (load flds))]
+                (if (or (icmp-lt i 0) (icmp-ge i nf))
+                    (Err [CtVal Diag] (derr "field reflection: index out of range"))
+                    (let [fp (al-elem [Field] flds i)
+                          fname (load (field fp name))
+                          ftyp (field fp ty)]
+                      (if (icmp-eq meta 0)
+                          (Ok [CtVal Diag] (CStr fname))
+                          (if (icmp-eq meta 1)
+                              (Ok [CtVal Diag] (CInt (type-kind-tag (load ftyp) cx)))
+                              (Ok [CtVal Diag] (CStr (type-name-str a ftyp)))))))))))))
+(defn find-field-index [(ty Type) (want (slice u8)) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (if (not (ty-is-named ty))
+        (Err [CtVal Diag] (derr "field-index: type is not a struct"))
+        (let [sd (ct-struct-find cx (ty-name-opt ty))]
+          (if (icmp-eq (cast i64 sd) 0)
+              (Err [CtVal Diag] (derr "field-index: not a struct"))
+              (let [flds (load (field sd fields))
+                    nf (al-len [Field] (load flds))
+                    (mut i) 0
+                    (mut r) -1]
+                (loop (if (icmp-ge (load i) nf)
+                          (break)
+                          (do
+                            (when (str-eq (load (field (al-elem [Field] flds (load i)) name)) want)
+                                  (store! r (load i))
+                                  (break))
+                            (store! i (iadd (load i) 1)))))
+                (if (icmp-lt (load r) 0)
+                    (Err [CtVal Diag] (derr (sconcat3 a "field-index: struct has no field '" want "'")))
+                    (Ok [CtVal Diag] (CInt (load r))))))))))
+(defn sexp-list-eq [(xs (ptr (ArrayList Sexp))) (ys (ptr (ArrayList Sexp)))] (-> bool)
+  (let [nx (al-len [Sexp] (load xs))
+        ny (al-len [Sexp] (load ys))]
+    (if (icmp-ne nx ny)
+        false
+        (let [(mut i) 0
+              (mut ok) true]
+          (loop (if (or (not (load ok)) (icmp-ge (load i) nx))
+                    (break)
+                    (do
+                      (unless (sexp-eq (al-get [Sexp] (load xs) (load i)) (al-get [Sexp] (load ys) (load i)))
+                              (store! ok false)
+                              0)
+                      (store! i (iadd (load i) 1)))))
+          (load ok)))))
+(defn sexp-eq [(x Sexp) (y Sexp)] (-> bool)
+  (let [tx (sx-tag x)
+        ty (sx-tag y)]
+    (cond (icmp-ne tx ty) false
+          (or (icmp-eq tx 0) (icmp-eq tx 1)) (icmp-eq (sx-ival x) (sx-ival y))
+          (or (icmp-eq tx 2) (or (icmp-eq tx 3) (or (icmp-eq tx 4) (icmp-eq tx 5)))) (str-eq (sx-sval x) (sx-sval y))
+          (or (icmp-eq tx 6) (icmp-eq tx 7)) (sexp-list-eq (sx-items x) (sx-items y))
+          :else false)))
+(defn ctval->sexp [(v CtVal)] (-> (Result Sexp Diag))
+  (match-else v
+              (CCode [c] (Ok [Sexp Diag] c))
+              (CInt [n] (Ok [Sexp Diag] (sx-mkint n)))
+              (CFloat [x] (Ok [Sexp Diag] (mk-sexp (KFloat (f64-bits x)) -1 -1)))
+              (CBool [b] (Ok [Sexp Diag] (sx-sym (if b "true" "false"))))
+              (CStr [s] (Ok [Sexp Diag] (sx-mkstr s)))
+              (_ (Err [Sexp Diag] (derr "comptime: can't unquote an aggregate value into code")))))
+(defstruct FindS [(p (ptr StructDef)) (status i64)])
+(defn find-struct-flex [(cx (ptr CtCtx)) (tname (slice u8))] (-> FindS)
+  (let [r (alloc-stack FindS)
+        exact (ct-struct-find cx tname)]
+    (if (icmp-ne (cast i64 exact) 0)
+        (do (store! (field r p) exact) (store! (field r status) 0) (load r))
+        (let [lst (load (field cx structs))
+              n (al-len [StructDef] (load lst))
+              (mut i) 0
+              (mut cnt) 0
+              (mut first) (cast (ptr StructDef) 0)]
+          (loop (if (icmp-ge (load i) n)
+                    (break)
+                    (do
+                      (let [sp (al-elem [StructDef] lst (load i))]
+                        (when (str-eq (after-last-dot (load (field sp name))) tname)
+                              (when (icmp-eq (load cnt) 0) (store! first sp) 0)
+                              (store! cnt (iadd (load cnt) 1))))
+                      (store! i (iadd (load i) 1)))))
+          (if (icmp-eq (load cnt) 0)
+              (do (store! (field r status) 1) (load r))
+              (if (icmp-eq (load cnt) 1)
+                  (do (store! (field r p) (load first)) (store! (field r status) 0) (load r))
+                  (do (store! (field r status) 2) (load r))))))))
+(defstruct FindSum [(p (ptr SumDef)) (status i64)])
+(defn find-sum-flex [(cx (ptr CtCtx)) (tname (slice u8))] (-> FindSum)
+  (let [r (alloc-stack FindSum)
+        exact (ct-sum-find cx tname)]
+    (if (icmp-ne (cast i64 exact) 0)
+        (do (store! (field r p) exact) (store! (field r status) 0) (load r))
+        (let [lst (load (field cx sums))
+              n (al-len [SumDef] (load lst))
+              (mut i) 0
+              (mut cnt) 0
+              (mut first) (cast (ptr SumDef) 0)]
+          (loop (if (icmp-ge (load i) n)
+                    (break)
+                    (do
+                      (let [sp (al-elem [SumDef] lst (load i))]
+                        (when (str-eq (after-last-dot (load (field sp name))) tname)
+                              (when (icmp-eq (load cnt) 0) (store! first sp) 0)
+                              (store! cnt (iadd (load cnt) 1))))
+                      (store! i (iadd (load i) 1)))))
+          (if (icmp-eq (load cnt) 0)
+              (do (store! (field r status) 1) (load r))
+              (if (icmp-eq (load cnt) 1)
+                  (do (store! (field r p) (load first)) (store! (field r status) 0) (load r))
+                  (do (store! (field r status) 2) (load r))))))))
+(defstruct FindTr [(p (ptr TraitDef)) (status i64)])
+(defn find-trait-flex [(cx (ptr CtCtx)) (tname (slice u8))] (-> FindTr)
+  (let [r (alloc-stack FindTr)
+        exact (ct-trait-find cx tname)]
+    (if (icmp-ne (cast i64 exact) 0)
+        (do (store! (field r p) exact) (store! (field r status) 0) (load r))
+        (let [lst (load (field cx traits))
+              n (al-len [TraitDef] (load lst))
+              (mut i) 0
+              (mut cnt) 0
+              (mut first) (cast (ptr TraitDef) 0)]
+          (loop (if (icmp-ge (load i) n)
+                    (break)
+                    (do
+                      (let [sp (al-elem [TraitDef] lst (load i))]
+                        (when (str-eq (after-last-dot (load (field sp name))) tname)
+                              (when (icmp-eq (load cnt) 0) (store! first sp) 0)
+                              (store! cnt (iadd (load cnt) 1))))
+                      (store! i (iadd (load i) 1)))))
+          (if (icmp-eq (load cnt) 0)
+              (do (store! (field r status) 1) (load r))
+              (if (icmp-eq (load cnt) 1)
+                  (do (store! (field r p) (load first)) (store! (field r status) 0) (load r))
+                  (do (store! (field r status) 2) (load r))))))))
+(defstruct FindVS [(name (slice u8)) (status i64)])
+(defn sum-has-variant [(sd (ptr SumDef)) (want (slice u8))] (-> bool)
+  (let [vs (load (field sd variants))
+        n (al-len [Variant] (load vs))
+        (mut i) 0
+        (mut r) false]
+    (loop (if (or (load r) (icmp-ge (load i) n))
+              (break)
+              (do
+                (when (str-eq (after-last-dot (load (field (al-elem [Variant] vs (load i)) name))) want)
+                      (store! r true)
+                      0)
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn find-variant-sum [(cx (ptr CtCtx)) (want (slice u8))] (-> FindVS)
+  (let [r (alloc-stack FindVS)
+        lst (load (field cx sums))
+        n (al-len [SumDef] (load lst))
+        (mut i) 0
+        (mut cnt) 0
+        (mut first) ""]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [sp (al-elem [SumDef] lst (load i))]
+                  (when (sum-has-variant sp want)
+                        (when (icmp-eq (load cnt) 0) (store! first (load (field sp name))) 0)
+                        (store! cnt (iadd (load cnt) 1))))
+                (store! i (iadd (load i) 1)))))
+    (if (icmp-eq (load cnt) 0)
+        (do (store! (field r status) 1) (load r))
+        (if (icmp-eq (load cnt) 1)
+            (do (store! (field r name) (load first)) (store! (field r status) 0) (load r))
+            (do (store! (field r status) 2) (load r))))))
+(defn cv-get [(args (ptr (ArrayList CtVal))) (i i64)] (-> (Option CtVal))
+  (if (or (icmp-lt i 0) (icmp-ge i (al-len [CtVal] (load args)))) (None [CtVal]) (Some (al-get [CtVal] (load args) i))))
+(defn code-symname [(args (ptr (ArrayList CtVal)))] (-> (slice u8))
+  ; first arg as a Code symbol name (for code-field-*/code-variant-*/code-trait-*).
+  (match (cv-get args 0)
+    (Some [v] (if (is-ccode v) (let [c (ccode-of v)] (if (icmp-eq (sx-tag c) 2) (sx-sval c) "")) ""))
+    (None [] "")))
+(defn append-bytes! [(buf (mut (ArrayList u8))) (s (slice u8))] (-> i64)
+  (let [n (slice-len s)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (al-push! (mut buf) (slice-get s (load i))) (store! i (iadd (load i) 1))))))
+  0)
+(defn cop-concat-finish [(op i64) (name (slice u8)) (errf (Option Diag))] (-> (Result CtVal Diag))
+  (match errf
+    (Some [d] (Err [CtVal Diag] d))
+    (None [] (Ok [CtVal Diag] (if (icmp-eq op 12) (CCode (sx-sym name)) (CStr name))))))
+; A type reference in Code — a bare type symbol `Point`, or a generic instantiation
+; `(Gen A B)` — mangled to ONE valid symbol so a macro can mint a name for a derived
+; helper over a generic instance (the same shape `code-field-count` accepts). Mirrors
+; the monomorphizer's naming scheme: base, then `__` and each argument's own mangle;
+; an int (an array size) is its decimal digits. Deterministic, valid symbol characters
+; only. Returns "" for a shape that is not a nameable type — the caller errors.
+(defn inst-node-mangle [(a (ptr Allocator)) (node Sexp)] (-> (slice u8))
+  (let [tg (sx-tag node)]
+    (cond (or (icmp-eq tg 2) (icmp-eq tg 4)) (sx-sval node)
+          (icmp-eq tg 0) (dec->str a (sx-ival node))
+          (or (icmp-eq tg 6) (icmp-eq tg 7))
+            (let [items (sx-items node)
+                  n (sx-len items)]
+              (if (or (icmp-eq n 0) (icmp-ne (sx-tag (sx-at items 0)) 2))
+                  ""
+                  (let [(mut s) (sx-sval (sx-at items 0))
+                        (mut i) 1]
+                    (loop (if (icmp-ge (load i) n)
+                              (break)
+                              (let [part (inst-node-mangle a (sx-at items (load i)))]
+                                (if (str-eq part "")
+                                    (do (store! s "") (break))
+                                    (do
+                                      (store! s (sconcat a (load s) (sconcat a "__" part)))
+                                      (store! i (iadd (load i) 1)))))))
+                    (load s))))
+          :else "")))
+(defn concat-one! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (v CtVal) (tg i64)] (-> (Option Diag))
+  (cond (icmp-eq tg 3) (do (append-bytes! (mut buf) (cstr-of v)) (None [Diag]))
+        (icmp-eq tg 0) (do (append-bytes! (mut buf) (dec->str a (cint-of v))) (None [Diag]))
+        (icmp-eq tg 4)
+          (let [c (ccode-of v)
+                ctg (sx-tag c)]
+            (cond (or (icmp-eq ctg 2) (icmp-eq ctg 4)) (do (append-bytes! (mut buf) (sx-sval c)) (None [Diag]))
+                  (icmp-eq ctg 0) (do (append-bytes! (mut buf) (dec->str a (sx-ival c))) (None [Diag]))
+                  (or (icmp-eq ctg 6) (icmp-eq ctg 7))
+                    (let [m (inst-node-mangle a c)]
+                      (if (str-eq m "")
+                          (Some (derr "comptime: code-symbol/str part is not a nameable type (expected a symbol, string, int, or instantiation (Gen …))"))
+                          (do (append-bytes! (mut buf) m) (None [Diag]))))
+                  :else (Some (derr "comptime: code-symbol/str part must be a symbol/string/int"))))
+        :else (Some (derr "comptime: code-symbol/str part must be a string/int/code"))))
+(defn concat-into! [(args (ptr (ArrayList CtVal))) (i i64) (n i64) (a (ptr Allocator)) (buf (mut (ArrayList u8)))] (-> (Option Diag))
+  (if (icmp-ge i n)
+      (None [Diag])
+      (let [v (al-get [CtVal] (load args) i)]
+        (match (concat-one! a (mut buf) v (ct-tag v))
+          (Some [d] (Some d))
+          (None [] (concat-into! args (iadd i 1) n a (mut buf)))))))
+(defn cop-concat [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))
+        (mut buf) (al-new [u8] a)
+        e (concat-into! args 0 (al-len [CtVal] (load args)) a (mut buf))]
+    (cop-concat-finish op (al-slice [u8] (load buf)) e)))
+; substitute type-parameter symbols in a type Code tree with the given arg forms:
+; `(ptr T)` with T->i64 becomes `(ptr i64)`. The engine of GENERIC REFLECTION —
+; `code-field-type` on an instantiation `(Gen A B)` reports concrete field types.
+(defn subst-type-code [(node Sexp) (params (ptr (ArrayList (slice u8)))) (targs (ptr (ArrayList Sexp)))] (-> Sexp)
+  (let [tg (sx-tag node)]
+    (if (icmp-eq tg 2)
+        (let [nm (sx-sval node)
+              np (al-len [(slice u8)] (load params))
+              nt (al-len [Sexp] (load targs))
+              (mut idx) -1
+              (mut i) 0]
+          (loop (if (or (icmp-ge (load idx) 0) (icmp-ge (load i) np))
+                    (break)
+                    (do
+                      (when (and (str-eq (al-get [(slice u8)] (load params) (load i)) nm) (icmp-lt (load i) nt))
+                            (store! idx (load i)))
+                      (store! i (iadd (load i) 1)))))
+          (if (icmp-ge (load idx) 0) (al-get [Sexp] (load targs) (load idx)) node))
+        (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+            (let [a (malloc-allocator)
+                  items (sx-items node)
+                  n (sx-len items)
+                  (mut xs) (al-new [Sexp] a)
+                  (mut i) 0]
+              (loop (if (icmp-ge (load i) n)
+                        (break)
+                        (do
+                          (al-push! (mut xs) (subst-type-code (sx-at items (load i)) params targs))
+                          (store! i (iadd (load i) 1)))))
+              (mk-sexp (if (icmp-eq tg 7) (KVec (box-al [Sexp] a (load xs))) (KList (box-al [Sexp] a (load xs)))) -1 -1))
+            node))))
+; arg0 of a reflection op: a bare type symbol `Node` OR an instantiation `(Gen A B)`.
+; Returns the base name; fills `targs` with the type-argument forms (empty if none).
+(defn refl-type-inst [(args (ptr (ArrayList CtVal))) (targs (ptr (ArrayList Sexp)))] (-> (slice u8))
+  (match (cv-get args 0)
+    (None [] "")
+    (Some [v]
+          (if (not (is-ccode v))
+              ""
+              (let [node (ccode-of v)
+                    tg (sx-tag node)]
+                (if (and (or (icmp-eq tg 6) (icmp-eq tg 7))
+                         (and (icmp-ge (sx-len (sx-items node)) 1) (icmp-eq (sx-tag (sx-at (sx-items node) 0)) 2)))
+                    (let [items (sx-items node)
+                          n (sx-len items)
+                          (mut i) 1]
+                      (loop (if (icmp-ge (load i) n)
+                                (break)
+                                (do (al-push! [Sexp] targs (sx-at items (load i))) (store! i (iadd (load i) 1)))))
+                      (sx-sval (sx-at items 0)))
+                    (if (icmp-eq tg 2) (sx-sval node) "")))))))
+(defn cop-field [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))
+        targs (box-al [Sexp] a (al-new [Sexp] a))
+        tname (refl-type-inst args targs)]
+    (if (str-eq tname "")
+        (Err [CtVal Diag] (derr "comptime: code-field-* expects a type symbol or instantiation (Gen …)"))
+        (let [fsp (alloc-stack FindS)]
+          (store! fsp (find-struct-flex cx tname))
+          (if (icmp-eq (load (field fsp status)) 1)
+              (Err [CtVal Diag]
+                   (derr (sconcat3 a
+                                   "comptime: '"
+                                   tname
+                                   "' is not a struct (field reflection needs a struct; sums unsupported)")))
+              (if (icmp-eq (load (field fsp status)) 2)
+                  (Err [CtVal Diag]
+                       (derr (sconcat3 a
+                                       "comptime: ambiguous type '"
+                                       tname
+                                       "' — multiple modules define it; field reflection can't disambiguate (qualify the type)")))
+                  (let [sd (load (field fsp p))]
+                    (if (icmp-eq op 14)
+                        (Ok [CtVal Diag] (CInt (al-len [Field] (load (field sd fields)))))
+                        (match (cv-get args 1)
+                          (None [] (Err [CtVal Diag] (derr "comptime: code-field-* index must be an integer")))
+                          (Some [iv]
+                                (if (icmp-ne (ct-tag iv) 0)
+                                    (Err [CtVal Diag] (derr "comptime: code-field-* index must be an integer"))
+                                    (let [i (cint-of iv)
+                                          flds (load (field sd fields))
+                                          nf (al-len [Field] (load flds))]
+                                      (if (or (icmp-lt i 0) (icmp-ge i nf))
+                                          (Err [CtVal Diag]
+                                               (derr (sconcat3 a
+                                                               "comptime: field index "
+                                                               (dec->str a i)
+                                                               " out of range")))
+                                          (let [fp (al-elem [Field] flds i)
+                                                fname (load (field fp name))
+                                                ftyp (field fp ty)
+                                                hasargs (icmp-gt (al-len [Sexp] (load targs)) 0)]
+                                            (cond (icmp-eq op 15) (Ok [CtVal Diag] (CCode (sx-sym fname)))
+                                                  (icmp-eq op 16)  ; kind: substituted when an instantiation was given, else EXACTLY as before
+                                                    (if (not hasargs)
+                                                        (Ok [CtVal Diag] (CInt (type-kind-tag (load ftyp) cx)))
+                                                        (match (parse-type a
+                                                                           (subst-type-code (type->code ftyp)
+                                                                                            (load (field sd type_params))
+                                                                                            targs))
+                                                          (Ok [st] (Ok [CtVal Diag] (CInt (type-kind-tag st cx))))
+                                                          (Err [d]
+                                                               (Ok [CtVal Diag] (CInt (type-kind-tag (load ftyp) cx))))))
+                                                  ; type: structured & substituted for a generic instantiation,
+                                                  ; else the historical bare-name symbol (byte-identical to before)
+                                                  hasargs
+                                                    (Ok [CtVal Diag]
+                                                        (CCode (subst-type-code (type->code ftyp)
+                                                                                (load (field sd type_params))
+                                                                                targs)))
+                                                  :else (Ok [CtVal Diag] (CCode (sx-sym (type-name-str a ftyp)))))))))))))))))))
+(defn cop-variant [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))
+        arg (code-symname args)]
+    (if (str-eq arg "")
+        (Err [CtVal Diag] (derr "comptime: code-variant-* expects a symbol"))
+        (if (icmp-eq op 18)
+            (let [vsp (alloc-stack FindVS)]
+              (store! vsp (find-variant-sum cx (after-last-dot arg)))
+              (if (icmp-eq (load (field vsp status)) 1)
+                  (Err [CtVal Diag] (derr (sconcat3 a "comptime: '" arg "' is not a known variant")))
+                  (if (icmp-eq (load (field vsp status)) 2)
+                      (Err [CtVal Diag]
+                           (derr (sconcat3 a
+                                           "comptime: ambiguous variant '"
+                                           arg
+                                           "' — declared in multiple sums; reflection can't disambiguate")))
+                      (Ok [CtVal Diag] (CCode (sx-sym (load (field vsp name))))))))
+            (let [fsp (alloc-stack FindSum)]
+              (store! fsp (find-sum-flex cx arg))
+              (if (icmp-eq (load (field fsp status)) 1)
+                  (Err [CtVal Diag] (derr (sconcat3 a "comptime: '" arg "' is not a known sum")))
+                  (if (icmp-eq (load (field fsp status)) 2)
+                      (Err [CtVal Diag]
+                           (derr (sconcat3 a
+                                           "comptime: ambiguous sum '"
+                                           arg
+                                           "' — multiple modules define it; reflection can't disambiguate (qualify it)")))
+                      (let [sd (load (field fsp p))]
+                        (if (icmp-eq op 19)
+                            (Ok [CtVal Diag] (CInt (al-len [Variant] (load (field sd variants)))))
+                            (match (cv-get args 1)
+                              (None [] (Err [CtVal Diag] (derr "comptime: code-variant-* index must be an integer")))
+                              (Some [iv]
+                                    (if (icmp-ne (ct-tag iv) 0)
+                                        (Err [CtVal Diag] (derr "comptime: code-variant-* index must be an integer"))
+                                        (let [i (cint-of iv)
+                                              vs (load (field sd variants))
+                                              nv (al-len [Variant] (load vs))]
+                                          (if (or (icmp-lt i 0) (icmp-ge i nv))
+                                              (Err [CtVal Diag]
+                                                   (derr (sconcat3 a
+                                                                   "comptime: variant index "
+                                                                   (dec->str a i)
+                                                                   " out of range")))
+                                              (let [vp (al-elem [Variant] vs i)]
+                                                (if (icmp-eq op 20)
+                                                    (Ok [CtVal Diag]
+                                                        (CCode (sx-sym (after-last-dot (load (field vp name))))))
+                                                    (Ok [CtVal Diag] (CInt (al-len [Field] (load (field vp fields)))))))))))))))))))))
+(defn cop-trait [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))
+        tname (code-symname args)]
+    (if (str-eq tname "")
+        (Err [CtVal Diag] (derr "comptime: code-trait-* expects a trait symbol"))
+        (let [ftp (alloc-stack FindTr)]
+          (store! ftp (find-trait-flex cx tname))
+          (if (icmp-eq (load (field ftp status)) 1)
+              (Err [CtVal Diag] (derr (sconcat3 a "comptime: '" tname "' is not a known trait")))
+              (if (icmp-eq (load (field ftp status)) 2)
+                  (Err [CtVal Diag]
+                       (derr (sconcat3 a
+                                       "comptime: ambiguous trait '"
+                                       tname
+                                       "' — multiple modules define it; reflection can't disambiguate (qualify it)")))
+                  (let [td (load (field ftp p))]
+                    (if (icmp-eq op 22)
+                        (Ok [CtVal Diag] (CInt (al-len [TraitMethod] (load (field td methods)))))
+                        (match (cv-get args 1)
+                          (None [] (Err [CtVal Diag] (derr "comptime: code-trait-* method index must be an integer")))
+                          (Some [mv]
+                                (if (icmp-ne (ct-tag mv) 0)
+                                    (Err [CtVal Diag] (derr "comptime: code-trait-* method index must be an integer"))
+                                    (let [mi (cint-of mv)
+                                          ms (load (field td methods))
+                                          nm (al-len [TraitMethod] (load ms))]
+                                      (if (or (icmp-lt mi 0) (icmp-ge mi nm))
+                                          (Err [CtVal Diag]
+                                               (derr (sconcat3 a
+                                                               "comptime: trait method index "
+                                                               (dec->str a mi)
+                                                               " out of range")))
+                                          (let [m (al-elem [TraitMethod] ms mi)]
+                                            (cop-trait-method op args m cx)))))))))))))))
+(defn cop-trait-method [(op i64) (args (ptr (ArrayList CtVal))) (m (ptr TraitMethod)) (cx (ptr CtCtx))] (-> (Result CtVal
+                                                                                                                    Diag))
+  (let [a (load (field cx a))]
+    (cond (icmp-eq op 23) (Ok [CtVal Diag] (CCode (sx-sym (load (field m name)))))
+          (icmp-eq op 24) (Ok [CtVal Diag] (CInt (al-len [Param] (load (field m params)))))
+          (icmp-eq op 27) (Ok [CtVal Diag] (CCode (type->code (field m ret))))
+          :else
+            (match (cv-get args 2)
+              (None []
+                    (Err [CtVal Diag] (derr "comptime: code-trait-param-* needs a method index and a param index")))
+              (Some [pv]
+                    (if (icmp-ne (ct-tag pv) 0)
+                        (Err [CtVal Diag]
+                             (derr "comptime: code-trait-param-* needs a method index and a param index"))
+                        (let [pj (cint-of pv)
+                              ps (load (field m params))
+                              np (al-len [Param] (load ps))]
+                          (if (or (icmp-lt pj 0) (icmp-ge pj np))
+                              (Err [CtVal Diag]
+                                   (derr (sconcat3 a "comptime: trait param index " (dec->str a pj) " out of range")))
+                              (let [p (al-elem [Param] ps pj)]
+                                (if (icmp-eq op 25)
+                                    (Ok [CtVal Diag] (CCode (sx-sym (load (field p name)))))
+                                    (Ok [CtVal Diag] (CCode (type->code (field p ty))))))))))))))
+(defn cop-strbytes [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (match (cv-get args 0)
+      (None [] (Err [CtVal Diag] (derr "comptime: str-bytes expects a string")))
+      (Some [v]
+            (let [ok (or (is-cstr v) (and (is-ccode v) (icmp-eq (sx-tag (ccode-of v)) 4)))]
+              (if (not ok)
+                  (Err [CtVal Diag] (derr "comptime: str-bytes expects a string"))
+                  (let [s (if (is-cstr v) (cstr-of v) (sx-sval (ccode-of v)))
+                        n (slice-len s)
+                        (mut xs) (al-new [Sexp] a)
+                        (mut i) 0]
+                    (loop (if (icmp-ge (load i) n)
+                              (break)
+                              (do
+                                (al-push! (mut xs) (sx-mkint (cast i64 (slice-get s (load i)))))
+                                (store! i (iadd (load i) 1)))))
+                    (Ok [CtVal Diag] (CCode (sx-mklist (box-al [Sexp] a (load xs))))))))))))
+(defn cop-bytestostr [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (match (cv-get args 0)
+      (None [] (Err [CtVal Diag] (derr "comptime: bytes->str expects a list")))
+      (Some [v]
+            (let [islist (and (is-ccode v) (let [tg (sx-tag (ccode-of v))] (or (icmp-eq tg 6) (icmp-eq tg 7))))]
+              (if (not islist)
+                  (Err [CtVal Diag] (derr "comptime: bytes->str expects a list"))
+                  (let [items (sx-items (ccode-of v))
+                        n (sx-len items)
+                        (mut buf) (al-new [u8] a)
+                        (mut errf) (None [Diag])
+                        (mut i) 0]
+                    (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n))
+                              (break)
+                              (do
+                                (let [it (sx-at items (load i))]
+                                  (if (icmp-eq (sx-tag it) 0)
+                                      (do (al-push! (mut buf) (cast u8 (sx-ival it))) 0)
+                                      (do (store! errf (Some (derr "comptime: bytes->str list must be all ints"))) 0)))
+                                (store! i (iadd (load i) 1)))))
+                    (match (load errf)
+                      (Some [d] (Err [CtVal Diag] d))
+                      (None [] (Ok [CtVal Diag] (CCode (sx-mkstr (al-slice [u8] (load buf))))))))))))))
+; op 38 — int->str: an integer (or int Code) to its decimal (slice u8), so name
+; generation from a counter/index is a one-liner instead of round-tripping bytes->str.
+(defn cop-inttostr [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (match (cv-get args 0)
+      (None [] (Err [CtVal Diag] (derr "comptime: int->str expects an integer")))
+      (Some [v]
+            (if (icmp-eq (ct-tag v) 0)
+                (Ok [CtVal Diag] (CStr (i64->str a (cint-of v))))
+                (if (and (is-ccode v) (icmp-eq (sx-tag (ccode-of v)) 0))
+                    (Ok [CtVal Diag] (CStr (i64->str a (sx-ival (ccode-of v)))))
+                    (Err [CtVal Diag] (derr "comptime: int->str expects an integer"))))))))
+(defn cop-codearg [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (match (cv-get args 0)
+      (None [] (Err [CtVal Diag] (derr "comptime: code op expects a Code value")))
+      (Some [v0]
+            (if (not (is-ccode v0))
+                (Err [CtVal Diag] (derr "comptime: code op expects a Code value"))
+                (let [code (ccode-of v0)
+                      tg (sx-tag code)]
+                  (cond (icmp-eq op 0) (Ok [CtVal Diag] (CBool (or (icmp-eq tg 6) (icmp-eq tg 7))))
+                        (icmp-eq op 1) (Ok [CtVal Diag] (CBool (icmp-eq tg 2)))
+                        (icmp-eq op 2) (Ok [CtVal Diag] (CBool (icmp-eq tg 0)))
+                        (icmp-eq op 11) (Ok [CtVal Diag] (CBool (icmp-eq tg 3)))
+                        (icmp-eq op 3)
+                          (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+                              (Ok [CtVal Diag] (CInt (sx-len (sx-items code))))
+                              (Err [CtVal Diag] (derr "comptime: code-count expects a list/vector")))
+                        (icmp-eq op 5)
+                          (if (icmp-eq tg 2)
+                              (Ok [CtVal Diag] (CStr (sx-sval code)))
+                              (Err [CtVal Diag] (derr "comptime: code-sym expects a symbol")))
+                        (icmp-eq op 6)
+                          (if (icmp-eq tg 0)
+                              (Ok [CtVal Diag] (CInt (sx-ival code)))
+                              (Err [CtVal Diag] (derr "comptime: code-int expects an integer")))
+                        (icmp-eq op 7)
+                          (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+                              (let [items (sx-items code)
+                                    n (sx-len items)
+                                    (mut xs) (al-new [Sexp] a)
+                                    (mut i) 1]
+                                (loop (if (icmp-ge (load i) n)
+                                          (break)
+                                          (do
+                                            (al-push! (mut xs) (sx-at items (load i)))
+                                            (store! i (iadd (load i) 1)))))
+                                (Ok [CtVal Diag]
+                                    (CCode (sx-mklist (box-al [Sexp] a (load xs))))))
+                              (Err [CtVal Diag] (derr "comptime: code-rest expects a list")))
+                        (icmp-eq op 4)
+                          (match (cv-get args 1)
+                            (None []
+                                  (Err [CtVal Diag]
+                                       (derr "comptime: code-nth index must be an integer")))
+                            (Some [iv]
+                                  (if (icmp-ne (ct-tag iv) 0)
+                                      (Err [CtVal Diag]
+                                           (derr "comptime: code-nth index must be an integer"))
+                                      (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+                                          (let [items (sx-items code)
+                                                i (cint-of iv)]
+                                            (if (or (icmp-lt i 0)
+                                                    (icmp-ge i (sx-len items)))
+                                                (Err [CtVal Diag]
+                                                     (derr (sconcat3 a
+                                                                     "comptime: code-nth index "
+                                                                     (dec->str a i)
+                                                                     " out of range")))
+                                                (Ok [CtVal Diag] (CCode (sx-at items i)))))
+                                          (Err [CtVal Diag]
+                                               (derr "comptime: code-nth expects a list/vector"))))))
+                        :else
+                          (match (cv-get args 1)
+                            (None []
+                                  (Err [CtVal Diag]
+                                       (derr "comptime: code-eq expects two Code values")))
+                            (Some [v1]
+                                  (if (not (is-ccode v1))
+                                      (Err [CtVal Diag]
+                                           (derr "comptime: code-eq expects two Code values"))
+                                      (Ok [CtVal Diag] (CBool (sexp-eq code (ccode-of v1))))))))))))))
+(defn code-op [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  ; The structural ops a metaprogram actually spends its life on — code-list? (0),
+  ; code-sym? (1), code-int? (2), code-count (3), code-nth (4), code-sym (5),
+  ; code-int (6), code-rest (7), code-keyword? (11) — are handled by cop-codearg,
+  ; which is this chain's FALLTHROUGH. Without this guard they pay every icmp below
+  ; before reaching it. None of them is matched by any test in the chain, so routing
+  ; them straight there is exactly the same dispatch, minus the search.
+  (if (or (icmp-le op 7) (icmp-eq op 11))
+      (cop-codearg op args cx)
+      (let [a (load (field cx a))]
+        (cond (icmp-eq op 8) (Ok [CtVal Diag] (CCode (sx-sym (sconcat a "$g" (dec->str a (next-gensym))))))
+              (icmp-eq op 30) (Ok [CtVal Diag] (CCode (sx-sym (target-arch-str))))
+              (icmp-eq op 46) (Ok [CtVal Diag] (CCode (sx-sym (target-os-str))))
+              (icmp-eq op 39) (Ok [CtVal Diag] (CBool (debug-checks-on?)))
+              (icmp-eq op 9)
+                (match (cv-get args 0)
+                  (Some [v]
+                        (if (is-cstr v)
+                            (Err [CtVal Diag] (derr (cstr-of v)))
+                            (Err [CtVal Diag] (derr "error: message must be a string"))))
+                  (None [] (Err [CtVal Diag] (derr "error: message must be a string"))))
+              (icmp-eq op 31)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (match (cv-get args 1)
+                              (Some [msgv]
+                                    (if (is-cstr msgv)
+                                        (let [node (ccode-of nodev)
+                                              d (alloc-stack Diag)]
+                                          (store! (field d lo) (sx-lo node))
+                                          (store! (field d hi) (sx-hi node))
+                                          (store! (field d msg) (sconcat a "error: " (cstr-of msgv)))
+                                          (store! (field d source) (sx-source node))
+                                          (store! (field d ctxt) 0)
+                                          (warn-push (load d))
+                                          (diag-err-bump)
+                                          (Ok [CtVal Diag] (CInt 0)))
+                                        (Err [CtVal Diag] (derr "report: message must be a string"))))
+                              (None [] (Err [CtVal Diag] (derr "report: expects (report NODE MSG)"))))
+                            (Err [CtVal Diag] (derr "report: first arg must be a Code node"))))
+                  (None [] (Err [CtVal Diag] (derr "report: expects (report NODE MSG)"))))
+              (or (icmp-eq op 32) (icmp-eq op 44)) (cop-warn-or-suggest a op args)
+              (icmp-eq op 33)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CStr (code-file-of (ccode-of nodev))))
+                            (Err [CtVal Diag] (derr "code-file: expects a Code node"))))
+                  (None [] (Err [CtVal Diag] (derr "code-file: expects (code-file NODE)"))))
+              (icmp-eq op 40)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CInt (code-line-of (ccode-of nodev))))
+                            (Err [CtVal Diag] (derr "code-line: expects a Code node"))))
+                  (None [] (Err [CtVal Diag] (derr "code-line: expects (code-line NODE)"))))
+              (icmp-eq op 41)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CStr (code-src-of (ccode-of nodev))))
+                            (Err [CtVal Diag] (derr "code-src: expects a Code node"))))
+                  (None [] (Err [CtVal Diag] (derr "code-src: expects (code-src NODE)"))))
+              (icmp-eq op 42)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CInt (code-col-of (ccode-of nodev))))
+                            (Err [CtVal Diag] (derr "code-col: expects a Code node"))))
+                  (None []
+                        (Err [CtVal Diag] (derr "code-col: expects (code-col NODE)"))))
+              (icmp-eq op 43)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CStr (code-doc-of (ccode-of nodev))))
+                            (Err [CtVal Diag]
+                                 (derr "code-doc: expects a Code node"))))
+                  (None []
+                        (Err [CtVal Diag]
+                             (derr "code-doc: expects (code-doc NODE)"))))
+              (or (icmp-eq op 34) (icmp-eq op 45))
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag]
+                                (CBool (if (icmp-eq op 45)
+                                           (icmp-ne (sx-ctxt (ccode-of nodev))
+                                                    0)
+                                           (code-from-user-node? (ccode-of nodev)))))
+                            (Err [CtVal Diag]
+                                 (derr "code-from-user?: expects a Code node"))))
+                  (None []
+                        (Err [CtVal Diag]
+                             (derr "code-from-user?: expects (code-from-user? NODE)"))))
+              (or (icmp-eq op 12) (icmp-eq op 13)) (cop-concat op args cx)
+              (or (icmp-eq op 14)
+                  (or (icmp-eq op 15)
+                      (or (icmp-eq op 16) (icmp-eq op 17))))
+                (cop-field op args cx)
+              (or (icmp-eq op 18)
+                  (or (icmp-eq op 19)
+                      (or (icmp-eq op 20) (icmp-eq op 21))))
+                (cop-variant op args cx)
+              (or (icmp-eq op 22)
+                  (or (icmp-eq op 23)
+                      (or (icmp-eq op 24)
+                          (or (icmp-eq op 25)
+                              (or (icmp-eq op 26)
+                                  (icmp-eq op 27))))))
+                (cop-trait op args cx)
+              (icmp-eq op 28) (cop-strbytes args cx)
+              (icmp-eq op 29) (cop-bytestostr args cx)
+              (icmp-eq op 38) (cop-inttostr args cx)
+              (icmp-eq op 35) (cop-decl args cx)
+              (icmp-eq op 36) (cop-type-of args cx)
+              (icmp-eq op 37) (cop-binding-of args cx)
+              :else (cop-codearg op args cx)))))
+; module-fns-has is asked once per QUASIQUOTE HEAD a metaprogram builds
+; (metahost.mh-qualify-head! -> resolve-in-module), against every defn name in the
+; whole program. As a linear str-eq scan that is O(program) per template list, which
+; on the compiler's own source is the single hottest thing in the metaprogram path.
+; Index it into a set instead.
+;
+; The index is valid only for the exact `module_fns` list it was built from, and two
+; things together make that airtight. It records the list POINTER and rebuilds if the
+; caller's cx names a different one, which covers two lists being alive at once (the
+; macro tower and the transform driver each build their own). And it is INVALIDATED
+; inside all-defn-names, the one and only place a module_fns list is ever born, which
+; covers the case a pointer check alone could not: the allocator handing a fresh list
+; the address of a dead one. A stale hit here would silently resolve a name to the
+; wrong module, so neither guard is optional.
+(defstruct ModFnsIdx [(src (ptr (ArrayList (slice u8)))) (built i64) (m (HashMap (slice u8) i64))])
+(defn mod-fns-idx [] (-> (ptr ModFnsIdx))
+  (alloc-static ModFnsIdx))
+(defn module-fns-index-reset! [] (-> i64)
+  (let [ix (mod-fns-idx)] (store! (field ix built) 0) (store! (field ix src) (cast (ptr (ArrayList (slice u8))) 0)) 0))
+(defn module-fns-index-build! [(ix (ptr ModFnsIdx)) (lst (ptr (ArrayList (slice u8))))] (-> i64)
+  (let [a (malloc-allocator)
+        n (al-len [(slice u8)] (load lst))
+        (mut i) 0]
+    (store! (field ix m) (hm-new [(slice u8) i64] a (str-keyops)))
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (hm-put! [(slice u8) i64] (mut (field ix m)) (al-get [(slice u8)] (load lst) (load i)) (load i))
+                (store! i (iadd (load i) 1)))))
+    (store! (field ix src) lst)
+    (store! (field ix built) 1)
+    0))
+(defn module-fns-has [(cx (ptr CtCtx)) (q (slice u8))] (-> bool)
+  (let [lst (load (field cx module_fns))
+        ix (mod-fns-idx)]
+    (if (icmp-eq (cast i64 lst) 0)
+        false
+        (do
+          (when (or (icmp-eq (load (field ix built)) 0)
+                    (icmp-ne (cast i64 (load (field ix src))) (cast i64 lst)))
+                (module-fns-index-build! ix lst))
+          (match (hm-get [(slice u8) i64] (load (field ix m)) q)
+            (Some [_] true)
+            (None [] false))))))
+(defn resolve-in-module [(cx (ptr CtCtx)) (name (slice u8)) (m (slice u8))] (-> (Option (slice u8)))
+  (let [a (load (field cx a))
+        own (sconcat3 a m "." name)]
+    (if (module-fns-has cx own)
+        (Some own)
+        (let [imp (load (field cx qimports))]
+          (if (icmp-eq (cast i64 imp) 0)
+              (None [(slice u8)])
+              (let [uses (field imp uses)
+                    n (al-len [Use] (load uses))
+                    (mut i) 0
+                    (mut r) (None [(slice u8)])]
+                (loop (if (icmp-ge (load i) n)
+                          (break)
+                          (do
+                            (let [up (alloc-stack Use)]
+                              (store! up (al-get [Use] (load uses) (load i)))
+                              (let [target (load (field up target))
+                                    used
+                                      (match (load (field up spec))
+                                        (UAll [] true)
+                                        (UNames [names] (set-contains names name)))
+                                    exported (exports-check (load (field cx qexports)) target name)]
+                                (when (and used exported)
+                                      (let [q (sconcat3 a target "." name)]
+                                        (when (module-fns-has cx q) (store! r (Some q)) (break))))))
+                            (store! i (iadd (load i) 1)))))
+                (load r)))))))
+(defn quasi-head-is-lit-sym [(items (ptr (ArrayList Quasi)))] (-> bool)
+  (if (icmp-eq (al-len [Quasi] (load items)) 0)
+      false
+      (match-else (al-get [Quasi] (load items) 0)
+                  (QLit [fp] (icmp-eq (sx-tag (load fp)) 2))
+                  (_ false))))
+(defn qualify-head [(out (ptr (ArrayList Sexp))) (items (ptr (ArrayList Quasi))) (cx (ptr CtCtx))] (-> i64)
+  (unless (or (not (quasi-head-is-lit-sym items)) (icmp-eq (al-len [Sexp] (load out)) 0))
+          (match (load (field cx qmodule))
+            (None [] 0)
+            (Some [m]
+                  (unless (icmp-eq (cast i64 (load (field cx module_fns))) 0)
+                          (let [hp (al-elem [Sexp] out 0)]
+                            (unless (icmp-ne (sx-tag (load hp)) 2)
+                                    (let [name (sx-sval (load hp))]
+                                      (unless (or (has-dot name) (icmp-ge (find-slash name) 0))
+                                              (match (resolve-in-module cx name m)
+                                                (None [] 0)
+                                                (Some [q] (do (store! (field hp kind) (KSym q)) 0))))))))))))
+(defn type-is-code [(t (ptr Type))] (-> bool)
+  (match-else (load t) (TCode [] true) (_ false)))
+(defn cc-push! [(out (ptr SBox)) (names (ptr (ArrayList (slice u8)))) (func (slice u8))] (-> i64)
+  (when (set-contains names func) (al-push! (mut (field out items)) func) 0))
+(defn cc-list [(es (ptr (ArrayList Expr))) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
+  (let [n (al-len [Expr] (load es))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (collect-calls (al-elem [Expr] es (load i)) names out) (store! i (iadd (load i) 1))))))
+  0)
+(defn cc-opt [(o (Option (ptr Expr))) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
+  (match o (Some [e] (collect-calls e names out)) (None [] 0)))
+(defn cc-binds [(bs (ptr (ArrayList Bind))) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
+  (let [n (al-len [Bind] (load bs))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (collect-calls (field (al-elem [Bind] bs (load i)) value) names out) (store! i (iadd (load i) 1))))))
+  0)
+(defn cc-arms [(as (ptr (ArrayList Arm))) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
+  (let [n (al-len [Arm] (load as))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (collect-calls (field (al-elem [Arm] as (load i)) body) names out) (store! i (iadd (load i) 1))))))
+  0)
+(defn cc-quasi-list [(items (ptr (ArrayList Quasi))) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
+  (let [n (al-len [Quasi] (load items))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (cc-quasi (al-elem [Quasi] items (load i)) names out) (store! i (iadd (load i) 1))))))
+  0)
+(defn cc-quasi [(q (ptr Quasi)) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
+  (match-else (load q)
+              (QUnquote [e] (collect-calls e names out))
+              (QSplice [e] (collect-calls e names out))
+              (QList [items] (cc-quasi-list items names out))
+              (QVector [items] (cc-quasi-list items names out))
+              (_ 0)))
+(defn collect-calls [(e (ptr Expr)) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
+  (match-else (load (field e kind))
+              (ECall [func ta args] (do (cc-push! out names func) (cc-list args names out)))
+              ; A function reached ONLY through `fnptr-of` is just as reachable as one that is
+              ; called: `malloc-allocator` builds its vtable with (fnptr-of ma-alloc) and never
+              ; calls ma-alloc directly. Missing this leaves the target out of the comptime
+              ; sub-program and checking it fails with "fnptr-of unknown function".
+              (EFnPtrOf [name] (cc-push! out names name))
+              (EBorrow [m place] (collect-calls place names out))
+              (ESpillRef [x] (collect-calls x names out))
+              (ENot [x] (collect-calls x names out))
+              (ELoad [x] (collect-calls x names out))
+              (EFree [x] (collect-calls x names out))
+              (EComptime [x] (collect-calls x names out))
+              (EErase [tn inner] (collect-calls inner names out))
+              (EMakeDyn [ds vs ms inner] (collect-calls inner names out))
+              (EDynDispatch [ds vs mi cc ps r recv args] (do (collect-calls recv names out) (cc-list args names out)))
+              (ECast [ty x] (collect-calls x names out))
+              (EAscribe [ty x] (collect-calls x names out))
+              (EBin [op l r] (do (collect-calls l names out) (collect-calls r names out)))
+              (ECmp [op l r] (do (collect-calls l names out) (collect-calls r names out)))
+              (EIf [c t el] (do (collect-calls c names out) (collect-calls t names out) (collect-calls el names out)))
+              (EDo [es] (cc-list es names out))
+              (ELoop [lbl es] (cc-list es names out))
+              (EBreak [lbl v] (cc-opt v names out))
+              (ELet [bs body] (do (cc-binds bs names out) (cc-list body names out)))
+              (EField [p fn] (collect-calls p names out))
+              (EBitGet [p fn] (collect-calls p names out))
+              (EStore [p v] (do (collect-calls p names out) (collect-calls v names out)))
+              (EIndex [p idx] (do (collect-calls p names out) (collect-calls idx names out)))
+              (EBitSet [p fn v] (do (collect-calls p names out) (collect-calls v names out)))
+              (EConstruct [sm vr args] (cc-list args names out))
+              (ECodeOp [op args] (cc-list args names out))
+              (ETraitCall [tn m stp args] (cc-list args names out))
+              (ELlvmIr [r args body] (cc-list args names out))
+              (ECallPtr [fp args] (do (collect-calls fp names out) (cc-list args names out)))
+              (EMatch [scrut arms] (do (collect-calls scrut names out) (cc-arms arms names out)))
+              (EFieldMeta [meta ty idx] (collect-calls idx names out))
+              (EFieldIndex [ty nm] (collect-calls nm names out))
+              (EQuasi [q] (let [qp (alloc-stack Quasi)] (store! qp q) (cc-quasi qp names out)))
+              (_ 0)))
+(defn prog-fn-names [(p (ptr Program)) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
+  (let [fs (load (field p funcs))
+        n (al-len [Func] (load fs))
+        (mut out) (al-new [(slice u8)] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (al-push! (mut out) (load (field (al-elem [Func] fs (load i)) name))) (store! i (iadd (load i) 1)))))
+    ; Keep method heads in the call-name universe too. They have no ordinary
+    ; Func entry yet, but seeing one in a reachable body tells closure selection
+    ; which structural/primitive impl families can actually dispatch.
+    (let [is (load (field p impls))
+          ni (al-len [ImplDef] (load is))
+          (mut ii) 0]
+      (loop (if (icmp-ge (load ii) ni)
+                (break)
+                (do
+                  (let [ms (load (field (al-elem [ImplDef] is (load ii)) methods))
+                        nm (al-len [Func] (load ms))
+                        (mut mi) 0]
+                    (loop (if (icmp-ge (load mi) nm)
+                              (break)
+                              (do
+                                (let [name (load (field (al-elem [Func] ms (load mi)) name))]
+                                  (unless (set-contains (mut out) name)
+                                          (al-push! (mut out) name)))
+                                (store! mi (iadd (load mi) 1))))))
+                  (store! ii (iadd (load ii) 1))))))
+    (box-al [(slice u8)] a (load out))))
+(defn prog-fn-find [(p (ptr Program)) (name (slice u8))] (-> (ptr Func))
+  (let [fs (load (field p funcs))
+        n (al-len [Func] (load fs))
+        (mut i) 0
+        (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (str-eq (load (field (al-elem [Func] fs (load i)) name)) name)
+                      (store! r (al-elem [Func] fs (load i)))
+                      (break))
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; A macro-engine closure needs impls owned by modules that are actually in that
+; closure, plus structural/primitive impls (whose target has no module). Pulling
+; every application impl into every compiler invocation both exposed bodies to a
+; pre-expansion scope and defeated dead-code reachability.
+(defn closure-module-wanted? [(wanted (ptr (ArrayList (slice u8)))) (m (slice u8))] (-> bool)
+  (if (icmp-eq (slice-len m) 0)
+      true
+      (let [n (al-len [(slice u8)] (load wanted))
+            (mut i) 0
+            (mut found) false]
+        (loop (if (icmp-ge (load i) n)
+                  (break)
+                  (do
+                    (when (str-eq (qual-module-of (al-get [(slice u8)] (load wanted) (load i))) m)
+                          (store! found true)
+                          (break))
+                    (store! i (iadd (load i) 1)))))
+        (load found))))
+(defn closure-impl-wanted? [(a (ptr Allocator)) (wanted (ptr (ArrayList (slice u8)))) (ip (ptr ImplDef))] (-> bool)
+  (let [m (qual-module-of (impl-base-name a (field ip self_type)))
+        ms (load (field ip methods))
+        n (al-len [Func] (load ms))
+        (mut i) 0
+        (mut called) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (set-contains wanted (load (field (al-elem [Func] ms (load i)) name)))
+                      (store! called true)
+                      (break))
+                (store! i (iadd (load i) 1)))))
+    (and (load called) (closure-module-wanted? wanted m))))
+(defn closure-drain! [(p (ptr Program))
+                      (names (ptr (ArrayList (slice u8))))
+                      (stackb (ptr SBox))
+                      (wantedb (ptr SBox))] (-> i64)
+  (loop (if (icmp-eq (al-len [(slice u8)] (load (field stackb items))) 0)
+            (break)
+            (do
+              (let [sl (load (field stackb items))
+                    top (al-len [(slice u8)] sl)
+                    nm (al-get [(slice u8)] sl (isub top 1))]
+                (store! (field (field stackb items) len) (isub top 1))
+                (unless (set-contains (field wantedb items) nm)
+                        (al-push! (mut (field wantedb items)) nm)
+                        (let [f (prog-fn-find p nm)]
+                          (unless (icmp-eq (cast i64 f) 0)
+                                  (cc-list (load (field f body)) names stackb))))))))
+  0)
+(defn closure-funcs [(p (ptr Program)) (seeds (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
+  (let [names (prog-fn-names p a)
+        stackb (unwrap-ptr [SBox] (create [SBox] a))
+        wantedb (unwrap-ptr [SBox] (create [SBox] a))]
+    (store! (field stackb items) (al-new [(slice u8)] a))
+    (store! (field wantedb items) (al-new [(slice u8)] a))
+    (let [ns (al-len [(slice u8)] (load seeds))
+          (mut si) 0]
+      (loop (if (icmp-ge (load si) ns)
+                (break)
+                (do
+                  (al-push! (mut (field stackb items)) (al-get [(slice u8)] (load seeds) (load si)))
+                  (store! si (iadd (load si) 1))))))
+    ; The sub-program keeps EVERY const (closure-subprogram), and a const's value is a
+    ; compile-time computation that check/finish folds. A const that calls an ordinary
+    ; function would otherwise report that callee "undefined" here — exactly like an
+    ; impl method's callees above — so seed the const-value callees too.
+    (let [cs (load (field p consts))
+          nc (al-len [Const] (load cs))
+          (mut ci) 0]
+      (loop (if (icmp-ge (load ci) nc)
+                (break)
+                (do
+                  (collect-calls (field (al-elem [Const] cs (load ci)) value) names stackb)
+                  (store! ci (iadd (load ci) 1))))))
+    (closure-drain! p names stackb wantedb)
+    ; Module reachability can grow through an impl body, so repeat to a bounded
+    ; fixpoint. Re-seeding an already-wanted callee is harmless.
+    (let [is (load (field p impls))
+          ni (al-len [ImplDef] (load is))
+          (mut selected) (al-new [i64] a)
+          (mut init) 0
+          (mut pass) 0]
+      (loop (if (icmp-ge (load init) ni)
+                (break)
+                (do (al-push! (mut selected) 0) (store! init (iadd (load init) 1)))))
+      (loop (if (icmp-gt (load pass) ni)
+                (break)
+                (let [(mut ii) 0
+                      (mut added) false]
+                  (loop (if (icmp-ge (load ii) ni)
+                            (break)
+                            (do
+                              (let [ip (al-elem [ImplDef] is (load ii))]
+                                (when (and (icmp-eq (al-get [i64] (load selected) (load ii)) 0)
+                                           (closure-impl-wanted? a (field wantedb items) ip))
+                                      (al-set! (mut selected) (load ii) 1)
+                                      (store! added true)
+                                      (let [ms (load (field ip methods))
+                                            nm (al-len [Func] (load ms))
+                                            (mut mi) 0]
+                                        (loop (if (icmp-ge (load mi) nm)
+                                                  (break)
+                                                  (do
+                                                    (cc-list (load (field (al-elem [Func] ms (load mi)) body)) names stackb)
+                                                    (store! mi (iadd (load mi) 1))))))))
+                              (store! ii (iadd (load ii) 1)))))
+                  (closure-drain! p names stackb wantedb)
+                  (unless (load added) (break))
+                  (store! pass (iadd (load pass) 1)))))
+      0)
+    (field wantedb items)))
+; ---- pruned closure (macro STAGING, interp deletion step 5 Phase B) ---------------
+; closure-funcs minus the impl-method and const-value seeding: only the seeds'
+; transitive callees ride along. Used by the per-qual staging prepass, where the
+; whole point is that closure-funcs' unconditional impl/const seeding drags in
+; functions whose bodies still hold unexpanded macro calls (slice-get's
+; dbg-slice-get) and poisons every check. Measured 2026-07-21: with this pruning,
+; 100% of the compiler's own macro quals and 99.6% of the corpus's check standalone.
+(defn closure-funcs-pruned [(p (ptr Program)) (seeds (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
+  (let [names (prog-fn-names p a)
+        stackb (unwrap-ptr [SBox] (create [SBox] a))
+        wantedb (unwrap-ptr [SBox] (create [SBox] a))]
+    (store! (field stackb items) (al-new [(slice u8)] a))
+    (store! (field wantedb items) (al-new [(slice u8)] a))
+    (let [ns (al-len [(slice u8)] (load seeds))
+          (mut si) 0]
+      (loop (if (icmp-ge (load si) ns)
+                (break)
+                (do
+                  (al-push! (mut (field stackb items)) (al-get [(slice u8)] (load seeds) (load si)))
+                  (store! si (iadd (load si) 1))))))
+    (loop (if (icmp-eq (al-len [(slice u8)] (load (field stackb items))) 0)
+              (break)
+              (do
+                (let [sl (load (field stackb items))
+                      top (al-len [(slice u8)] sl)
+                      nm (al-get [(slice u8)] sl (isub top 1))]
+                  (store! (field (field stackb items) len) (isub top 1))
+                  (unless (set-contains (field wantedb items) nm)
+                          (al-push! (mut (field wantedb items)) nm)
+                          (let [f (prog-fn-find p nm)]
+                            (unless (icmp-eq (cast i64 f) 0) (cc-list (load (field f body)) names stackb))))))))
+    (field wantedb items)))
+; closure-subprogram with impls and consts PRUNED (companion of the above): a
+; macro whose callees genuinely need trait impls fails this check and simply
+; stays unstaged — the ordinary full-closure batch path picks it up later.
+(defn closure-subprogram-pruned [(p (ptr Program)) (wanted (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr Program))
+  (let [pp (unwrap-ptr [Program] (create [Program] a))
+        fs (load (field p funcs))
+        n (al-len [Func] (load fs))
+        (mut keep) (al-new [Func] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [fp (al-elem [Func] fs (load i))]
+                  (when (set-contains wanted (load (field fp name))) (al-push! (mut keep) (load fp)) 0))
+                (store! i (iadd (load i) 1)))))
+    (store! (field pp conventions) (load (field p conventions)))
+    (store! (field pp structs) (load (field p structs)))
+    (store! (field pp sums) (load (field p sums)))
+    (store! (field pp externs) (load (field p externs)))
+    (store! (field pp funcs) (box-al [Func] a (load keep)))
+    (store! (field pp asserts) (box-al [StaticAssert] a (al-new [StaticAssert] a)))
+    (store! (field pp consts) (box-al [Const] a (al-new [Const] a)))
+    (store! (field pp traits) (load (field p traits)))
+    (store! (field pp impls) (box-al [ImplDef] a (al-new [ImplDef] a)))
+    (store! (field pp metas) (box-al [Expr] a (al-new [Expr] a)))
+    (store! (field pp exports) (box-al [ExportC] a (al-new [ExportC] a)))
+    pp))
+
+(defn closure-subprogram [(p (ptr Program)) (wanted (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr Program))
+  (let [pp (unwrap-ptr [Program] (create [Program] a))
+        fs (load (field p funcs))
+        n (al-len [Func] (load fs))
+        (mut keep) (al-new [Func] a)
+        (mut keepi) (al-new [ImplDef] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [fp (al-elem [Func] fs (load i))]
+                  (when (set-contains wanted (load (field fp name))) (al-push! (mut keep) (load fp)) 0))
+                (store! i (iadd (load i) 1)))))
+    (let [is (load (field p impls))
+          ni (al-len [ImplDef] (load is))
+          (mut ii) 0]
+      (loop (if (icmp-ge (load ii) ni)
+                (break)
+                (do
+                  (let [ip (al-elem [ImplDef] is (load ii))]
+                    (when (closure-impl-wanted? a wanted ip) (al-push! (mut keepi) (load ip)) 0))
+                  (store! ii (iadd (load ii) 1))))))
+    (store! (field pp conventions) (load (field p conventions)))
+    (store! (field pp structs) (load (field p structs)))
+    (store! (field pp sums) (load (field p sums)))
+    (store! (field pp externs) (load (field p externs)))
+    (store! (field pp funcs) (box-al [Func] a (load keep)))
+    (store! (field pp asserts) (box-al [StaticAssert] a (al-new [StaticAssert] a)))
+    (store! (field pp consts) (load (field p consts)))
+    (store! (field pp traits) (load (field p traits)))
+    (store! (field pp impls) (box-al [ImplDef] a (load keepi)))
+    (store! (field pp metas) (box-al [Expr] a (al-new [Expr] a)))
+    (store! (field pp exports) (box-al [ExportC] a (al-new [ExportC] a)))
+    pp))
+(defn is-meta-form [(f (ptr Sexp))] (-> bool)
+  (and (icmp-eq (sx-tag (load f)) 6)
+       (let [it (sx-items (load f))]
+         (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "meta"))))))
+; ============================ comptime::fold_program ========================
+; The comptime FOLD pass:
+; walk every checked function body (and static-assert cond) and replace each
+; `(comptime E)` node with the literal E evaluates to. Runs the SAME interpreter
+; `eval` used for (meta …). Implemented as an IN-PLACE mutating walk (like
+; qualify-expr): non-comptime nodes are recursed but left byte-identical, so the
+; pass is a NO-OP for comptime-free programs (the exhaustive IR corpus + bootstrap
+; stay unchanged); only `(comptime …)` nodes — currently a hard mono error — get
+; folded. build_value reconstructs the literal-back (scalars → literals, a sum →
+; a variant call, a struct/array → an imperative alloc+store+load).
+(defn f64->bits [(x f64)] (-> i64)
+  (let [p (alloc-stack f64)] (store! p x) (load (cast (ptr i64) p))))
+; NB: CtVal (a sum) is threaded BY POINTER through this mutual recursion — a
+; by-value aggregate into recursion miscompiles (musttail TCE failure).
+(defn build-content [(a (ptr Allocator)) (vp (ptr CtVal)) (lo i64) (hi i64) (src i64) (ctxt i64) (cx (ptr CtCtx))] (-> (Result Expr
+                                                                                                                               Diag))
+  (match (load vp)
+    ; wrap the cross-recursion in a let so the call is NOT in tail position — a
+    ; musttail'd aggregate-returning mutual tail call fails LLVM's TCE.
+    (CInt [n] (let [r (build-value a vp lo hi src ctxt cx)] r))
+    (CBool [b] (let [r (build-value a vp lo hi src ctxt cx)] r))
+    (CFloat [x] (let [r (build-value a vp lo hi src ctxt cx)] r))
+    (CStr [s] (let [r (build-value a vp lo hi src ctxt cx)] r))
+    (CCode [f] (let [r (build-value a vp lo hi src ctxt cx)] r))
+    (CRef [cell] (let [r (build-content a cell lo hi src ctxt cx)] r))
+    (CSum [variant fields]
+          ; pre-mono, a sum value is a call to the variant name
+          (let [nf (al-len [(ptr CtVal)] (load fields))
+                (mut args) (al-new [Expr] a)
+                (mut i) 0
+                (mut errf) (None [Diag])]
+            (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nf))
+                      (break)
+                      (do
+                        (match (build-value a
+                                            (new-cell (cell-value (al-get [(ptr CtVal)] (load fields) (load i))))
+                                            lo
+                                            hi
+                                            src
+                                            ctxt
+                                            cx)
+                          (Err [d] (do (store! errf (Some d)) 0))
+                          (Ok [ev] (do (al-push! (mut args) ev) 0)))
+                        (store! i (iadd (load i) 1)))))
+            (match (load errf)
+              (Some [d] (Err [Expr Diag] d))
+              (None []
+                    (Ok [Expr Diag]
+                        (mk-expr (ECall variant (box-items-type a) (box-al [Expr] a (load args))) lo hi src ctxt))))))
+    (CStruct [name fields]
+             (let [sd (ct-struct-find cx name)]
+               (if (icmp-eq (cast i64 sd) 0)
+                   (Err [Expr Diag] (derr (sconcat3 a "comptime: unknown struct '" name "'")))
+                   (let [n (load (field cx gensym))
+                         _b (store! (field cx gensym) (iadd n 1))
+                         t (sconcat a "$ct" (i64->str a n))
+                         sfs (load (field sd fields))
+                         nfl (al-len [Field] (load sfs))
+                         (mut body) (al-new [Expr] a)
+                         (mut i) 0
+                         (mut errf) (None [Diag])]
+                     (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nfl))
+                               (break)
+                               (do
+                                 (match (build-value a
+                                                     (new-cell (cell-value (al-get [(ptr CtVal)] (load fields) (load i))))
+                                                     lo
+                                                     hi
+                                                     src
+                                                     ctxt
+                                                     cx)
+                                   (Err [d] (do (store! errf (Some d)) 0))
+                                   (Ok [ev]
+                                       (let [fname (load (field (al-elem [Field] sfs (load i)) name))
+                                             fld
+                                               (mk-expr (EField (box-expr a (mk-expr (EVar t) lo hi src ctxt)) fname)
+                                                        lo
+                                                        hi
+                                                        src
+                                                        ctxt)]
+                                         (do
+                                           (al-push! (mut body)
+                                                     (mk-expr (EStore (box-expr a fld) (box-expr a ev)) lo hi src ctxt))
+                                           0))))
+                                 (store! i (iadd (load i) 1)))))
+                     (match (load errf)
+                       (Some [d] (Err [Expr Diag] d))
+                       (None []
+                             (do
+                               (al-push! (mut body)
+                                         (mk-expr (ELoad (box-expr a (mk-expr (EVar t) lo hi src ctxt))) lo hi src ctxt))
+                               (let [(mut binds) (al-new [Bind] a)
+                                     bp (alloc-stack Bind)]
+                                 (store! (field bp name) t)
+                                 (store! (field bp mutable) false)
+                                 (store! (field bp value) (mk-expr (EAlloc 0 (TStruct name)) lo hi src ctxt))
+                                 (al-push! (mut binds) (load bp))
+                                 (Ok [Expr Diag]
+                                     (mk-expr (ELet (box-al [Bind] a (load binds)) (box-al [Expr] a (load body)))
+                                              lo
+                                              hi
+                                              src
+                                              ctxt))))))))))
+    (CArray [elem cells]
+            (let [n (load (field cx gensym))
+                  _b (store! (field cx gensym) (iadd n 1))
+                  t (sconcat a "$ct" (i64->str a n))
+                  nc (al-len [(ptr CtVal)] (load cells))
+                  (mut body) (al-new [Expr] a)
+                  (mut i) 0
+                  (mut errf) (None [Diag])]
+              (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nc))
+                        (break)
+                        (do
+                          (match (build-value a
+                                              (new-cell (cell-value (al-get [(ptr CtVal)] (load cells) (load i))))
+                                              lo
+                                              hi
+                                              src
+                                              ctxt
+                                              cx)
+                            (Err [d] (do (store! errf (Some d)) 0))
+                            (Ok [ev]
+                                (let [idxe
+                                        (mk-expr (EIndex (box-expr a (mk-expr (EVar t) lo hi src ctxt))
+                                                         (box-expr a (mk-expr (EInt (load i)) lo hi src ctxt)))
+                                                 lo
+                                                 hi
+                                                 src
+                                                 ctxt)]
+                                  (do
+                                    (al-push! (mut body)
+                                              (mk-expr (EStore (box-expr a idxe) (box-expr a ev)) lo hi src ctxt))
+                                    0))))
+                          (store! i (iadd (load i) 1)))))
+              (match (load errf)
+                (Some [d] (Err [Expr Diag] d))
+                (None []
+                      (do
+                        (al-push! (mut body)
+                                  (mk-expr (ELoad (box-expr a (mk-expr (EVar t) lo hi src ctxt))) lo hi src ctxt))
+                        (let [(mut binds) (al-new [Bind] a)
+                              bp (alloc-stack Bind)]
+                          (store! (field bp name) t)
+                          (store! (field bp mutable) false)
+                          (store! (field bp value) (mk-expr (EAlloc 0 (TArray (box-type a elem) nc)) lo hi src ctxt))
+                          (al-push! (mut binds) (load bp))
+                          (Ok [Expr Diag]
+                              (mk-expr (ELet (box-al [Bind] a (load binds)) (box-al [Expr] a (load body)))
+                                       lo
+                                       hi
+                                       src
+                                       ctxt))))))))))
+(defn build-value [(a (ptr Allocator)) (vp (ptr CtVal)) (lo i64) (hi i64) (src i64) (ctxt i64) (cx (ptr CtCtx))] (-> (Result Expr
+                                                                                                                             Diag))
+  (match (load vp)
+    (CInt [n] (Ok [Expr Diag] (mk-expr (EInt n) lo hi src ctxt)))
+    (CBool [b] (Ok [Expr Diag] (mk-expr (EBool b) lo hi src ctxt)))
+    (CFloat [x] (Ok [Expr Diag] (mk-expr (EFloat (f64->bits x)) lo hi src ctxt)))
+    (CStr [s] (Ok [Expr Diag] (mk-expr (EStr s) lo hi src ctxt)))
+    (CCode [f]
+           (Err [Expr Diag]
+                (derr "comptime: a Code value can't be used as a runtime value (it's only meaningful at compile time)")))
+    (CRef [cell] (let [r (build-content a cell lo hi src ctxt cx)] r))
+    (CStruct [nm fs] (let [r (build-content a vp lo hi src ctxt cx)] r))
+    (CArray [el cs] (let [r (build-content a vp lo hi src ctxt cx)] r))
+    (CSum [vn fs] (let [r (build-content a vp lo hi src ctxt cx)] r))))
+(defn fold-expr-list [(es (ptr (ArrayList Expr))) (cx (ptr CtCtx))] (-> (Result i64 Diag))
+  (let [n (al-len [Expr] (load es))
+        (mut i) 0
+        (mut err) (zeroed Diag)
+        (mut failed) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (match (fold-expr (al-elem [Expr] es (load i)) cx)
+                  (Err [d] (do (store! err d) (store! failed true) (break)))
+                  (Ok [_] 0))
+                (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn fold-bind-list [(binds (ptr (ArrayList Bind))) (cx (ptr CtCtx))] (-> (Result i64 Diag))
+  (let [n (al-len [Bind] (load binds))
+        (mut i) 0
+        (mut err) (zeroed Diag)
+        (mut failed) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (match (fold-expr (field (al-elem [Bind] binds (load i)) value) cx)
+                  (Err [d] (do (store! err d) (store! failed true) (break)))
+                  (Ok [_] 0))
+                (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn fold-arm-list [(arms (ptr (ArrayList Arm))) (cx (ptr CtCtx))] (-> (Result i64 Diag))
+  (let [n (al-len [Arm] (load arms))
+        (mut i) 0
+        (mut err) (zeroed Diag)
+        (mut failed) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (match (fold-expr (field (al-elem [Arm] arms (load i)) body) cx)
+                  (Err [d] (do (store! err d) (store! failed true) (break)))
+                  (Ok [_] 0))
+                (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn fold-quasi-list [(items (ptr (ArrayList Quasi))) (cx (ptr CtCtx))] (-> (Result i64 Diag))
+  (let [n (al-len [Quasi] (load items))
+        (mut i) 0
+        (mut err) (zeroed Diag)
+        (mut failed) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (match (fold-quasi (al-elem [Quasi] items (load i)) cx)
+                  (Err [d] (do (store! err d) (store! failed true) (break)))
+                  (Ok [_] 0))
+                (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn fold-quasi [(qp (ptr Quasi)) (cx (ptr CtCtx))] (-> (Result i64 Diag))
+  (match (load qp)
+    (QLit [_] (Ok [i64 Diag] 0))
+    (QUnquote [e] (fold-expr e cx))
+    (QSplice [e] (fold-expr e cx))
+    (QList [items] (fold-quasi-list items cx))
+    (QVector [items] (fold-quasi-list items cx))))
+(defn fold-expr [(ep (ptr Expr)) (cx (ptr CtCtx))] (-> (Result i64 Diag))
+  (let [a (load (field cx a))]
+    (try (do
+           (match (load (field ep kind))
+             (EComptime [inner]
+                        ; Evaluate the inner directly (eval handles nested comptime/reflection
+                        ; with the proper environment) and splice the literal-back IN PLACE,
+                        ; keeping this node's span. When
+                        ; the tree-walk interpreter REJECTS the site (a generic call, sizeof, a
+                        ; string — the mac-8 weaknesses), route it through the compiled metaprogram
+                        ; engine via the registered hook (interp deletion step 1); the hook returns
+                        ; null (declined) for anything it can't read back, leaving the interp error.
+                        (let [lo (load (field ep lo))
+                              hi (load (field ep hi))
+                              hk (ct-fold-hook)]
+                          ; the compiled engine is THE comptime evaluator (the tree-walking
+                          ; interpreter is gone — decision 7). A hook decline (null) is a
+                          ; located hard error; an unregistered hook means this compiler build
+                          ; cannot evaluate comptime at all and says so.
+                          (if (icmp-eq (load (field hk isset)) 0)
+                              (return-from :try
+                                           (Err (derr-at lo
+                                                         hi
+                                                         "comptime: this compiler build has no comptime engine registered (compiler bug)")))
+                              (let [r (call-ptr (load (field hk fp)) a inner cx)]
+                                (if (icmp-eq (cast i64 r) 0)
+                                    (return-from :try
+                                                 (Err (derr-at lo
+                                                               hi
+                                                               "comptime: this expression's value cannot be materialized as a compile-time literal")))
+                                    (match (load (cast (ptr (Result Expr Diag)) r))
+                                      (Err [d2] (return-from :try (Err d2)))
+                                      (Ok [lit] (do (store! (field ep kind) (load (field (box-expr a lit) kind))) 0))))))))
+             (EInt [_] 0)
+             (EFloat [_] 0)
+             (EBool [_] 0)
+             (EStr [_] 0)
+             (ECStr [_] 0)
+             (EVar [_] 0)
+             (EZeroed [_] 0)
+             (ESizeOf [_] 0)
+             (EAlignOf [_] 0)
+             (EOffsetOf [_ _] 0)
+             (EFnPtrOf [_] 0)
+             (EAlloc [_ _] 0)
+             (EContinue [_] 0)
+             (EQuote [_] 0)
+             (EStaticRef [_] 0)
+             (ETraitCall [_ _ _ _] 0)
+             (ETypeQuery [_ _] 0)
+             (EBorrow [mu place] (do (try! (fold-expr place cx)) 0))
+             (ESpillRef [x] (do (try! (fold-expr x cx)) 0))
+             (ENot [x] (do (try! (fold-expr x cx)) 0))
+             (ELoad [x] (do (try! (fold-expr x cx)) 0))
+             (EFree [x] (do (try! (fold-expr x cx)) 0))
+             (EErase [tn x] (do (try! (fold-expr x cx)) 0))
+             (EMakeDyn [ds vt ms inner] (do (try! (fold-expr inner cx)) 0))
+             (EDynDispatch [ds vt mi cc ps rt recv args]
+                           (do (try! (fold-expr recv cx)) (try! (fold-expr-list args cx)) 0))
+             (ECast [t x] (do (try! (fold-expr x cx)) 0))
+             (EAscribe [t x] (do (try! (fold-expr x cx)) 0))
+             (EBin [op l r] (do (try! (fold-expr l cx)) (try! (fold-expr r cx)) 0))
+             (ECmp [op l r] (do (try! (fold-expr l cx)) (try! (fold-expr r cx)) 0))
+             (EIf [c t e] (do (try! (fold-expr c cx)) (try! (fold-expr t cx)) (try! (fold-expr e cx)) 0))
+             (EDo [body] (do (try! (fold-expr-list body cx)) 0))
+             (ELoop [label body] (do (try! (fold-expr-list body cx)) 0))
+             (EBreak [label value] (do (match value (Some [vp] (try! (fold-expr vp cx))) (None [] 0)) 0))
+             (ELet [binds body] (do (try! (fold-bind-list binds cx)) (try! (fold-expr-list body cx)) 0))
+             (ECall [func type_args args] (do (try! (fold-expr-list args cx)) 0))
+             (EField [p fname] (do (try! (fold-expr p cx)) 0))
+             (EStore [p val] (do (try! (fold-expr p cx)) (try! (fold-expr val cx)) 0))
+             (EIndex [p idx] (do (try! (fold-expr p cx)) (try! (fold-expr idx cx)) 0))
+             (EBitGet [p fname] (do (try! (fold-expr p cx)) 0))
+             (EBitSet [p fname val] (do (try! (fold-expr p cx)) (try! (fold-expr val cx)) 0))
+             (EConstruct [sum variant args] (do (try! (fold-expr-list args cx)) 0))
+             (EMatch [scrut arms] (do (try! (fold-expr scrut cx)) (try! (fold-arm-list arms cx)) 0))
+             (ECallPtr [fp args] (do (try! (fold-expr fp cx)) (try! (fold-expr-list args cx)) 0))
+             (ELlvmIr [result args body] (do (try! (fold-expr-list args cx)) 0))
+             (ECodeOp [op args] (do (try! (fold-expr-list args cx)) 0))
+             (EQuasi [q]
+                     (do
+                       (let [qp (alloc-stack Quasi)]
+                         (store! qp q)
+                         (try! (fold-quasi qp cx))
+                         (store! (field ep kind) (EQuasi (load qp))))
+                       0))
+             (EFieldMeta [meta t idx] (do (try! (fold-expr idx cx)) 0))
+             (EFieldIndex [t nm] (do (try! (fold-expr nm cx)) 0)))
+           (Ok [i64 Diag] 0)))))
+; Build the comptime CtCtx from a checked Program (mirrors fold_program's ctx).
+(defn mk-ctctx [(checked (ptr Program)) (a (ptr Allocator))] (-> (ptr CtCtx))
+  (let [cx (unwrap-ptr [CtCtx] (create [CtCtx] a))]
+    (store! (field cx a) a)
+    (store! (field cx fns) (load (field checked funcs)))
+    (store! (field cx structs) (load (field checked structs)))
+    (store! (field cx sums) (load (field checked sums)))
+    (store! (field cx variants) (all-variant-names (load (field checked sums)) a))
+    (store! (field cx traits) (load (field checked traits)))
+    (store! (field cx fuel) 50000000)
+    (store! (field cx depth) 0)
+    (store! (field cx gensym) 0)
+    (store! (field cx qmodule) (None [(slice u8)]))
+    (store! (field cx module_fns) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field cx qimports) (cast (ptr ModImports) 0))
+    (store! (field cx qexports) (cast (ptr (ArrayList ExpEntry)) 0))
+    (store! (field cx prog) checked)
+    cx))
+; fold_program: fold every function body (in place) and every static-assert cond.
+(defn fold-program [(checked (ptr Program)) (asserts (ptr (ArrayList StaticAssert))) (a (ptr Allocator))] (-> (Result i64
+                                                                                                                      Diag))
+  (let [cx (mk-ctctx checked a)
+        fns (load (field checked funcs))
+        nf (al-len [Func] (load fns))
+        (mut i) 0
+        (mut err) (zeroed Diag)
+        (mut failed) false]
+    (loop (if (icmp-ge (load i) nf)
+              (break)
+              (do
+                (match (fold-expr-list (load (field (al-elem [Func] fns (load i)) body)) cx)
+                  (Err [d] (do (store! err d) (store! failed true) (break)))
+                  (Ok [_] 0))
+                (store! i (iadd (load i) 1)))))
+    (if (load failed)
+        (Err (load err))
+        (let [na (al-len [StaticAssert] (load asserts))
+              (mut j) 0
+              (mut e2) (zeroed Diag)
+              (mut f2) false]
+          (loop (if (icmp-ge (load j) na)
+                    (break)
+                    (do
+                      (match (fold-expr (field (al-elem [StaticAssert] asserts (load j)) cnd) cx)
+                        (Err [d] (do (store! e2 d) (store! f2 true) (break)))
+                        (Ok [_] 0))
+                      (store! j (iadd (load j) 1)))))
+          (if (load f2) (Err [i64 Diag] (load e2)) (Ok [i64 Diag] 0))))))
+
+; ---- comptime::run_metas — evaluate each (meta …) form (checked/elaborated) via the
+;      comptime interpreter to a Code value, splice a `(do …)` result, else push it.
+;      Returns the generated top-level forms as raw Sexp (re-resolved by the caller).
+(defn ls-has-meta [(s (mut LS))] (-> bool)
+  (let [a (load (field s a))
+        out (box-al [TaggedForm] a (load (field s out)))
+        n (al-len [TaggedForm] (load out))
+        (mut i) 0
+        (mut r) false]
+    (loop (if (or (load r) (icmp-ge (load i) n))
+              (break)
+              (do
+                (when (is-meta-form (field (al-elem [TaggedForm] out (load i)) form)) (store! r true) 0)
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+; splice: rebuild s.out = (tagged forms sans meta) ++ generated forms (tagged with the
+; first meta form's module's tagged2).
+(defn splice-metas [(s (mut LS)) (gen (ptr (ArrayList Sexp))) (a (ptr Allocator))] (-> i64)
+  (let [old (box-al [TaggedForm] a (load (field s out)))
+        n (al-len [TaggedForm] (load old))
+        (mut newout) (al-new [TaggedForm] a)
+        (mut mmod) (None [(slice u8)])
+        (mut found) false
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [tf (al-elem [TaggedForm] old (load i))]
+                  (if (is-meta-form (field tf form))
+                      (do (unless (load found) (store! mmod (load (field tf module))) (store! found true) 0) 0)
+                      (do (al-push! (mut newout) (load tf)) 0)))
+                (store! i (iadd (load i) 1)))))
+    (let [ng (al-len [Sexp] (load gen))
+          (mut j) 0]
+      (loop (if (icmp-ge (load j) ng)
+                (break)
+                (do
+                  (let [tf (alloc-stack TaggedForm)]
+                    (store! (field tf form) (al-get [Sexp] (load gen) (load j)))
+                    (store! (field tf module) (load mmod))
+                    (al-push! (mut newout) (load tf)))
+                  (store! j (iadd (load j) 1))))))
+    (store! (field s out) (load newout))
+    0))
+; — the (meta …) staged-macro loop. `prog` is the
+; NON-STRICT first resolve (metas non-empty): check the generator closure, run the
+; metas, splice the generated forms, then STRICT re-resolve + final check.

@@ -322,10 +322,21 @@ pub(crate) struct SymFrame {
 }
 
 impl TypeOracle {
-    /// Build an oracle from the current process's binary + DWARF.
+    /// Build an oracle from the DWARF of the image memscope is compiled into.
+    ///
+    /// That is *not* always `current_exe()`: when memscope lives in a
+    /// dynamically-loaded module (a Node `.node` addon, a Python extension) the
+    /// executable is the host (`node`), which has no Rust DWARF at all — and
+    /// `dsymutil` on it fails. The frames we capture come from the module, so
+    /// the module is what we must symbolicate against. [`load::current_image_path`]
+    /// resolves it via `dladdr`; `current_exe()` remains the fallback (a normal
+    /// program, or any platform where the self-image lookup isn't implemented).
     pub fn for_current_process() -> Result<Self, DynErr> {
-        let exe = std::env::current_exe()?;
-        Self::from_binary(&exe)
+        let path = match load::current_image_path() {
+            Some(p) => p,
+            None => std::env::current_exe()?,
+        };
+        Self::from_binary(&path)
     }
 
     /// Build an oracle from a specific binary path (for posthoc exploration of a

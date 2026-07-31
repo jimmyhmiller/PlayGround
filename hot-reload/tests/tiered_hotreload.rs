@@ -16,7 +16,10 @@ fn helper_i64(id: DefId, version: u64, n: i64) -> Function {
         result: Type::I64,
         registers: 1,
         code: vec![
-            Instruction::Const { dst: 0, value: Value::I64(n) },
+            Instruction::Const {
+                dst: 0,
+                value: Value::I64(n),
+            },
             Instruction::Return { value: 0 },
         ],
     }
@@ -32,7 +35,10 @@ fn helper_broken(id: DefId, version: u64) -> Function {
         result: Type::I64,
         registers: 1,
         code: vec![
-            Instruction::Const { dst: 0, value: Value::Bool(true) },
+            Instruction::Const {
+                dst: 0,
+                value: Value::Bool(true),
+            },
             Instruction::Return { value: 0 },
         ],
     }
@@ -67,8 +73,15 @@ fn editing_a_promoted_function_is_picked_up() {
         result: Type::I64,
         registers: 3,
         code: vec![
-            Instruction::Const { dst: 1, value: Value::I64(100) },
-            Instruction::AddI64 { dst: 2, left: 0, right: 1 },
+            Instruction::Const {
+                dst: 1,
+                value: Value::I64(100),
+            },
+            Instruction::AddI64 {
+                dst: 2,
+                left: 0,
+                right: 1,
+            },
             Instruction::Return { value: 2 },
         ],
     };
@@ -101,19 +114,22 @@ fn breaking_edit_traps_a_jit_caller_then_repair_resumes() {
     assert!(s.engine.is_hot(compute, Version(1)), "compute must be promoted");
     assert!(s.engine.is_hot(helper, Version(1)), "helper must be promoted");
 
-    // SOUNDNESS: break `helper`. On the next run the JIT-compiled `compute`
-    // calls it — and traps, rather than running stale native code.
-    s.engine.install_function(helper_broken(helper, 2)).unwrap();
+    // Pin `main` before the edit, as a genuinely running program would be.
     let mut actor = s.engine.spawn(main, vec![]).unwrap();
+
+    // SOUNDNESS: break `helper`. Brokenness propagates to `compute` and the
+    // current `main`; the pinned old main traps at its call to `compute`, the
+    // outermost affected boundary, before entering stale native code.
+    s.engine.install_function(helper_broken(helper, 2)).unwrap();
     let trap = s.engine.run(&mut actor);
     assert!(
-        matches!(trap, Outcome::Paused(Condition::BrokenFunction { function, .. }) if function == helper),
-        "a JIT caller of a now-broken function must trap; got {trap:?}"
+        matches!(trap, Outcome::Paused(Condition::BrokenFunction { function, .. }) if function == compute),
+        "the outermost affected call must trap; got {trap:?}"
     );
 
     // REPAIR + RESUME: redefine `helper`, then resume the *same* paused stack
-    // (which has a JIT `compute` frame on it). It re-runs its call to the
-    // repaired helper and completes — hot-reload's repair half, through the JIT.
+    // It retries the call, enters the repaired hot `compute`, and completes —
+    // hot-reload's repair half still crosses the JIT tier.
     s.engine.install_function(helper_i64(helper, 3, 7)).unwrap();
     assert_eq!(s.engine.resume(&mut actor), Outcome::Complete(Value::I64(7)));
 }
@@ -146,9 +162,7 @@ fn data_migration_is_transparent_to_a_jit_reader() {
     let mut twin = Session::new();
     twin.eval(src).unwrap();
     twin.eval("struct Account { balance: i64, fee: i64 = 0 }").unwrap();
-    let account_v2 = twin
-        .engine
-        .with_world(|w| w.schemas[&(account, Version(2))].clone());
+    let account_v2 = twin.engine.with_world(|w| w.schemas[&(account, Version(2))].clone());
 
     // Hot-reload the schema; the auto-derived migration is created on install.
     s.engine.install_schema(account_v2).unwrap();

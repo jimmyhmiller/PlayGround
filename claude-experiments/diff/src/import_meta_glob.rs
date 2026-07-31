@@ -35,7 +35,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
-use oxc_span::{SourceType, Span};
+use oxc_span::Span;
 
 /// Build-level configuration for the glob rewrite. Presence of this value is the
 /// opt-in gate (mirroring `ImportMetaEnv`).
@@ -61,7 +61,7 @@ pub fn transform(
         return Ok(None);
     }
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let mut collector = GlobCollector {
         path,

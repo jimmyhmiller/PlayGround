@@ -142,6 +142,12 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         root: Some(root.to_path_buf()),
         postcss: crate::postcss::discover(root).map(std::sync::Arc::new),
     };
+    // `esbuild.*` / `oxc.jsx`: the build's own JSX lowering settings, layered over
+    // each file's owning tsconfig by the bundler.
+    let jsx = resolved
+        .as_ref()
+        .map(|resolved| resolved.jsx.clone())
+        .unwrap_or_default();
     let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
     set_node_env(&mut defines, "production");
     aliases.extend(alias);
@@ -168,10 +174,18 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             // Off by default; the dev server flips it on per environment. `build-app`
             // uses this config path with `hmr` false, so production is unaffected.
             hmr: false,
+            source_maps: false,
             scss,
             // Vite parity: default raster imports stay bare-URL strings.
             image_import_shape: crate::bundler::ImageImportShape::Url,
             css_preprocess,
+            // Vite parity, and deliberate: esbuild parses `.js` as plain
+            // JavaScript, so JSX there is a syntax error in a Vite app too.
+            jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
+            jsx,
+            // A Vite build has no `serverExternalPackages` equivalent; everything a
+            // module imports is bundled.
+            server_external_packages: Vec::new(),
         },
         entry,
     })
@@ -200,6 +214,11 @@ pub struct WebConfig {
     /// `optimizeDeps.exclude` — surfaced for honest reporting (Diffpack does not
     /// pre-bundle, so exclusion is satisfied by construction).
     pub optimize_deps_exclude: Vec<String>,
+    /// `build.outDir` as the config sets it, resolved against the project root.
+    /// `None` means the config does not set it, and the caller applies Vite's
+    /// `dist` default. A command-line `--out-dir` always WINS over this: an
+    /// explicit argument outranks a config file.
+    pub out_dir: Option<PathBuf>,
 }
 
 /// Derives the build config for an HTML-rooted web application.
@@ -233,6 +252,7 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
             import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
+            source_maps: false,
             // Even a generic build knows the project root, so root-relative
             // `@use "/src/..."` targets resolve; additionalData stays a
             // Vite-mode opt-in below.
@@ -248,6 +268,15 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
                 root: Some(root.to_path_buf()),
                 postcss: crate::postcss::discover(root).map(std::sync::Arc::new),
             },
+            // Vite/esbuild parity, and deliberate: `.js` is plain JavaScript, so
+            // JSX in it is a syntax error here exactly as it is under Vite.
+            jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
+            // The BUILD's JSX lowering settings. Empty for a generic build: with
+            // no `vite.config` read, the tsconfig that owns each file (which is
+            // honored in every mode) is the only input.
+            jsx: crate::transform::JsxConfig::default(),
+            // A generic build bundles everything it can resolve.
+            server_external_packages: Vec::new(),
         },
         base: "/".to_string(),
         vite: false,
@@ -256,6 +285,7 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
         manifest_name: ".vite/manifest.json".to_string(),
         proxy: Vec::new(),
         optimize_deps_exclude: Vec::new(),
+        out_dir: None,
     };
     if !vite {
         return Ok(config);
@@ -283,6 +313,11 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
     config.build.scss.additional_data = resolved
         .as_ref()
         .and_then(|resolved| resolved.scss_additional_data.clone());
+    // `esbuild.*` / `oxc.jsx`, layered over each file's owning tsconfig.
+    config.build.jsx = resolved
+        .as_ref()
+        .map(|resolved| resolved.jsx.clone())
+        .unwrap_or_default();
     let mut defines = resolved
         .as_ref()
         .map(|resolved| resolved.define.clone())
@@ -374,6 +409,27 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
         }
         config.proxy = resolved.proxy.clone();
         config.optimize_deps_exclude = resolved.optimize_deps_exclude.clone();
+        // `build.outDir`, resolved against the project root exactly as Vite does.
+        // `Path::join` with an absolute argument yields that path unchanged, so an
+        // absolute `outDir` is honored as written.
+        config.out_dir = resolved
+            .out_dir
+            .as_ref()
+            .map(|out_dir| root.join(out_dir));
+        // `build.assetsDir` is NOT implemented: the emitters write hashed assets to
+        // `assets/` unconditionally. Honoring the default silently is fine; a
+        // non-default value would put every asset in the wrong place and every
+        // emitted URL would 404, so say so instead of shipping that.
+        if let Some(assets_dir) = resolved.assets_dir.as_deref()
+            && assets_dir.trim_matches('/') != "assets"
+        {
+            return Err(format!(
+                "vite config sets build.assetsDir = {assets_dir:?}, which diffpack does not \
+                 implement: it emits hashed assets to `assets/` unconditionally, so every \
+                 asset URL in the build would be wrong. Remove build.assetsDir (or set it to \
+                 \"assets\") to build this project with diffpack."
+            ));
+        }
     }
     config.base = base;
     Ok(config)
@@ -524,4 +580,68 @@ pub fn vite_config_string(root: &Path, key: &str) -> Option<String> {
     let after = &rest[1..];
     let close = after.find(quote)?;
     Some(after[..close].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    /// `vite.config`'s `build.outDir` must reach the caller, resolved against the
+    /// project root exactly as Vite resolves it. The defect was that `WebConfig`
+    /// had no such field at all, so an app configuring `build: { outDir: "build" }`
+    /// silently got `dist/` — a build that "succeeded" into the wrong directory.
+    #[test]
+    fn vite_build_out_dir_is_read_and_resolved_against_the_project_root() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("index.html"), "<!doctype html><html></html>").unwrap();
+        std::fs::write(
+            root.join("vite.config.mjs"),
+            "export default { build: { outDir: 'build' } };",
+        )
+        .unwrap();
+        let config = derive_web_config(root, true).unwrap();
+        assert_eq!(
+            config.out_dir,
+            Some(root.canonicalize().unwrap().join("build"))
+        );
+
+        // With no `build.outDir`, the field stays `None` and the caller applies
+        // Vite's `dist` default — an unset value must not be forged into one here.
+        std::fs::write(root.join("vite.config.mjs"), "export default {};").unwrap();
+        assert_eq!(derive_web_config(root, true).unwrap().out_dir, None);
+    }
+
+    /// `build.assetsDir` is NOT implemented — the emitters hardcode `assets/`.
+    /// A non-default value must therefore stop the build by name, not produce an
+    /// output whose every asset URL is wrong. The default value is accepted,
+    /// because honoring it is exactly what diffpack already does.
+    #[test]
+    fn a_non_default_vite_assets_dir_is_a_named_error_not_a_silent_wrong_output() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("index.html"), "<!doctype html><html></html>").unwrap();
+        std::fs::write(
+            root.join("vite.config.mjs"),
+            "export default { build: { assetsDir: 'static' } };",
+        )
+        .unwrap();
+        let error = derive_web_config(root, true).unwrap_err();
+        assert!(error.contains("build.assetsDir"), "{error}");
+        assert!(error.contains("\"static\""), "{error}");
+
+        std::fs::write(
+            root.join("vite.config.mjs"),
+            "export default { build: { assetsDir: 'assets' } };",
+        )
+        .unwrap();
+        assert!(derive_web_config(root, true).is_ok());
+    }
 }

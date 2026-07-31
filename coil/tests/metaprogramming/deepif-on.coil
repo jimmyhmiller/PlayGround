@@ -1,0 +1,5 @@
+(module deepifon)
+; Register the deep-if audit. Load with --use; nothing has to opt in:
+;   coil lint src/compiler/main.coil --use $PWD/tests/metaprogramming/deepif-on.coil
+(import "deepif.coil" :use *)
+(checker audit-deep-ifs)
