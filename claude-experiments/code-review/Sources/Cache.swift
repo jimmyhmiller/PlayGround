@@ -6,6 +6,7 @@ struct AppCache: Codable {
     var slugs: [String: String] = [:]
     var prs: [String: [PullRequest]] = [:]
     var wtCounts: [String: Int] = [:]
+    var branchComparisons: [String: BranchComparison] = [:]
     var needsAuth: Set<String> = []
     var authIssues: [String: AccessIssue]?
     var expanded: Set<String> = []

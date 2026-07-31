@@ -102,15 +102,24 @@ struct SidebarView: View {
 
     private func matchesFilter(_ project: Project) -> Bool {
         let filter = store.projectFilter.trimmingCharacters(in: .whitespaces).lowercased()
-        return filter.isEmpty || project.name.lowercased().contains(filter)
+        guard !filter.isEmpty else { return true }
+        if project.name.lowercased().contains(filter) { return true }
+        // Filtering by a worktree or branch name keeps its project visible.
+        return project.worktrees.contains {
+            $0.name.lowercased().contains(filter) || ($0.branch?.lowercased().contains(filter) ?? false)
+        }
     }
 
     private var visibleProjects: [Project] {
         store.orderedProjects.filter { !store.hiddenProjects.contains($0.id) && matchesFilter($0) }
     }
 
+    /// Hidden worktrees belong here too, otherwise there is nowhere to unhide
+    /// them from — their project row does not list them any more.
     private var hiddenProjects: [Project] {
-        store.orderedProjects.filter { store.hiddenProjects.contains($0.id) && matchesFilter($0) }
+        store.orderedProjects
+            .flatMap { [$0] + $0.worktrees }
+            .filter { store.hiddenProjects.contains($0.id) && matchesFilter($0) }
     }
 }
 
@@ -242,6 +251,23 @@ private struct ProjectDetail: View {
         VStack(spacing: 2) {
             WorkingTreeRow(project: project)
 
+            if !visibleWorktrees.isEmpty {
+                Text("WORKTREES · \(visibleWorktrees.count)")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .kerning(0.5)
+                    .foregroundColor(Th.faint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 6)
+                    .padding(.bottom, 1)
+                ForEach(visibleWorktrees) { worktree in
+                    WorkingTreeRow(project: worktree, isWorktree: true)
+                        .contextMenu {
+                            Button("Hide Worktree") { store.hideProject(worktree.id) }
+                        }
+                }
+            }
+
             if store.needsAuth.contains(project.id) {
                 let issue = store.authIssues[project.id] ?? .denied
                 Button(action: { store.resolveAccess(for: project.id) }) {
@@ -295,6 +321,10 @@ private struct ProjectDetail: View {
     private var visiblePRs: [PullRequest] {
         (store.prsByProject[project.id] ?? []).filter { $0.state == "OPEN" }
     }
+
+    private var visibleWorktrees: [Project] {
+        project.worktrees.filter { !store.hiddenProjects.contains($0.id) }
+    }
 }
 
 private struct AccountFooter: View {
@@ -328,9 +358,12 @@ private struct AccountFooter: View {
     }
 }
 
+/// The repo's own working tree, or — with `isWorktree` — one of its linked
+/// worktrees. Both are the same thing to review, so they share a row.
 private struct WorkingTreeRow: View {
     @EnvironmentObject var store: AppStore
     let project: Project
+    var isWorktree = false
 
     var body: some View {
         let selected = store.selection == .workingTree(projectID: project.id)
@@ -342,21 +375,23 @@ private struct WorkingTreeRow: View {
                     Circle()
                         .fill((count ?? 0) > 0 ? Th.orange : Color(hex: 0x5a5a60))
                         .frame(width: 7, height: 7)
-                    Text("Working tree")
+                    Text(isWorktree ? project.name : "Working tree")
                         .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
                         .foregroundColor(selected ? Th.text : Th.text2)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer(minLength: 0)
                 }
                 HStack(spacing: 6) {
-                    Image(systemName: "internaldrive")
+                    Image(systemName: isWorktree ? "arrow.triangle.branch" : "internaldrive")
                         .font(.system(size: 9))
                         .foregroundColor(Th.dim)
                         .frame(width: 15, height: 15)
-                    Text(count.map { "\($0) changed file\($0 == 1 ? "" : "s")" } ?? "uncommitted changes")
+                    Text(subtitle(count: count))
                         .font(.system(size: 11))
                         .foregroundColor(Th.dim)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 .padding(.leading, 14)
             }
@@ -373,6 +408,27 @@ private struct WorkingTreeRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .help(project.path.path)
+    }
+
+    private func subtitle(count: Int?) -> String {
+        var parts: [String] = []
+        if let branch = project.branch {
+            parts.append(branch)
+        } else if isWorktree {
+            parts.append("detached")
+        }
+        if let cmp = store.branchComparisons[project.id] {
+            var rel: [String] = []
+            if cmp.ahead > 0 { rel.append("\(cmp.ahead) ahead") }
+            if cmp.behind > 0 { rel.append("\(cmp.behind) behind") }
+            if cmp.filesChanged > 0 { rel.append("\(cmp.filesChanged) file\(cmp.filesChanged == 1 ? "" : "s")") }
+            if rel.isEmpty { rel.append("up to date") }
+            parts.append("vs \(cmp.baseBranch) · \(rel.joined(separator: " · "))")
+        } else if let count, count > 0 {
+            parts.append("\(count) changed file\(count == 1 ? "" : "s")")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
