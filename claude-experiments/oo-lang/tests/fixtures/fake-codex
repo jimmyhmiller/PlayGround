@@ -1,0 +1,20 @@
+#!/bin/sh
+if [ "$1" != "app-server" ]; then
+  printf '%s' 'expected app-server' >&2
+  exit 9
+fi
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"id":0,"result":{"userAgent":"fake"}}'
+      ;;
+    *'"method":"thread/start"'*)
+      printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread_fake"}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"delta":"fake-"}}'
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"delta":"codex-ok"}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}'
+      ;;
+  esac
+done

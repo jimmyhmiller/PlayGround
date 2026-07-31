@@ -132,22 +132,42 @@ fi
 ( cd "$T/proj" && "$COIL" build --target not-a-real-triple >/dev/null 2>&1 )
 [ $? = 1 ] && ok "project bogus --target is rejected" || bad "project bogus --target" "want rc=1"
 
-echo "== tool-12: the Coil.toml reader is STRICT — unknown sections/keys are LOCATED errors =="
-# The reader knows exactly five sections (package/build/link/cc/run) and a fixed key
-# set. `[dependencies]` used to be silently accepted (inviting the false inference that
-# deps resolve) and `entrypoint` typos were swallowed. Now each is a located hard error
-# naming the offending line. FAILS on the seed (which builds clean, rc=0); PASSES here.
+echo "== Coil.toml dependencies and strict manifest errors =="
+# A dependency name becomes the first path component of an import. Path dependencies
+# resolve from their declared root; Git dependencies are checked out at an exact SHA.
+mkdir -p "$T/dep-lib/src" "$T/path-dep/src" "$T/git-dep/src"
+printf '(module math)\n(defn answer [] (-> i64) 42)\n' > "$T/dep-lib/src/math.coil"
+printf '(module app)\n(import "math/src/math.coil" :use *)\n(defn main [] (-> i64) (answer))\n' > "$T/path-dep/src/main.coil"
+printf '[package]\nname = "path-dep"\nentry = "src/main.coil"\n\n[dependencies]\nmath = { path = "../dep-lib" }\n' > "$T/path-dep/Coil.toml"
+( cd "$T/path-dep" && "$COIL" run >/dev/null 2>&1 ); [ $? = 42 ] \
+  && ok "path dependency imports through its manifest name" \
+  || bad "path dependency" "want rc=42"
+
+( cd "$T/dep-lib" && git init -q && git add src/math.coil \
+    && git -c user.name=Coil -c user.email=coil@example.invalid commit -qm initial )
+dep_sha=$(git -C "$T/dep-lib" rev-parse HEAD)
+printf '(module app)\n(import "math/src/math.coil" :use *)\n(defn main [] (-> i64) (answer))\n' > "$T/git-dep/src/main.coil"
+printf '[package]\nname = "git-dep"\nentry = "src/main.coil"\n\n[dependencies]\nmath = { git = "%s", sha = "%s" }\n' "$T/dep-lib" "$dep_sha" > "$T/git-dep/Coil.toml"
+( cd "$T/git-dep" && "$COIL" run >/dev/null 2>&1 ); [ $? = 42 ] \
+  && ok "Git dependency imports at its pinned SHA" \
+  || bad "Git dependency" "want rc=42"
+[ -d "$T/git-dep/.coil/deps/math-$dep_sha/.git" ] \
+  && ok "Git dependency is cached by name and SHA" \
+  || bad "Git dependency cache" "missing pinned checkout"
+
+# The reader remains strict: unknown sections/keys and malformed dependency specs
+# are located hard errors rather than silent no-ops.
 mkdir -p "$T/strict/src"
 printf '(module app)\n(defn main [] (-> i64) 3)\n' > "$T/strict/src/main.coil"
-# unknown section [dependencies]
-printf '[package]\nname  = "s"\nentry = "src/main.coil"\n\n[dependencies]\nfoo = "1.0"\n' > "$T/strict/Coil.toml"
+# typo'd section
+printf '[package]\nname  = "s"\nentry = "src/main.coil"\n\n[dependecies]\nfoo = "../foo"\n' > "$T/strict/Coil.toml"
 ( cd "$T/strict" && "$COIL" build >/dev/null 2>&1 ); [ $? = 1 ] \
-  && ok "[dependencies] is rejected (was: silently ignored)" \
-  || bad "strict [dependencies]" "want rc=1"
+  && ok "a typo'd manifest section is rejected" \
+  || bad "strict section" "want rc=1"
 out=$( cd "$T/strict" && "$COIL" build 2>&1 )
-echo "$out" | grep -qE "Coil.toml:5: unknown section \[dependencies\]" \
+echo "$out" | grep -qE "Coil.toml:5: unknown section \[dependecies\]" \
   && ok "…and the error is located at the section line" \
-  || bad "strict [dependencies] location" "got: $out"
+  || bad "strict section location" "got: $out"
 # typo'd key `entrypoint`
 printf '[package]\nname  = "s"\nentrypoint = "src/main.coil"\n' > "$T/strict/Coil.toml"
 out=$( cd "$T/strict" && "$COIL" build 2>&1 ); rc=$?
@@ -156,6 +176,12 @@ out=$( cd "$T/strict" && "$COIL" build 2>&1 ); rc=$?
 echo "$out" | grep -qE "Coil.toml:3: unknown key 'entrypoint' in \[package\]" \
   && ok "…and the error names the key + section + line" \
   || bad "strict typo key location" "got: $out"
+# Git source without an immutable pin
+printf '[package]\nname = "s"\nentry = "src/main.coil"\n\n[dependencies]\nfoo = { git = "https://example.invalid/foo.git" }\n' > "$T/strict/Coil.toml"
+out=$( cd "$T/strict" && "$COIL" build 2>&1 ); rc=$?
+[ "$rc" = 1 ] && echo "$out" | grep -qE "Coil.toml:6: dependency must specify either path, or git together with sha" \
+  && ok "a Git dependency requires a SHA pin" \
+  || bad "Git dependency without SHA" "got rc=$rc: $out"
 # a valid manifest still builds
 printf '[package]\nname  = "s"\nentry = "src/main.coil"\n' > "$T/strict/Coil.toml"
 ( cd "$T/strict" && rm -f s && "$COIL" build >/dev/null 2>&1 )

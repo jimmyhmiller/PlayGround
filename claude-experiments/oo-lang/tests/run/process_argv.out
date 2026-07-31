@@ -1,0 +1,5 @@
+literal=0 stdout=hello; $(not-a-shell) stderr=
+streams=7 stdout=out stderr=err
+stdin=0 stdout=stdin-isolated
+timeout=124 timedOut=true truncated=false
+limited=125 bytes=64 timedOut=false truncated=true

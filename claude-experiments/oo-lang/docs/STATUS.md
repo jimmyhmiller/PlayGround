@@ -13,7 +13,7 @@ expressions against the real heap, invoke methods, run declared actions, and hot
 code, all while the program runs.
 
 Implemented in **Coil** (a Lisp-syntax low-level language). The compiler is a
-lexer → typechecker → bytecode VM; there is no JIT yet. 331 golden + end-to-end tests
+lexer → typechecker → bytecode VM; there is no JIT yet. 333 golden + end-to-end tests
 gate every change (`python3 tests/run-tests.py`).
 
 - **Thesis:** observability-first. The viewer is not a debugger bolted on — it's the point.
@@ -31,7 +31,7 @@ coil build                       # build the `scry` binary (Coil toolchain requi
 ./scry check foo.scry            # typecheck only, no run
 ./scry inspect foo.scry          # serve static class structure WITHOUT running
 ./scry portal                    # reverse-proxy hub on :7357 — discovers & lists all programs
-python3 tests/run-tests.py       # the full gate (331 tests)
+python3 tests/run-tests.py       # the full gate (333 tests)
 ```
 
 CLI subcommands (all real): `run`, `check`, `inspect`, `portal`, `eval`, `schema-json`,
@@ -297,7 +297,7 @@ These are real, current gaps. Most are deliberate PoC cut-lines, not bugs.
 
 ## Test & quality status
 
-- **331 golden + end-to-end tests, all green.** Categories: `parse/` (AST snapshots +
+- **333 golden + end-to-end tests, all green.** Categories: `parse/` (AST snapshots +
   parse errors), `check/` (50 typecheck-error cases `e01`–`e50` + 25 success cases
   `s01`–`s25`), `eval/` (the reflection/live-change/trace wire surface, ~90 cases),
   `run/` (end-to-end program output, ~90 cases), `run-arenas/`, `run-err/`, `http/`,

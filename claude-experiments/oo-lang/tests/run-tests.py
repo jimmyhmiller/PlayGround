@@ -63,6 +63,9 @@ def main():
     global SAVED_LLM_ENV
     SAVED_LLM_ENV = {k: os.environ.pop(k) for k in
                      ("DEEPSEEK_API_KEY", "DEEPSEEK_KEY", "ANTHROPIC_API_KEY") if k in os.environ}
+    # The shipped assistant defaults to a subscription model. Tests explicitly use its fixture
+    # brain so they remain deterministic and never consume a developer's subscription.
+    os.environ["SCRY_AGENT_TEST_MODE"] = "1"
 
     passed = failed = 0
     fails = []

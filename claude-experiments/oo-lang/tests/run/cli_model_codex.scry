@@ -1,0 +1,8 @@
+import agent.core.{CliModel}
+
+fn main() {
+  let model = CliModel(provider: "codex", executable: "tests/fixtures/fake-codex",
+                       modelId: "", timeoutMs: 60000, maxOutputBytes: 65536)
+  Console.log(model.complete("literal ; $(still-not-a-shell)"))
+  Console.log("calls=${model.calls} exit=${model.lastExit} error=${model.lastError} stderr=${model.lastStderr}")
+}

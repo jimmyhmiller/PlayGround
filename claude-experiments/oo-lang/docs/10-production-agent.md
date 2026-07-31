@@ -33,12 +33,13 @@ codex login status
 
 At `you>`, type `/models`. The in-terminal model picker contains the current subscription-backed
 Claude aliases (Fable 5, Opus, Sonnet) and Codex GPT-5.6 family (Sol, Terra, Luna). Selection applies
-to the current session immediately; `status` shows the active model. Startup remains safely
-offline/read-only until a model is selected.
+to the current session immediately and is saved for the next launch. On a fresh install the agent
+starts with Codex GPT-5.6 Luna. `status` shows the active model, and coding agents can edit the
+workspace without another mode switch.
 
 The developer viewer mirrors these controls for live inspection, but it is not required to operate
-the agent. Provider/access/model policy is ordinary inspectable runtime state; no provider or
-permission environment variable exists. API keys remain environment secrets and are never rendered.
+the agent. Provider/model policy is ordinary inspectable runtime state; no provider or permission
+environment variable exists. API keys remain environment secrets and are never rendered.
 
 ### As-built provider commands
 
@@ -51,9 +52,10 @@ Provider invocations use native `Process.spawnArgv`: executable and arguments go
 stdout/stderr polling, so both providers stream response deltas into the agent TUI. The browsable
 result chunks contain `exitCode`, separately captured
 `stdout`/`stderr`, `timedOut`, `truncated`, and `durationMs`. The native runtime polls both streams
-cooperatively, enforces the TUI-configured deadline and combined output budget, and kills the whole
-child process group on either limit. CLI rate-limit and auth errors become model errors instead of
-empty assistant messages.
+cooperatively, enforces the combined output budget, and kills the whole child process group on that
+limit or explicit cancellation. CLI rate-limit and auth errors become model errors instead of empty
+assistant messages. A reliable wall-clock deadline for asynchronous children remains a production
+gate; synchronous `Process.runArgv` already enforces its timeout.
 
 ## Production gates
 
@@ -62,11 +64,13 @@ order; each phase must be testable without live provider access.
 
 ### P1 — trustworthy process boundary (native core landed)
 
-- **Done:** native argv execution for provider adapters; structured stdout/stderr, wall-clock
-  timeout, process-group termination, combined output byte limit, duration, and cooperative polling.
+- **Done:** native argv execution for provider adapters; structured stdout/stderr, process-group
+  termination, combined output byte limit, and cooperative polling. Synchronous `Process.runArgv`
+  also enforces a wall-clock timeout.
 - **Done:** first-class asynchronous `ChildProcess`, writable stdin, incremental output chunks, and
   provider delta streaming.
-- **Next:** explicit user cancellation, cwd/environment policy, and explicit UTF-8/binary behavior.
+- **Next:** asynchronous wall-clock deadlines, explicit user cancellation, cwd/environment policy,
+  and explicit UTF-8/binary behavior.
 - Add hermetic fake-provider contract tests for success, malformed output, rate limit, timeout,
   cancellation, oversized output, and a child that attempts to read stdin.
 
@@ -88,8 +92,8 @@ Exit gate: every state transition is explicit, bounded, inspectable, and race-te
 - Replace unrestricted `ShellTool` and path-taking file tools with declared capabilities rooted at
   canonical workspace paths. Reject traversal and symlink escapes.
 - Model approval requests as live entities with allow-once, allow-for-run, deny, and expiry.
-- Default all providers and tools to read-only. Workspace writes require an explicit run policy;
-  network and out-of-workspace access are separate grants.
+- Keep provider execution scoped to the workspace; network and out-of-workspace access are separate
+  grants when those capabilities are added.
 - Redact configured secret patterns from messages, process output, traces, and viewer payloads.
 - Add audit records for every capability decision and mutation.
 

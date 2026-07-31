@@ -126,14 +126,14 @@ async function main() {
     else {
       await waitFor(".action-grid .action-btn", 10000);
       const setupActions = await evalPage(`[...document.querySelectorAll('.action-grid .action-label')].map(x=>x.textContent.trim())`);
-      for (const label of ["Use Claude", "Use Codex", "Allow workspace writes", "Require read-only", "Set model", "Set timeout (ms)", "Set output limit (bytes)"]) {
+      for (const label of ["Use Claude", "Use Codex", "Set model", "Set timeout (ms)", "Set output limit (bytes)"]) {
         if (!setupActions.includes(label)) fails.push(`agent setup is missing action ${JSON.stringify(label)}`);
       }
       const switched = await evalPage(`(()=>{const b=[...document.querySelectorAll('.action-btn')].find(x=>x.textContent.includes('Use Claude'));if(!b)return false;b.click();return true;})()`);
       await sleep(250);
       const stateText = await evalPage(`document.querySelector('.field-grid')?.textContent || ''`);
-      if (!switched || !stateText.includes("claude") || !stateText.includes("read-only")) fails.push("Use Claude did not update live provider state to claude/read-only");
-      else ok("agent setup switches the live provider from the viewer (Claude, read-only)");
+      if (!switched || !stateText.includes("claude")) fails.push("Use Claude did not update live provider state to claude");
+      else ok("agent setup switches the live provider from the viewer (Claude)");
       await evalPage(`(()=>{const b=[...document.querySelectorAll('.action-btn')].find(x=>x.textContent.includes('Go offline'));if(b)b.click();})()`);
       await sleep(200);
       // Return to Map so the rest of the established visualization checks run unchanged.

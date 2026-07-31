@@ -1806,7 +1806,7 @@
 ; ============================ Coil.toml manifest ============================
 ; `coil build` / `coil run` with no source file read ./Coil.toml and expand it
 ; into the flags the CLI already accepts. Deliberately
-; tiny: a line-based reader for [package]/[build]/[link]/[run].
+; tiny: a line-based reader for [package]/[dependencies]/[build]/[link]/[run].
 
 (defn m-ws? [(c u8)] (-> bool)
   (or (icmp-eq c (cast u8 32)) (or (icmp-eq c (cast u8 9)) (or (icmp-eq c (cast u8 10)) (icmp-eq c (cast u8 13))))))
@@ -1862,12 +1862,13 @@
                   (store! j (iadd (load j) 1)))))
     0))
 
-; Strict manifest validation (tool-12): the reader knows exactly five sections
-; and a fixed key set per section. An unknown section (e.g. `[dependencies]`,
-; which invites the false inference that deps resolve) or a typo'd key (e.g.
-; `entrypoint` for `entry`) is a LOCATED hard error, not a silent no-op.
+; Strict manifest validation (tool-12): the reader knows exactly six sections
+; and a fixed key set per non-dependency section. A typo'd section/key is a
+; LOCATED hard error, not a silent no-op.
 (defn m-known-section? [(s (slice u8))] (-> bool)
-  (or (str-eq s "package") (or (str-eq s "build") (or (str-eq s "link") (or (str-eq s "cc") (str-eq s "run"))))))
+  (or (str-eq s "package")
+      (or (str-eq s "dependencies")
+          (or (str-eq s "build") (or (str-eq s "link") (or (str-eq s "cc") (str-eq s "run")))))))
 (defn m-err [(a (ptr Allocator)) (lineno i64) (msg (slice u8))] (-> i64)
   (let [w (stderr)]
     (ps w "error: Coil.toml:")
@@ -1879,6 +1880,157 @@
     0))
 (defn m-bad-key [(a (ptr Allocator)) (lineno i64) (section (slice u8)) (key (slice u8))] (-> i64)
   (m-err a lineno (cat3-d a "unknown key '" (cat3-d a key (cat3-d a "' in [" (cat3-d a section "] section"))))))
+
+(defstruct ManifestDep
+  [(name (slice u8))
+   (path (slice u8))
+   (git (slice u8))
+   (sha (slice u8))
+   (resolved (slice u8))
+   (line i64)])
+
+(defn m-dep-name? [(s (slice u8))] (-> bool)
+  (let [n (slice-len s)
+        (mut i) 0
+        (mut ok) (icmp-gt n 0)]
+    (loop (if (or (not (load ok)) (icmp-ge (load i) n))
+              (break)
+              (let [c (cast i64 (slice-get s (load i)))]
+                (if (or (and (icmp-ge c 97) (icmp-le c 122))
+                        (or (and (icmp-ge c 65) (icmp-le c 90))
+                            (or (and (icmp-ge c 48) (icmp-le c 57))
+                                (or (icmp-eq c 45) (icmp-eq c 95)))))
+                    (store! i (iadd (load i) 1))
+                    (store! ok false)))))
+    (load ok)))
+
+(defn m-sha? [(s (slice u8))] (-> bool)
+  (let [n (slice-len s)
+        (mut i) 0
+        (mut ok) (or (icmp-eq n 40) (icmp-eq n 64))]
+    (loop (if (or (not (load ok)) (icmp-ge (load i) n))
+              (break)
+              (let [c (cast i64 (slice-get s (load i)))]
+                (if (or (and (icmp-ge c 48) (icmp-le c 57))
+                        (or (and (icmp-ge c 97) (icmp-le c 102))
+                            (and (icmp-ge c 65) (icmp-le c 70))))
+                    (store! i (iadd (load i) 1))
+                    (store! ok false)))))
+    (load ok)))
+
+; Shell commands below single-quote dependency values. Reject the only bytes that
+; could terminate that quoting (or split a command) instead of trying to invent a
+; second escaping language inside the deliberately-small manifest reader.
+(defn m-shell-value? [(s (slice u8))] (-> bool)
+  (let [n (slice-len s)
+        (mut i) 0
+        (mut ok) true]
+    (loop (if (or (not (load ok)) (icmp-ge (load i) n))
+              (break)
+              (let [c (cast i64 (slice-get s (load i)))]
+                (if (or (icmp-eq c 0) (or (icmp-eq c 10) (or (icmp-eq c 13) (icmp-eq c 39))))
+                    (store! ok false)
+                    (store! i (iadd (load i) 1))))))
+    (load ok)))
+
+; Look up one `key = "value"` in a dependency's inline table. Dependency URLs
+; and paths may contain '='; only the first one in each comma-delimited field is
+; structural.
+(defn m-dep-field [(val (slice u8)) (wanted (slice u8))] (-> (Option (slice u8)))
+  (let [n (slice-len val)
+        inner (if (and (icmp-ge n 2)
+                       (and (icmp-eq (cast i64 (slice-get val 0)) 123)
+                            (icmp-eq (cast i64 (slice-get val (isub n 1))) 125)))
+                  (subslice val 1 (isub n 1))
+                  val)
+        m (slice-len inner)
+        (mut start) 0
+        (mut j) 0
+        (mut out) (None [(slice u8)])]
+    (loop (if (or (icmp-gt (load j) m) (match (load out) (Some [_] true) (None [] false)))
+              (break)
+              (if (or (icmp-eq (load j) m) (icmp-eq (cast i64 (slice-get inner (load j))) 44))
+                  (let [piece (m-trim (subslice inner (load start) (load j)))
+                        eq (m-index piece (cast u8 61))]
+                    (when (icmp-ge eq 0)
+                          (let [key (m-trim (subslice piece 0 eq))
+                                fieldval (m-unquote (m-trim (subslice piece (iadd eq 1) (slice-len piece))))]
+                            (when (str-eq key wanted) (store! out (Some fieldval)))))
+                    (store! start (iadd (load j) 1))
+                    (store! j (iadd (load j) 1)))
+                  (store! j (iadd (load j) 1)))))
+    (load out)))
+
+(defn m-validate-dep-fields [(a (ptr Allocator)) (ln i64) (val (slice u8))] (-> i64)
+  (let [n (slice-len val)
+        inner (subslice val 1 (isub n 1))
+        m (slice-len inner)
+        (mut start) 0
+        (mut j) 0]
+    (loop (if (icmp-gt (load j) m)
+              (break)
+              (if (or (icmp-eq (load j) m) (icmp-eq (cast i64 (slice-get inner (load j))) 44))
+                  (let [piece (m-trim (subslice inner (load start) (load j)))
+                        eq (m-index piece (cast u8 61))]
+                    (if (icmp-lt eq 0)
+                        (m-err a ln "dependency fields must use key = \"value\"")
+                        (let [key (m-trim (subslice piece 0 eq))]
+                          (unless (or (str-eq key "path") (or (str-eq key "git") (str-eq key "sha")))
+                                  (m-err a ln (cat3-d a "unknown dependency field '" (cat3-d a key "'"))))))
+                    (store! start (iadd (load j) 1))
+                    (store! j (iadd (load j) 1)))
+                  (store! j (iadd (load j) 1)))))
+    0))
+
+(defn m-parse-dep [(a (ptr Allocator))
+                   (deps (ptr (ArrayList ManifestDep)))
+                   (name (slice u8))
+                   (val (slice u8))
+                   (ln i64)] (-> i64)
+  (unless (m-dep-name? name)
+          (m-err a ln "dependency names may contain only letters, digits, '-' and '_'"))
+  (let [nd (al-len [ManifestDep] (load deps))
+        (mut di) 0]
+    (loop (if (icmp-ge (load di) nd)
+              (break)
+              (let [old (al-get [ManifestDep] (load deps) (load di))]
+                (when (str-eq (load (field old name)) name)
+                      (m-err a ln (cat3-d a "duplicate dependency '" (cat3-d a name "'"))))
+                (store! di (iadd (load di) 1))))))
+  (let [n (slice-len val)
+        table (and (icmp-ge n 2)
+                   (and (icmp-eq (cast i64 (slice-get val 0)) 123)
+                        (icmp-eq (cast i64 (slice-get val (isub n 1))) 125)))
+        (mut path) ""
+        (mut git) ""
+        (mut sha) ""]
+    (if table
+        (do
+          (m-validate-dep-fields a ln val)
+          (match (m-dep-field val "path") (Some [v] (store! path v)) (None [] 0))
+          (match (m-dep-field val "git") (Some [v] (store! git v)) (None [] 0))
+          (match (m-dep-field val "sha") (Some [v] (store! sha v)) (None [] 0))
+          0)
+        (store! path (m-unquote val)))
+    (let [has-path (icmp-gt (slice-len (load path)) 0)
+          has-git (icmp-gt (slice-len (load git)) 0)
+          has-sha (icmp-gt (slice-len (load sha)) 0)]
+      (unless (or (and has-path (and (not has-git) (not has-sha)))
+                  (and (not has-path) (and has-git has-sha)))
+              (m-err a ln "dependency must specify either path, or git together with sha"))
+      (when (and has-sha (not (m-sha? (load sha))))
+            (m-err a ln "git dependency sha must be a full 40- or 64-digit hexadecimal object id"))
+      (unless (and (m-shell-value? (load path)) (and (m-shell-value? (load git)) (m-shell-value? (load sha))))
+              (m-err a ln "dependency values cannot contain quotes or newlines"))
+      (let [d (alloc-stack ManifestDep)]
+        (store! (field d name) name)
+        (store! (field d path) (load path))
+        (store! (field d git) (load git))
+        (store! (field d sha) (load sha))
+        (store! (field d resolved) "")
+        (store! (field d line) ln)
+        (al-push! [ManifestDep] deps (load d))))
+    0))
 
 (defstruct Manifest
   [(name (slice u8))
@@ -1892,7 +2044,8 @@
    (flags (ptr (ArrayList (slice u8))))
    (rargs (ptr (ArrayList (slice u8))))
    (sources (ptr (ArrayList (slice u8))))
-   (ccflags (ptr (ArrayList (slice u8))))])
+   (ccflags (ptr (ArrayList (slice u8))))
+   (deps (ptr (ArrayList ManifestDep)))])
 
 (defn parse-manifest [(a (ptr Allocator)) (text (slice u8))] (-> (ptr Manifest))
   (let [m (box a Manifest (zeroed Manifest))]
@@ -1908,6 +2061,7 @@
     (store! (field m rargs) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
     (store! (field m sources) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
     (store! (field m ccflags) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m deps) (box a (ArrayList ManifestDep) (al-new [ManifestDep] a)))
     (let [lines (m-lines a text)
           (mut section) ""
           (mut i) 0
@@ -1924,7 +2078,7 @@
                                                (iadd (load i) 1)
                                                (cat3-d a
                                                        "unknown section ["
-                                                       (cat3-d a sec "] (known: package, build, link, cc, run)"))))
+                                                       (cat3-d a sec "] (known: package, dependencies, build, link, cc, run)"))))
                                 (store! section sec)
                                 0)
                               (let [eq (m-index line (cast u8 61))]  ; key = value
@@ -1938,6 +2092,8 @@
                                                       (if (str-eq key "entry")
                                                           (do (store! (field m entry) (m-unquote val)) 0)
                                                           (m-bad-key a ln (load section) key)))
+                                                (str-eq (load section) "dependencies")
+                                                  (m-parse-dep a (load (field m deps)) key val ln)
                                                 (str-eq (load section) "build")
                                                   (cond (str-eq key "out") (do (store! (field m out) (m-unquote val)) 0)
                                                         (str-eq key "target")
@@ -1982,6 +2138,85 @@
               (break)
               (if (icmp-eq (slice-get [u8] s (load i)) b) (do (store! r (load i)) (break)) (store! i (iadd (load i) 1)))))
     (load r)))
+
+(defn m-shell-quoted! [(b (mut StrBuf)) (s (slice u8))] (-> i64)
+  (sb-push-str! (mut b) "'")
+  (sb-push-str! (mut b) s)
+  (sb-push-str! (mut b) "'")
+  0)
+
+(defn m-realpath [(a (ptr Allocator)) (path (slice u8))] (-> (Option (slice u8)))
+  (let [buf (unwrap-ptr [i8] (raw-alloc a 4096 1))
+        r (realpath (slice->cstr a path) buf)]
+    (if (icmp-eq (cast i64 r) 0) (None [(slice u8)]) (Some (cstr->slice buf)))))
+
+; Resolve path dependencies and materialize immutable Git checkouts. Each Git SHA
+; gets its own cache directory, so changing a pin never mutates another resolved
+; dependency. Existing checkouts are forced back to the requested commit, making
+; dirty tracked cache state irrelevant to builds.
+(defn m-prepare-deps [(a (ptr Allocator)) (m (ptr Manifest))] (-> i64)
+  (let [deps (load (field m deps))
+        n (al-len [ManifestDep] (load deps))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [(mut d) (al-get [ManifestDep] (load deps) (load i))]
+                (if (icmp-gt (slice-len (load (field d path))) 0)
+                    (match (m-realpath a (load (field d path)))
+                      (Some [p] (store! (field d resolved) p))
+                      (None []
+                        (m-err a
+                               (load (field d line))
+                               (cat3-d a "dependency '" (cat3-d a (load (field d name)) "' path does not exist")))))
+                    (let [cache (cat3-d a ".coil/deps/" (cat3-d a (load (field d name)) (cat3-d a "-" (load (field d sha)))))
+                          (mut cmd) (sb-new a)]
+                      (sb-push-str! (mut cmd) "mkdir -p '.coil/deps' && if [ -d ")
+                      (m-shell-quoted! (mut cmd) (cat3-d a cache "/.git"))
+                      (sb-push-str! (mut cmd) " ]; then git -C ")
+                      (m-shell-quoted! (mut cmd) cache)
+                      (sb-push-str! (mut cmd) " checkout --detach --force ")
+                      (m-shell-quoted! (mut cmd) (load (field d sha)))
+                      (sb-push-str! (mut cmd) "; else git clone --no-checkout ")
+                      (m-shell-quoted! (mut cmd) (load (field d git)))
+                      (sb-push-str! (mut cmd) " ")
+                      (m-shell-quoted! (mut cmd) cache)
+                      (sb-push-str! (mut cmd) " && git -C ")
+                      (m-shell-quoted! (mut cmd) cache)
+                      (sb-push-str! (mut cmd) " checkout --detach ")
+                      (m-shell-quoted! (mut cmd) (load (field d sha)))
+                      (sb-push-str! (mut cmd) "; fi")
+                      (let [rc (cast i64 (system (slice->cstr a (sb-str (load cmd)))))]
+                        (unless (icmp-eq (wait-code rc) 0)
+                                (m-err a
+                                       (load (field d line))
+                                       (cat3-d a "could not fetch dependency '" (cat3-d a (load (field d name)) "' at requested sha")))))
+                      (match (m-realpath a cache)
+                        (Some [p] (store! (field d resolved) p))
+                        (None []
+                          (m-err a
+                                 (load (field d line))
+                                 (cat3-d a "dependency cache for '" (cat3-d a (load (field d name)) "' is unavailable")))))))
+                (al-set! [ManifestDep] deps (load i) (load d))
+                (store! i (iadd (load i) 1)))))
+    0))
+
+; Prefix the recursive build/run command with exact environment mappings consumed
+; by loader.coil. `env 'NAME=value'` also supports dependency names containing '-'.
+(defn m-emit-dep-env [(a (ptr Allocator)) (b (mut StrBuf)) (m (ptr Manifest))] (-> i64)
+  (let [deps (load (field m deps))
+        n (al-len [ManifestDep] (load deps))
+        (mut i) 0]
+    (when (icmp-gt n 0) (sb-push-str! (mut b) "env "))
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [d (al-get [ManifestDep] (load deps) (load i))]
+                (m-shell-quoted! (mut b)
+                                 (cat3-d a
+                                         "COIL_DEP_"
+                                         (cat3-d a (load (field d name)) (cat3-d a "=" (load (field d resolved))))))
+                (sb-push-str! (mut b) " ")
+                (store! i (iadd (load i) 1)))))
+    0))
 
 ; append the manifest's link flags to a command string builder, each as
 ; `--link-flag <token>` (frameworks -> two tokens, libs -> -lX, then raw flags).
@@ -2071,6 +2306,8 @@
               entry (if (icmp-gt (slice-len [u8] (load (field m entry))) 0) (load (field m entry)) "src/main.coil")
               out (if (icmp-gt (slice-len [u8] (load (field m out))) 0) (load (field m out)) (load (field m name)))
               (mut b) (sb-new a)]
+          (m-prepare-deps a m)
+          (m-emit-dep-env a (mut b) m)
           (sb-push-str! (mut b) self)
           (sb-push-str! (mut b) " ")
           (sb-push-str! (mut b) sub)

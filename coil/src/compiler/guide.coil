@@ -34,8 +34,19 @@ imported must start with `(module NAME)`. `Coil.toml`:
     [package]
     name  = \"app\"
     entry = \"main.coil\"      # default src/main.coil
+    [dependencies]
+    local_math = { path = \"../local-math\" }
+    remote_math = { git = \"https://example.com/math.git\", sha = \"0123456789abcdef0123456789abcdef01234567\" }
     [link]
     libs = [\"m\"]             # -> -lm
+
+A dependency name is the first component of its import path: the examples above
+are imported as `\"local_math/src/math.coil\"` and
+`\"remote_math/src/math.coil\"`. `path` is relative to the project directory. A Git
+dependency requires a full 40- or 64-digit commit SHA; Coil checks out that exact
+commit under `.coil/deps/<name>-<sha>`. Git branches and tags are deliberately not
+accepted as pins. The string shorthand `local_math = \"../local-math\"` is equivalent
+to `{ path = \"../local-math\" }`.
 
 The Wasm target produces an instantiable module. The compiler performs the final
 Wasm-object conversion itself; this target does not invoke a linker process, and
@@ -76,6 +87,8 @@ module declares (the DOM calls you `extern`-declared), then call
 
 Paths resolve relative to the **importing file's own directory**; bare stdlib
 names (`alloc.coil`, `str.coil`, …) resolve to the bundled library from anywhere.
+In project mode, an import beginning with a declared dependency name resolves from
+that dependency's root after ordinary file-relative lookup.
 ⚠ `extern` declarations are NOT deduped across modules — declare each libc
 extern in ONE module and `:use *` it, or two importers colliding will fail to link.
 

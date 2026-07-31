@@ -438,6 +438,9 @@ build/bin/coil build src/examples/args.coil -o /tmp/args && /tmp/args a b c     
 
 # Projects, tests, formatting, docs
 build/bin/coil new myapp && cd myapp && .build/bin/coil run          # Coil.toml + src/main.coil
+# Coil.toml dependencies may use { path = "../lib" } or
+# { git = "https://example.com/lib.git", sha = "<full commit SHA>" }.
+# Import through the dependency name: (import "lib/src/lib.coil" :use *)
 build/bin/coil test  mytests.coil                            # run every (deftest …), forked per test
 build/bin/coil check src/examples/fib.coil                       # typecheck only, no object
 build/bin/coil fmt   --check src/examples/fib.coil               # format (--write to apply)

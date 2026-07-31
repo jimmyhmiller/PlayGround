@@ -1,0 +1,22 @@
+fn args2(a: String, b: String) -> List<String> {
+  let xs = List<String>()
+  xs.push(a)
+  xs.push(b)
+  xs
+}
+
+fn main() {
+  let child = Process.spawnArgv("/bin/sh", args2("-c", "read x; printf first; sleep 0.05; printf second; printf warning >&2"), 2000, 65536)
+  Console.log("wrote=${child.write("go\n")}")
+  child.closeInput()
+  var out = ""
+  var err = ""
+  var code = -1
+  while code == -1 {
+    let chunk = child.poll(20)
+    out = out + chunk.stdout
+    err = err + chunk.stderr
+    code = chunk.exitCode
+  }
+  Console.log("exit=${code} stdout=${out} stderr=${err}")
+}

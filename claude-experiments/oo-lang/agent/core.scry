@@ -611,7 +611,7 @@ class AnthropicModel implements Model {
 }
 
 // A subscription-backed model adapter. It delegates one invocation to an installed CLI which
-// already owns authentication, model access, sandboxing, and its internal tool loop. This is
+// already owns authentication, model access, and its internal tool loop. This is
 // deliberately different from AnthropicModel: CLI providers return a final answer, so Scry does
 // not replay their private tool calls through the local Tool list. The CliModel entity and every
 // Message remain live in Scry's heap for the viewer.
@@ -619,7 +619,6 @@ class CliModel implements Model {
   provider: String          // "claude" | "codex"
   executable: String
   modelId: String           // empty => provider default
-  access: String            // "read-only" | "workspace-write"
   timeoutMs: Int
   maxOutputBytes: Int
   calls: Int
@@ -633,12 +632,11 @@ class CliModel implements Model {
 
   fn streamedLastResponse() -> Bool { self.lastStreamed }
 
-  fn init(provider: String, executable: String, modelId: String, access: String,
+  fn init(provider: String, executable: String, modelId: String,
           timeoutMs: Int, maxOutputBytes: Int) {
     self.provider = provider
     self.executable = executable
     self.modelId = modelId
-    self.access = access
     self.timeoutMs = timeoutMs
     self.maxOutputBytes = maxOutputBytes
     self.calls = 0
@@ -686,11 +684,7 @@ class CliModel implements Model {
       args.push("--include-partial-messages")
       args.push("--verbose")
       args.push("--permission-mode")
-      if self.access == "workspace-write" {
-        args.push("acceptEdits")
-      } else {
-        args.push("plan")
-      }
+      args.push("acceptEdits")
       if self.modelId.len() > 0 {
         args.push("--model")
         args.push(self.modelId)
@@ -701,8 +695,7 @@ class CliModel implements Model {
       args.push("--ephemeral")
       args.push("--skip-git-repo-check")
       args.push("--sandbox")
-      if self.access == "workspace-write" { args.push("workspace-write") }
-      else { args.push("read-only") }
+      args.push("workspace-write")
       if self.modelId.len() > 0 {
         args.push("--model")
         args.push(self.modelId)
@@ -813,8 +806,7 @@ class CliModel implements Model {
         }
         if messageId == 0 {
           child.write("{\"method\":\"initialized\",\"params\":{}}\n")
-          let sandbox = self.access
-          child.write("{\"method\":\"thread/start\",\"id\":1,\"params\":{\"model\":" + jq(self.modelId) + ",\"approvalPolicy\":\"never\",\"sandbox\":" + jq(sandbox) + ",\"ephemeral\":true}}\n")
+          child.write("{\"method\":\"thread/start\",\"id\":1,\"params\":{\"model\":" + jq(self.modelId) + ",\"approvalPolicy\":\"never\",\"sandbox\":\"workspace-write\",\"ephemeral\":true}}\n")
         }
         let threadId = codexThreadId(line)
         if threadId.len() > 0 {

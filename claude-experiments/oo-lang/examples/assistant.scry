@@ -2,14 +2,14 @@
 // a TRUE agent loop. The brain is now a real `Model` (interface): an AnthropicModel that does
 // model-driven tool use against the live /v1/messages API when selected in the viewer, subscription
 // delegation through Claude/Codex CLIs, or a deterministic ScriptedModel offline. They drive the
-// same observable agent shell; provider/model/access are live Orchestrator state, not launch flags.
+// same observable agent shell; provider/model are live Orchestrator state, not launch flags.
 // In the native loop the model decides, tools run, and results feed back until a final answer.
 // Structurally real (arena
 // entities, real sub-agents on real OS threads, a live conversation) and — with a key — honestly
 // real (a live model actually calls a tool).
 //
 // Run it:   ./scry run examples/assistant.scry        (opens the viewer + reads your input)
-// Then at the `you> ` prompt, try:
+// Then at the `> ` prompt, try:
 //     hello                              <- plain chat: one agent turn (no tool needed)
 //     what is 17 times 23?               <- the model picks the `calculate` tool, runs it, answers
 //     weather in Tokyo?                  <- the model picks `get_weather` with the location it read
@@ -33,7 +33,7 @@
 //   class Session {
 //     history: List<String>
 //     fn init() { self.history = List<String>() }
-//     fn renderPrompt() -> String { "you> " }
+//     fn renderPrompt() -> String { "> " }
 //     fn suggest(input: String) -> String {
 //       if self.history.len() == 0 { "" }
 //       else { "  [suggestions: help | research <topic> | exit  (last: " + self.history.get(self.history.len() - 1) + ")]" }
@@ -175,20 +175,20 @@ class LoopWorker implements Runnable {
 }
 
 // A ONE-SHOT turn on a background thread — used by the "Ask" action so that a message sent from
-// the VIEWER behaves like one typed at the prompt: it echoes `you> <question>` and prints the
+// the VIEWER behaves like one typed at the prompt: it echoes the question and prints the
 // reply in the terminal (the same way the input loop's dispatch does), AND it runs off the eval
 // thread so the viewer stays responsive while the live model works (the eval returns immediately).
 class TurnWorker implements Runnable {
   agent: Agent
   text: String
   fn run() -> Void {
-    // leading newline breaks off the pending `you> ` prompt; the marker shows it came from the viewer
+    // leading newline breaks off the pending prompt; the marker shows it came from the viewer
     Console.log("\n[viewer] " + self.text)
     let reply = self.agent.runLoop(self.text)
     if !self.agent.lastResponseStreamed { Console.log(self.agent.banner() + " " + reply) }
     // The main loop is still blocked in readLine (it drew the prompt before we ran), so it won't
-    // redraw it — re-show `you> ` ourselves so the terminal looks ready for the next input.
-    Console.print("you> ")
+    // redraw it so the terminal looks ready for the next input.
+    Console.print("> ")
   }
 }
 
@@ -197,7 +197,7 @@ class TurnWorker implements Runnable {
 class Session {
   history: List<String>
   fn init() { self.history = List<String>() }
-  fn renderPrompt() -> String { "you> " }
+  fn renderPrompt() -> String { "> " }
   fn suggest(input: String) -> String { "" }
 }
 
@@ -210,7 +210,6 @@ class Orchestrator {
   tools: List<Tool>
   brainName: String
   provider: String
-  access: String
   modelId: String
   apiBaseUrl: String
   timeoutMs: Int
@@ -226,34 +225,67 @@ class Orchestrator {
     self.tools.push(FileReadTool(root: "."))             // REAL: reads files
     self.tools.push(FileWriteTool(root: "."))            // REAL: writes files
 
-    // Provider policy is live application state, not process configuration. Startup is deliberately
-    // offline + read-only; choose Claude/Codex/API and permissions from this entity's viewer actions.
-    self.provider = "offline"
-    self.access = "read-only"
-    self.modelId = ""
+    // Model choice is persisted across sessions. A fresh install starts on Codex Luna.
+    self.provider = "codex"
+    self.modelId = "gpt-5.6-luna"
     self.apiBaseUrl = "https://api.deepseek.com/anthropic"
     self.timeoutMs = 120000
     self.maxOutputBytes = 4194304
     self.configError = ""
-    self.brainName = "ScriptedModel - offline"
+    self.brainName = "Codex subscription"
     self.agent = Agent(name: "assistant", role: "orchestrator", color: "36",
                        model: ScriptedModel(persona: "assistant"), tools: self.tools)
     self.subs = List<Agent>()
     self.handles = List<ThreadHandle>()
+    match Env.get("SCRY_AGENT_TEST_MODE") {
+      Some(_) -> {
+        self.provider = "offline"
+        self.modelId = ""
+        self.brainName = "ScriptedModel - offline"
+      }
+      None -> {
+        match File.read(self.modelStatePath()) {
+          Some(saved) -> { self.restoreModel(saved) }
+          None -> {}
+        }
+        self.applyConfig()
+      }
+    }
+  }
+
+  fn modelStatePath() -> String {
+    match Env.get("HOME") {
+      Some(home) -> home + "/.scry-agent-model"
+      None -> ".scry-agent-model"
+    }
+  }
+
+  fn restoreModel(saved: String) {
+    if saved == "fable" || saved == "opus" || saved == "sonnet" {
+      self.provider = "claude"
+      self.modelId = saved
+    } else if saved == "gpt-5.6-sol" || saved == "gpt-5.6-terra" || saved == "gpt-5.6-luna" {
+      self.provider = "codex"
+      self.modelId = saved
+    }
+  }
+
+  fn saveModel() {
+    if !File.write(self.modelStatePath(), self.modelId) {
+      self.configError = "Could not save the selected model"
+    }
   }
 
   fn applyConfig() {
     self.configError = ""
     if self.provider == "claude" {
       self.agent.model = CliModel(provider: "claude", executable: "claude", modelId: self.modelId,
-                                  access: self.access, timeoutMs: self.timeoutMs,
-                                  maxOutputBytes: self.maxOutputBytes)
-      self.brainName = "Claude subscription (" + self.access + ")"
+                                  timeoutMs: self.timeoutMs, maxOutputBytes: self.maxOutputBytes)
+      self.brainName = "Claude subscription"
     } else if self.provider == "codex" {
       self.agent.model = CliModel(provider: "codex", executable: "codex", modelId: self.modelId,
-                                  access: self.access, timeoutMs: self.timeoutMs,
-                                  maxOutputBytes: self.maxOutputBytes)
-      self.brainName = "Codex subscription (" + self.access + ")"
+                                  timeoutMs: self.timeoutMs, maxOutputBytes: self.maxOutputBytes)
+      self.brainName = "Codex subscription"
     } else if self.provider == "api" {
       match resolveKey() {
         Some(key) -> {
@@ -282,8 +314,6 @@ class Orchestrator {
   fn useCodex() { self.provider = "codex" self.applyConfig() }
   fn useApi() { self.provider = "api" self.applyConfig() }
   fn useOffline() { self.provider = "offline" self.applyConfig() }
-  fn allowWorkspaceWrites() { self.access = "workspace-write" self.applyConfig() }
-  fn requireReadOnly() { self.access = "read-only" self.applyConfig() }
   fn setModel(model: String) { self.modelId = model self.applyConfig() }
   fn useProviderDefaultModel() { self.modelId = "" self.applyConfig() }
   fn setTimeoutMs(ms: Int) {
@@ -297,15 +327,20 @@ class Orchestrator {
   fn setApiBaseUrl(url: String) { self.apiBaseUrl = url self.applyConfig() }
 
   fn showConfig() {
-    Console.log("\x1b[1mAgent setup\x1b[0m")
+    Console.log("\x1b[1mSession\x1b[0m")
     Console.log("   active:       ${self.brainName}")
     Console.log("   provider:     ${self.provider}")
-    Console.log("   access:       ${self.access}")
     if self.modelId.len() == 0 { Console.log("   model:        provider default") }
     else { Console.log("   model:        ${self.modelId}") }
     Console.log("   timeout:      ${self.timeoutMs} ms")
     Console.log("   output limit: ${self.maxOutputBytes} bytes")
     if self.configError.len() > 0 { Console.log("   error:        ${self.configError}") }
+  }
+
+  fn activeModelLabel() -> String {
+    if self.provider == "offline" { "offline" }
+    else if self.modelId.len() > 0 { self.modelId }
+    else { self.provider }
   }
 
   fn chooseModel(key: String) {
@@ -317,6 +352,7 @@ class Orchestrator {
     else if key == "6" || key == "luna" { self.provider = "codex" self.modelId = "gpt-5.6-luna" }
     else { self.configError = "Choose a model from the catalog" return }
     self.applyConfig()
+    self.saveModel()
     Console.log("\x1b[32m✓\x1b[0m model switched to ${self.brainName}")
   }
 
@@ -396,7 +432,7 @@ class Orchestrator {
   }
 }
 
-// API secrets still come from the environment, but provider/model/access selection is live state on
+// API secrets still come from the environment, but provider/model selection is live state on
 // Orchestrator and is changed through `/models` (with viewer actions as a secondary developer
 // control surface). The native API path accepts:
 //   key:   DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY
@@ -419,7 +455,6 @@ fn main() {
 
   var running = true
   while running {
-    Console.print("\x1b[2m[${orch.provider}/${orch.access}]\x1b[0m ")
     Console.print(session.renderPrompt())
     let inp = Console.readLine()
     match inp {
@@ -482,8 +517,6 @@ action "Use Claude" for Orchestrator { self.useClaude() }
 action "Use Codex" for Orchestrator { self.useCodex() }
 action "Use native API" for Orchestrator { self.useApi() }
 action "Go offline" for Orchestrator { self.useOffline() }
-action "Allow workspace writes" for Orchestrator { self.allowWorkspaceWrites() }
-action "Require read-only" for Orchestrator { self.requireReadOnly() }
 action "Set model" for Orchestrator (model: String) { self.setModel(model) }
 action "Use provider default model" for Orchestrator { self.useProviderDefaultModel() }
 action "Set timeout (ms)" for Orchestrator (ms: Int) { self.setTimeoutMs(ms) }

@@ -43,12 +43,28 @@ runtimes, the run log, and capability probes. None of it is seeded.
 ## Structure
 
 - `src/main.coil` contains the application state, explicit state transitions, data, layout, and rendering.
+- `src/ui.coil` is the reusable Raylib UI foundation: colors, geometry, text, clipping, lines, and rectangle primitives. It has no workflow or application state.
 - `src/workflow.coil` parses workflow programs, interprets their dependency graph at runtime, records run history, and probes integrations.
 - `src/raylib.coil` is the small audited C binding used by the application.
 - `workflows/*.flow` are executable workflows discovered by the interface at startup and after creation.
 - `assets/fonts` contains IBM Plex Mono and IBM Plex Sans at high rasterization sizes for clean UI text.
 - `licenses/IBM-Plex-OFL.txt` contains the font license.
 - `THIRD_PARTY_NOTICES.md` and `licenses/native-sdk-Apache-2.0.txt` document the Native SDK text-widget adaptation.
+
+## Reusing the UI foundation
+
+Import the module and use the exported primitives directly from another Coil
+application:
+
+```clojure
+(import "ui.coil" :use [color fill-rectangle draw-text])
+
+(fill-rectangle 24.0 24.0 160.0 40.0 (color 23 23 23))
+(draw-text sans c"Reusable UI" 36.0 35.0 14.0 (color 250 250 250))
+```
+
+The caller owns state, input, and layout. This makes the module suitable for a
+future Coil dependency without pulling in Flowline's workflow model.
 
 All durable application state lives in `AppState`. Raylib input is captured into an `InputFrame`, and `apply-input` is the single transition boundary.
 

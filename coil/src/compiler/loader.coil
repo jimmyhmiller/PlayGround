@@ -238,6 +238,63 @@
                 d (read-file a lc)]
             (if (icmp-eq (slice-len d) 0) (embedded-lib bn) d)))))
 
+; Project dependencies are passed by manifest mode as `COIL_DEP_<name>=<root>`.
+; An import whose first path component is that name resolves from the dependency
+; root, so `[dependencies] math = { path = "../math" }` makes
+; `(import "math/src/math.coil" ...)` available without weakening ordinary
+; file-relative import semantics.
+(defn dep-slash [(path (slice u8))] (-> i64)
+  (let [n (slice-len path)
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get path (load i))) 47)
+                  (do (store! found (load i)) (break))
+                  (store! i (iadd (load i) 1)))))
+    (load found)))
+
+(defn dep-path-contained? [(root (slice u8)) (path (slice u8))] (-> bool)
+  (let [rn (slice-len root)
+        pn (slice-len path)
+        (mut i) 0
+        (mut same) (icmp-ge pn rn)]
+    (loop (if (or (not (load same)) (icmp-ge (load i) rn))
+              (break)
+              (if (icmp-eq (slice-get root (load i)) (slice-get path (load i)))
+                  (store! i (iadd (load i) 1))
+                  (store! same false))))
+    (and (load same)
+         (or (icmp-eq pn rn)
+             (and (icmp-gt pn rn)
+                  (or (and (icmp-eq rn 1) (icmp-eq (cast i64 (slice-get root 0)) 47))
+                      (icmp-eq (cast i64 (slice-get path rn)) 47)))))))
+
+(defn resolve-dependency [(a (ptr Allocator)) (path (slice u8))] (-> (Option Resolved))
+  (let [slash (dep-slash path)]
+    (if (icmp-le slash 0)
+        (None [Resolved])
+        (let [name (subslice path 0 slash)
+              rel (subslice path (iadd slash 1) (slice-len path))
+              envname (sconcat a "COIL_DEP_" name)
+              ep (getenv (slice->cstr a envname))]
+          (if (icmp-eq (cast i64 ep) 0)
+              (None [Resolved])
+              (let [root (cstr->slice ep)
+                    candidate (path-join a root rel)
+                    buf (unwrap-ptr [i8] (raw-alloc a 4096 1))
+                    r (realpath (slice->cstr a candidate) buf)]
+                (if (icmp-eq (cast i64 r) 0)
+                    (None [Resolved])
+                    (let [canon (cstr->slice buf)]
+                      (if (not (dep-path-contained? root canon))
+                          (None [Resolved])
+                          (let [rp (alloc-stack Resolved)]
+                            (store! (field rp text) (read-file a buf))
+                            (store! (field rp incdir) (dirname canon))
+                            (store! (field rp disp) canon)
+                            (Some (load rp))))))))))))
+
 (defn resolve-source [(a (ptr Allocator)) (s (mut LS)) (form (ptr Sexp)) (base (slice u8)) (path (slice u8))] (-> Resolved)
   (let [joined (path-join a base path)
         jc (slice->cstr a joined)
@@ -252,27 +309,30 @@
           (store! (field rp incdir) incdir)
           (store! (field rp disp) canon)
           (load rp))
-        (let [bn (basename path)]
-          (if (bundled? bn)
-              (let [text (bundled-text a bn)
-                    rp (alloc-stack Resolved)]
-                ; incdir = the bundled sentinel, NOT `base`: a bundled lib's nested
-                ; imports must resolve to bundled siblings, not to files in whatever
-                ; directory pulled it in (tool-1: file-relative bases are real dirs).
-                (store! (field rp text) text)
-                (store! (field rp incdir) (bundled-base))
-                (store! (field rp disp) (sconcat3 a "<bundled " bn ">"))
-                (load rp))
-              (do
-                (ls-set-err! (mut s)
-                             (diag-at-form form
-                                           (sconcat a
-                                                    (sconcat3 a
-                                                              "import '"
-                                                              path
-                                                              "': not found (no such file, and not a bundled stdlib module)")
-                                                    "")))
-                (zeroed Resolved)))))))
+        (match (resolve-dependency a path)
+          (Some [dep] dep)
+          (None []
+            (let [bn (basename path)]
+              (if (bundled? bn)
+                  (let [text (bundled-text a bn)
+                        rp (alloc-stack Resolved)]
+                    ; incdir = the bundled sentinel, NOT `base`: a bundled lib's nested
+                    ; imports must resolve to bundled siblings, not to files in whatever
+                    ; directory pulled it in (tool-1: file-relative bases are real dirs).
+                    (store! (field rp text) text)
+                    (store! (field rp incdir) (bundled-base))
+                    (store! (field rp disp) (sconcat3 a "<bundled " bn ">"))
+                    (load rp))
+                  (do
+                    (ls-set-err! (mut s)
+                                 (diag-at-form form
+                                               (sconcat a
+                                                        (sconcat3 a
+                                                                  "import '"
+                                                                  path
+                                                                  "': not found (no such file, project dependency, or bundled stdlib module)")
+                                                        "")))
+                    (zeroed Resolved)))))))))
 
 (defn l-as-list [(f (ptr Sexp))] (-> (ptr (ArrayList Sexp)))
   (match (load (field f kind))
