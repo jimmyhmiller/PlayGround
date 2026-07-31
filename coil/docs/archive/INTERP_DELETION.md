@@ -14,14 +14,14 @@ typechecks, and its engine path should be gated when the seed is refreshed.
 Deliberate semantic changes, all located errors instead of silent behavior: pointer
 results can't be materialized as compile-time constants; a non-terminating comptime
 now hangs (fuel died with the interpreter) exactly like a non-terminating macro
-always did under the engine. `docs/DECISIONS.md` decision 7 is DONE. The rest of
+always did under the engine. `docs/decisions/DECISIONS.md` decision 7 is DONE. The rest of
 this file is the historical record of how it got there.
 
 ---
 
 # (historical) status, architecture, and the plan to finish
 
-_Decision 7 of `docs/DECISIONS.md` ("delete the comptime interpreter"), written up so the
+_Decision 7 of `docs/decisions/DECISIONS.md` ("delete the comptime interpreter"), written up so the
 remaining work can be executed as a focused session. This is the one reviewed item still
 open. Everything else from the roadmap and the wasm/scry work is landed._
 
@@ -90,7 +90,7 @@ register; **3a** added a write-through `(ptr T)` path for readable aggregates.
 ## Why it is not done: three entangled reroutes + a coverage gap
 
 `eval` has **three callers**, and all four deletion targets (the evaluator, the `COIL_META`
-flag — 18 refs, `metaprog-poc/compile-and-run/parity.sh`, and the `guide.coil` interp
+flag — 18 refs, `tests/metaprogramming/compile-and-run/parity.sh`, and the `guide.coil` interp
 mention) stay reachable until all three are off `eval`:
 
 ### (A) `fold-expr` readback coverage gap — `comptime_eval.coil`
@@ -124,7 +124,7 @@ it has layout implications that must be traced, not assumed), then make them agr
   through the compiled engine needs the metashim functions injected+checked+lowered into the
   meta sub-program (`metalower` emits `metashim.mp-*` calls for every quasiquote/code-op) —
   a representation mismatch that requires restructuring `elaborate-metas`. Gate-visible via
-  `selfhost/oracle/features/meta_stage3.coil`.
+  `tests/compiler/oracle/features/meta_stage3.coil`.
 - **`finish-macro`'s `eval-seq` fallback** (`expander.coil:291`) is the **hard** one. A
   compiled fast-path already exists (`metaengine.coil:404` "run the compiled entry instead of
   `eval-seq`"; `finish-macro` routes every entry through it once built — `expander.coil:735`),
@@ -199,12 +199,12 @@ the corpus.
    match) is part of this step, not step 7.
 7. **Delete** `comptime.coil`'s `eval`/`eval-seq`/`eval-args` tree-walker, the `COIL_META`
    flag (18 refs — the driver plumbing, `metahost` reentry, gate hooks), `parity.sh`, and the
-   `guide.coil` interp mention. Update `docs/DECISIONS.md` decision 7 to DONE.
+   `guide.coil` interp mention. Update `docs/decisions/DECISIONS.md` decision 7 to DONE.
 
 ## Step 5 is much smaller than this doc assumed — MEASURED
 
 `finish-macro`'s `eval-seq` fallback was instrumented and run over the corpus (164 files:
-`examples/`, `lib/`, `apps/`, `metaprog-poc/`, `mini-scheme/`, `bench/`).
+`src/examples/`, `src/stdlib/`, `src/apps/`, `tests/metaprogramming/`, `src/apps/mini-scheme/`, `src/benchmarks/`).
 
 - **Compiler self-compile — the bootstrap path, the fixpoint-risk one: 2 expansions.**
   Both `slice.dbg-slice-get` / `slice.dbg-slice-set`.
@@ -220,9 +220,9 @@ the corpus.
     CTMARK   engine-up -> run-expand
 
 Round 0's `check-program` fails because the closure sub-program contains ordinary functions the
-macros call — `slice-get` (`lib/slice.coil:106`) whose body holds the unexpanded macro call
+macros call — `slice-get` (`src/stdlib/slice.coil:106`) whose body holds the unexpanded macro call
 `(dbg-slice-get s i)`. The tower expands it on the interpreter; round 1 then checks and the
-engine comes up. But `dbg-slice-get` (`lib/slice.coil:58`) does NOT depend on `slice-get`: its
+engine comes up. But `dbg-slice-get` (`src/stdlib/slice.coil:58`) does NOT depend on `slice-get`: its
 body uses only builtins, `debug-checks?` and quasiquote, so it checks standalone TODAY. The
 cycle is purely an artifact of ONE all-or-nothing check over the whole qual closure — a single
 unexpanded call poisons the batch and nobody gets compiled.
@@ -235,7 +235,7 @@ use only builtins plus code-ops the engine handles natively.
 
 The obvious fix ("check each qual's closure in isolation, stand up a partial engine for the ones
 that check standalone") was built and measured. **Result: zero effect.** Identical CTINTERP
-output with staging on vs off — same 2 fallbacks on `examples/fib.coil`, engine still inactive.
+output with staging on vs off — same 2 fallbacks on `src/examples/fib.coil`, engine still inactive.
 
 **Root cause — the isolation does not isolate.** `closure-funcs` does not merely take the
 transitive callees of the seeds: it *additionally* seeds the callees of **every impl method and
@@ -258,7 +258,7 @@ with empty impls/consts) and `check-program` it standalone.
 
 - **Compiler self-compile: 100% — every qual checks standalone.** The bootstrap
   path is fully stageable with pruning alone.
-- **Corpus (examples/lib/metaprog-poc/mini-scheme/bench): 4264 ok / 19 fail (99.6%).**
+- **Corpus (src/examples/src/stdlib/tests/metaprogramming/src/apps/mini-scheme/bench): 4264 ok / 19 fail (99.6%).**
   The 19 failures are 11 distinct quals with exactly TWO root causes:
   1. `assert.tr-emit-main`/`tr-run`/`tr-test-name` — a genuine transitive callee
      (`slice.subslice`) carries the unexpanded `(dbg-subslice …)` call. Not a
@@ -284,20 +284,20 @@ trivially re-creatable from this description.
 divergent**. Both divergences are engine differences the deletion must resolve, and
 both reproduce with the same mechanism the doc already describes:
 
-- **`lib/assert.coil` — RC-DIFF (interp=1, compiled=0).** Under `COIL_META=interp`
+- **`src/stdlib/assert.coil` — RC-DIFF (interp=1, compiled=0).** Under `COIL_META=interp`
   the interpreter dies on its own capability gap (`comptime: generic call to
   'slice.slice-len' isn't supported yet`); the compiled engine compiles it fine. A
   file the WEAKER engine cannot process at all is exactly the mac-12 complaint —
   and it means parity.sh's "both engines agree" contract already has a standing
   exception that step 5/6 work must either fix or bless.
-- **`metaprog-poc/minrep_test.coil` — DIAG-DIFF.** An erroring macro reports
+- **`tests/metaprogramming/minrep_test.coil` — DIAG-DIFF.** An erroring macro reports
   `macro 'minrep.simple-check' did not return Code` on the interpreter vs
   `compilation failed: checker reported error(s) above` on the compiled engine.
   Diagnostic-wording parity for failing metaprograms is part of "100% compatible".
 
 ## Platform note (Linux port, 2026-07-21)
 
-The compiler now also self-hosts on Linux x86-64 (`docs/LINUX_PORT.md`). Two facts
+The compiler now also self-hosts on Linux x86-64 (`docs/reference/LINUX_PORT.md`). Two facts
 matter for this plan:
 
 - **The MObj in-memory JIT route is arm64-only** — `main.coil` registers
@@ -307,7 +307,7 @@ matter for this plan:
   MObj/JIT route" is an arm64 optimization, not the portable mechanism: the
   incremental engine must keep a dylib path (or grow an x86-64 MObj emitter).
 - Linux is a second verification platform for every Phase-2 step:
-  `selfhost/rebootstrap-linux.sh` (LLVM-backend fixpoint + linux gate-full/gate-run
+  `scripts/compiler/rebootstrap-linux.sh` (LLVM-backend fixpoint + linux gate-full/gate-run
   + gate-cli) and parity.sh both run there.
 
 ## Landmines
@@ -327,16 +327,16 @@ functions are viable; this was an open risk and is now settled.
 
 **`rebootstrap-nollvm.sh` is broken at HEAD, unrelated to any of this work.** The committed
 nollvm seed predates the `isize` surface (`cimport.coil:39`), so stage1 dies with
-`unknown type 'isize'`. Reproduced in a clean HEAD worktree. Workaround: `STAGE0=./coil`.
-**The nollvm seed needs a refresh** (`selfhost/refresh-seed.sh`) as its own commit — this is
+`unknown type 'isize'`. Reproduced in a clean HEAD worktree. Workaround: `STAGE0=build/bin/coil`.
+**The nollvm seed needs a refresh** (`scripts/compiler/refresh-seed.sh`) as its own commit — this is
 exactly the seed-refresh gotcha below, already tripped. Also pre-existing: `gate-expand`,
-`gate-ir`, `gate-load` fail 0-pass on the shipped `./coil` too; not in the authoritative set.
+`gate-ir`, `gate-load` fail 0-pass on the shipped `build/bin/coil` too; not in the authoritative set.
 
 ## Gotchas (learned this session — do not relearn the hard way)
 - **Seed refresh.** If any change makes the compiler's own source use a surface the committed
   seed predates, the default `rebootstrap.sh` fails ("unknown …"). Bootstrap via
-  `COIL_STDLIB_DIR="$PWD" STAGE0=./coil ./selfhost/rebootstrap.sh`, then refresh the seed
-  (`cp /tmp/coil-rb2 selfhost/seed/coil-seed && codesign -s - --force …`) and confirm the
+  `COIL_STDLIB_DIR="$PWD" STAGE0=build/bin/coil ./scripts/compiler/rebootstrap.sh`, then refresh the seed
+  (`cp /tmp/coil-rb2 bootstrap/seeds/native/coil-seed && codesign -s - --force …`) and confirm the
   DEFAULT rebootstrap is green. (Unlikely to bite here — no new language surface — but know it.)
 - **Ref-regen discipline.** A behaviour-only change leaves `gate-full` byte-identical. If IR/
   dumps move, regen and verify EVERY changed reference line is an explained consequence; the
@@ -357,11 +357,11 @@ today regresses.
 ## NEXT STEPS (ordered — resume here)
 
 1. **Commit Phase 1b** (the comptime-UB guard). Implemented and verified, sitting uncommitted in
-   `selfhost/src/comptime_eval.coil`. It is a standalone bug fix and stands on its own merit
+   `src/compiler/comptime_eval.coil`. It is a standalone bug fix and stands on its own merit
    whether or not the deletion proceeds.
 2. **Refresh the nollvm seed** as its own commit, so `rebootstrap-nollvm.sh` works from a clean
    checkout again. Independent of the deletion; currently masks real nollvm verification behind
-   a `STAGE0=./coil` workaround.
+   a `STAGE0=build/bin/coil` workaround.
 3. ✅ **Step 5, Phase A — incremental engine: LANDED 2026-07-21** (with Phase B, same
    commit). `MEEntry` now carries its build's quasiquote registry (each dylib's code
    indexes the registry of the metalower run that produced it), `meta-engine-setup`
@@ -446,7 +446,7 @@ today regresses.
    `eval`/`eval-seq`/`eval-args`, `build-value`/`build-content`'s interp-only
    callers, `comptime-cap-gap?`, both env flags, `parity.sh` (its job is done — the
    CI parity pin goes with it), the `guide.coil` interp mention; mark
-   `docs/DECISIONS.md` decision 7 DONE. As of tonight the unification is
+   `docs/decisions/DECISIONS.md` decision 7 DONE. As of tonight the unification is
    FUNCTIONALLY COMPLETE: by default, macros (step 5), `(meta …)` generators
    (step 4), and `(comptime …)`/`(const …)` (step 6) all execute on the compiled
    engine; the tree-walker is dead code behind the two compat flags.

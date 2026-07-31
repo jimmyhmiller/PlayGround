@@ -1,9 +1,0 @@
-linux-x86_64 LLVM-FREE seed, built from source at the commit named below (the seed
-necessarily predates its own commit).
-
-source: selfhost/src/main_x64.coil (no LLVM backend compiled in)
-proof:  no-libLLVM (ldd) + x64 fixpoint (stage2.o==stage3.o) + x64 gate-run
-needs:  a C compiler (cc) to link. That is the entire toolchain — no libLLVM, no Rust.
-
-commit: 9d6c8ef17fce230d133d3bcc11a2c53a58cf0878
-built:  2026-07-29T03:30:36Z

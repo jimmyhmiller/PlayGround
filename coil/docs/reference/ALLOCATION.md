@@ -1,13 +1,13 @@
 # Allocation in the frontend, and the arena that is already there
 
 Where the compiler's remaining time goes, why allocation is the biggest single item, and
-what routing the frontend through `lib/alloc.coil`'s existing `Arena` would and would not
+what routing the frontend through `src/stdlib/alloc.coil`'s existing `Arena` would and would not
 buy. Written as a handoff after the 2026-07-28 speed work took the whole-compiler
 frontend from 10.16s to 0.51s.
 
 ## The measurement
 
-`coil build selfhost/src/main.coil -o /dev/null` — compile-check only, no codegen, over a
+`coil build src/compiler/main.coil -o /dev/null` — compile-check only, no codegen, over a
 51,183-line import closure. 0.51s. Sampled at 1 ms, bucketed by leaf symbol:
 
 | | share | of 510 ms |
@@ -47,7 +47,7 @@ is not what happened.
 
 ## What already exists
 
-`lib/alloc.coil` already has a bump allocator. This work is **routing, not building**.
+`src/stdlib/alloc.coil` already has a bump allocator. This work is **routing, not building**.
 
 ```coil
 (defstruct Arena [(base (ptr i8)) (off :i64) (cap :i64)])
@@ -73,7 +73,7 @@ all or one bulk reset.
 ## The catch that had to be handled first — DONE
 
 `ar-resize` used to return `(None)` unconditionally. Look at what `al-reserve!` does with
-that (`lib/arraylist.coil`): it falls back to `alloc-slice` + element-by-element copy, and
+that (`src/stdlib/arraylist.coil`): it falls back to `alloc-slice` + element-by-element copy, and
 **never frees the old block on an arena** (`ar-free` is a no-op). So an `ArrayList` that
 grew by doubling on an arena consumed `4 + 8 + 16 + … + n ≈ 2n` and stranded all of it.
 Growable lists on an arena were quadratic in *space*.
@@ -83,7 +83,7 @@ is the most recent allocation — `p + old == base + off` — it moves `off` and
 Any other block has live allocations stacked on top of it and still returns `(None)`, so
 the copy fallback is unchanged for that case.
 
-Measured, appending 100,000 `i64` to an arena (`examples/arena-growth.coil`):
+Measured, appending 100,000 `i64` to an arena (`src/examples/arena-growth.coil`):
 
 | | arena bytes consumed |
 | --- | --- |
@@ -124,7 +124,7 @@ wall time — see [What it cost](#what-it-cost).
 The bug that motivated this — a silent exit-134 wasm64 build — turned out not to
 reproduce, and the allocation hypothesis behind it was disproved rather than confirmed:
 the compiler has no arena anywhere, so `al-reserve!` never leaves its `realloc` path. The
-investigation is recorded in [wasm64-reserve-abort.md](wasm64-reserve-abort.md), and the
+investigation is recorded in [wasm64-reserve-abort.md](../archive/wasm64-reserve-abort.md), and the
 `read-file` defect it was blocking is fixed.
 
 ## Threading
@@ -156,8 +156,8 @@ Each step is independently verifiable; do not batch them.
 1. ~~`oom` prints before aborting.~~ **Done.**
 2. ~~`ar-resize` grows the last allocation in place, with a test that an `ArrayList`
    appending 100k items to an arena uses O(n) arena space, not O(n²).~~ **Done** —
-   `examples/arena-growth.coil`, which the reader/load/expand corpora pick up
-   automatically because they glob `examples/*.coil`.
+   `src/examples/arena-growth.coil`, which the reader/load/expand corpora pick up
+   automatically because they glob `src/examples/*.coil`.
 3. ~~Convert one leaf module's `malloc-allocator` sites to take `a`.~~ `reader.coil`'s
    single site (a per-token `slice->cstr` scratch buffer for `strtod`) **done** — `atom`
    takes `a`, which was already in scope at its one call site. `ast.coil`'s 6 are
@@ -169,7 +169,7 @@ Each step is independently verifiable; do not batch them.
    it looked; read step 4's result first.
 
 A bulk-append primitive landed alongside step 2 because `loader.read-file` needed it (see
-[wasm64-reserve-abort.md](wasm64-reserve-abort.md)):
+[wasm64-reserve-abort.md](../archive/wasm64-reserve-abort.md)):
 
 ```coil
 (defn al-extend! [T] [(l (mut (ArrayList T))) (src (ptr T)) (n i64)] (-> i64)
@@ -186,7 +186,7 @@ threads `a` nearly everywhere, and `a` was `malloc-allocator` only because
 whole AST on a bump allocator. Steps 3 and 5 are cleanup of the sites that *bypass* the
 threaded `a`; step 4 is the change.
 
-`build selfhost/src/main.coil -o /dev/null`, 15 paired runs alternating binaries, input
+`build src/compiler/main.coil -o /dev/null`, 15 paired runs alternating binaries, input
 pinned with `COIL_STDLIB_DIR` (see [How to measure this
 honestly](#how-to-measure-this-honestly) — without it these numbers are wrong):
 
@@ -239,7 +239,7 @@ It is a separate vtable (`aro-alloc`/`aro-resize`/`aro-free`) rather than a flag
 branch to `malloc` on the live path keeps the symbol referenced even when it can never be
 taken — `--gc-sections` can only drop what nothing mentions.
 
-Two traps that cost real time and are guarded by tests in `examples/arena-growth.coil`:
+Two traps that cost real time and are guarded by tests in `src/examples/arena-growth.coil`:
 
 * **`resize` with a null pointer.** A collection's first growth calls `resize(NULL, 0, n)`.
   Answering it with `realloc(NULL, n)` is correct C and completely wrong here: it routes
@@ -316,7 +316,7 @@ re-materializes the tree on every pass even when a pass expands nothing.
 
 Histogramming every allocation by *exact* size (a throwaway build counting requests inside
 `aro-alloc`) says where the bytes are far better than any guess. `check
-selfhost/src/main.coil`, 5.8M allocations, 891 MiB:
+src/compiler/main.coil`, 5.8M allocations, 891 MiB:
 
 | size | count | MiB | what it is |
 | --- | --- | --- | --- |
@@ -346,7 +346,7 @@ allocated is less memory to fault in and miss on — at this scale the two are t
 lever, not a trade. 1 saves a little more memory but the extra growth step stops paying,
 so 2 is where it lands.
 
-`examples/arena-growth.coil` caught this change immediately (it asserts exact arena
+`src/examples/arena-growth.coil` caught this change immediately (it asserts exact arena
 offsets), which is the argument for asserting exact numbers rather than bounds.
 
 The next candidate, not yet done: **`Expr` is 168 bytes because `ExprKind` is padded to
@@ -389,10 +389,10 @@ honestly](#how-to-measure-this-honestly).
 
 ## How to measure this honestly
 
-⚠ **Two compiler binaries compiling `selfhost/src/main.coil` are not compiling the same
-input.** Each binary bakes its own copy of `lib/*.coil` in via `include-str`, and
+⚠ **Two compiler binaries compiling `src/compiler/main.coil` are not compiling the same
+input.** Each binary bakes its own copy of `src/stdlib/*.coil` in via `include-str`, and
 `main.coil`'s import closure resolves to *that embedded copy*, not to the disk. So a build
-whose only change is 60 added lines in `lib/alloc.coil` is compiling 60 more lines than
+whose only change is 60 added lines in `src/stdlib/alloc.coil` is compiling 60 more lines than
 the binary you are comparing it against — and it looks slower and hungrier for reasons
 that have nothing to do with the change.
 
@@ -408,7 +408,7 @@ written into this document as findings:
   then the `reader.coil` conversion, then strict-vs-overflow — and all three came back
   identical, which is the clue that the variable was the input rather than the code.
 
-Corrected, `build selfhost/src/main.coil -o /dev/null`, 15 paired runs each, input pinned:
+Corrected, `build src/compiler/main.coil -o /dev/null`, 15 paired runs each, input pinned:
 
 | | median | paired vs previous | peak RSS |
 | --- | --- | --- | --- |
@@ -428,24 +428,24 @@ back-to-back with it, not a comparison of numbers from different rounds.
 `gate-full` is the safety net: it asserts the emitted IR is byte-identical to the
 reference across a 60-program corpus, so any allocation change that alters behaviour
 fails loudly. Run the ten stage gates too — they say *which* stage moved when something
-does. `selfhost/rebootstrap.sh` runs all of it plus the fixpoint check.
+does. `python3 scripts/dev.py build full` runs all of it plus the fixpoint check.
 
 Benchmark honestly: min-of-3, back-to-back against the previous binary in the same
 session. Single measurements at this scale move ±20% with machine load — during this work
 a "0.31 → 0.49s regression" turned out to be pure noise and the two binaries were
 identical when re-run.
 
-Two mechanical traps this work hit, both worth knowing before touching `lib/`:
+Two mechanical traps this work hit, both worth knowing before touching `src/stdlib/`:
 
-* **A new `lib/` function used by `selfhost/src` breaks the bootstrap.** `stage0` is the
+* **A new `src/stdlib/` function used by `src/compiler` breaks the bootstrap.** `stage0` is the
   committed seed, and it resolves `(import "arraylist.coil")` to its own *embedded* copy,
   not the one on disk — so the seed cannot compile a `loader.coil` that calls a function
-  added to `lib/` in the same change. Build a bridge stage0 first
-  (`COIL_STDLIB_DIR=$PWD ./coil build selfhost/src/main.coil -o /tmp/coil-bridge`, which
-  bakes the new `lib/` in via `include-str`), run `STAGE0=/tmp/coil-bridge
-  selfhost/rebootstrap.sh`, then `STAGE0=./coil selfhost/refresh-seed.sh both` so a plain
-  rebootstrap works again. Verify by running `selfhost/rebootstrap.sh` with no overrides.
-* **`COIL_STDLIB_DIR=$PWD` is what makes a `lib/` edit visible** to an already-built
+  added to `src/stdlib/` in the same change. Build a bridge stage0 first
+  (`COIL_STDLIB_DIR=$PWD build/bin/coil build src/compiler/main.coil -o /tmp/coil-bridge`, which
+  bakes the new `src/stdlib/` in via `include-str`), run `STAGE0=/tmp/coil-bridge
+  python3 scripts/dev.py build full`, then `STAGE0=build/bin/coil scripts/compiler/refresh-seed.sh both` so a plain
+  rebootstrap works again. Verify by running `python3 scripts/dev.py build full` with no overrides.
+* **`COIL_STDLIB_DIR=$PWD` is what makes a `src/stdlib/` edit visible** to an already-built
   compiler. Without it you are testing the embedded stdlib and your edit does nothing —
   silently.
 

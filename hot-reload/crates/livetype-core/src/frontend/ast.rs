@@ -45,15 +45,14 @@ pub struct VariantDef {
     pub fields: Vec<FieldDef>,
 }
 
-/// `migrate Lamp.lit { false => Switch::Off, true => Switch::On }`
-/// maps one old boolean field into two fieldless enum variants.
+/// `migrate Lamp.lit(old) { ... }` computes the new field value from the old
+/// one with an ordinary, pure function body.
 #[derive(Clone, Debug)]
-pub struct BoolToEnumMigrationDef {
+pub struct MigrationDef {
     pub struct_name: String,
     pub field_name: String,
-    pub enum_name: String,
-    pub false_variant: String,
-    pub true_variant: String,
+    pub binding: String,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Clone, Debug)]
@@ -93,7 +92,7 @@ pub struct GlobalDef {
 pub enum Item {
     Struct(StructDef),
     Enum(EnumDef),
-    BoolToEnumMigration(BoolToEnumMigrationDef),
+    Migration(MigrationDef),
     Fn(FnDef),
     /// `foreign type Window;` — declares an opaque native resource type.
     ForeignType(String),

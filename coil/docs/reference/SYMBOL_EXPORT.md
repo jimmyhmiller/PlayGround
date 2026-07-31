@@ -141,7 +141,7 @@ The sections below are the original design; the parts above record what shipped.
 ## Why
 
 Today Coil produces *executables*: `main` is the one external symbol; as of the
-internal-linkage change (see `bench/README.md`), every other function in an executable
+internal-linkage change (see `src/benchmarks/README.md`), every other function in an executable
 gets `internal` linkage so the optimizer can prune it — which is most of Coil's
 compile-time parity with clang.
 

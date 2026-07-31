@@ -11,7 +11,11 @@
 //! against the same locks the concurrent tier relies on (an accepted cost we can
 //! optimize to an atomic `Arc` swap later; see `UNIFICATION.md`).
 
-use crate::{Body, Condition, DefId, FieldId, MigrationSource, ObjectId, Type, Value, VariantId, Version, World};
+use crate::exec::{ForeignCall, GlobalRead, Machine, RecvResult, step_instruction};
+use crate::{
+    Body, Condition, DefId, FieldId, Function, MigrationSource, ObjectId, Type, Value, VariantId,
+    Version, World,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,6 +55,73 @@ fn type_error(message: &str) -> Condition {
         pc: 0,
         message: message.into(),
     }
+}
+
+struct MigrationMachine<'a> {
+    heap: &'a Heap,
+    world: &'a World,
+    function: &'a Function,
+    registers: Vec<Option<Value>>,
+    pc: usize,
+    result: Option<Value>,
+}
+
+impl Machine for MigrationMachine<'_> {
+    fn world(&self) -> &World { self.world }
+    fn heap(&self) -> &Heap { self.heap }
+    fn current(&self) -> (DefId, Version) { (self.function.id, self.function.version) }
+    fn pc(&self) -> usize { self.pc }
+    fn reg(&self, i: usize) -> Option<Value> { self.registers[i] }
+    fn set_reg(&mut self, dst: usize, value: Value) { self.registers[dst] = Some(value); }
+    fn set_pc(&mut self, pc: usize) { self.pc = pc; }
+    fn advance(&mut self) { self.pc += 1; }
+    fn emit(&mut self, _value: Value) { unreachable!("validated migration is pure") }
+    fn global(&self, _id: DefId) -> GlobalRead { GlobalRead::Unsupported }
+    fn call_foreign(&mut self, _id: crate::ForeignFnId, _args: &[Value]) -> ForeignCall {
+        ForeignCall::Unsupported
+    }
+    fn push_call(
+        &mut self,
+        _callee: DefId,
+        _version: Version,
+        _registers: Vec<Option<Value>>,
+        _return_reg: usize,
+    ) {
+        unreachable!("validated migration contains no calls")
+    }
+    fn do_return(&mut self, value: Value) { self.result = Some(value); }
+    fn send(&mut self, _target: usize, _value: Value) -> Option<bool> { None }
+    fn recv(&mut self) -> RecvResult { RecvResult::Unsupported }
+}
+
+fn run_transform(
+    heap: &Heap,
+    world: &World,
+    function: &Function,
+    input: Value,
+) -> Result<Value, Condition> {
+    let mut registers = vec![None; function.registers];
+    registers[0] = Some(input);
+    let mut machine = MigrationMachine {
+        heap,
+        world,
+        function,
+        registers,
+        pc: 0,
+        result: None,
+    };
+    for _ in 0..1_000_000 {
+        if let Some(result) = machine.result {
+            return Ok(result);
+        }
+        let instruction = function
+            .code
+            .get(machine.pc)
+            .ok_or_else(|| type_error("migration fell off the end"))?
+            .clone();
+        step_instruction(&mut machine, &instruction)?;
+    }
+    Err(type_error("migration exceeded the instruction limit"))
 }
 
 impl Heap {
@@ -423,18 +494,8 @@ impl Heap {
                         let wid = self.alloc(*type_id, v, BTreeMap::from([(*field, body.fields[source])]));
                         Value::Ref(wid)
                     }
-                    MigrationSource::BoolToVariant {
-                        source,
-                        type_id,
-                        false_variant,
-                        true_variant,
-                    } => {
-                        let Value::Bool(value) = body.fields[source] else {
-                            return Err(type_error("bool-to-enum migration read a non-bool"));
-                        };
-                        let variant = if value { *true_variant } else { *false_variant };
-                        let eid = self.new_variant(*type_id, variant, &[], world)?;
-                        Value::Ref(eid)
+                    MigrationSource::Transform { source, function } => {
+                        run_transform(self, world, function, body.fields[source])?
                     }
                 };
                 fields.insert(*target, value);

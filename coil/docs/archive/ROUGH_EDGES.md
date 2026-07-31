@@ -133,12 +133,12 @@ call site**, not per call, so constructors that use it return the same object ev
       caller's buffer, or take a caller-owned `(ptr Arena)`.
 - [x] **std-2** `fixed-buffer-writer` shares one static `Writer` — two live writers merge.
       Same fix; also `null-writer`/`fd-writer`.
-- [x] Audit every `alloc-static` in a constructor position across `lib/`.
+- [x] Audit every `alloc-static` in a constructor position across `src/stdlib/`.
 
 - [x] **NEW (found while fixing Batch 3): `:lower shim` could not build on the LLVM backend
       AT ALL.** No `AsmParser` was ever initialized, so the inline asm a naked trampoline
       lowers to made LLVM hard-error and abort — killing the language's headline
-      calling-convention-as-a-type feature on the default backend. `examples/shim.coil`, a
+      calling-convention-as-a-type feature on the default backend. `src/examples/shim.coil`, a
       committed example, did not build. Ungated because `gate-full` stops at emit-ir and
       `arm64/gate-run.sh` only exercises `--backend arm64` (which bypasses LLVM's asm
       printer and worked fine). Fixed + now covered by gate-cli.
@@ -147,7 +147,7 @@ call site**, not per call, so constructors that use it return the same object ev
 
 ## Batch 4 — Dies with zero output (no depth/fuel guards)
 
-docs/COMPTIME.md promises "a fuel budget bounds runaway loops/recursion". The **loop** half is
+docs/reference/COMPTIME.md promises "a fuel budget bounds runaway loops/recursion". The **loop** half is
 real; the **recursion** half does not exist, and neither does any depth guard on generated code.
 
 - [x] **mac-5** No stack-depth guard anywhere: an 800-clause stdlib `cond` and a 900-field
@@ -256,18 +256,18 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       not export` — instead of the old silent rc=0. Open modules (no export list) and exported
       consts still resolve. Regression in gate-cli.sh (FAILS on the seed, PASSES on the build).
 - [x] **mac-4** Binder hygiene: macros capture silently (200 instead of 105) while free identifiers
-      *are* hygienic. Half-hygiene is worse than none for the user's model. Audit `lib/derive.coil`
-      and `lib/match.coil` templates for latent capture (`h`, `a`, `b`, `x`).
+      *are* hygienic. Half-hygiene is worse than none for the user's model. Audit `src/stdlib/derive.coil`
+      and `src/stdlib/match.coil` templates for latent capture (`h`, `a`, `b`, `x`).
 
 ## Batch 8 — `store!` returns unit *(Jimmy: "probably should be unit")*
 
 - [x] **std-12** `store!` yields the stored value's type, so effect-only `if` mismatches constantly.
       A documented gotcha is a gotcha that fires. Making it unit may ripple — expect churn in
-      `lib/` and examples. DONE: `store!` now yields unit (canonical `i64` 0) in check + both
+      `src/stdlib/` and examples. DONE: `store!` now yields unit (canonical `i64` 0) in check + both
       codegen backends + the comptime evaluator. The tree-wide ripple was tiny (the codebase
       already wrapped non-`i64` stores): only 3 self-host sites (`reader.coil` ×2, `parser.coil`
       ×1) used the `(store! f true)`/`false` bool-flag shape and needed the `(do (store! …) 0)`
-      wrap; `lib/`, `examples/`, and `apps/` had zero ripple. Regression in `gate-cli.sh`.
+      wrap; `src/stdlib/`, `src/examples/`, and `src/apps/` had zero ripple. Regression in `gate-cli.sh`.
 
 ## Batch 9 — Docs that promise what doesn't exist
 
@@ -281,7 +281,7 @@ Not staleness: specific guarantees the docs state and the implementation never h
       documented rule) instead of the CWD, so the `src/main.coil` layout `coil new` scaffolds can
       import a sibling and multi-file apps (chip8/invaders) build from any directory. The prelude and
       bundled libs resolve their OWN imports against a `<bundled>` sentinel so a demo like
-      `examples/io.coil` can't shadow the library (the cause of the prior attempt's "unexplained
+      `src/examples/io.coil` can't shadow the library (the cause of the prior attempt's "unexplained
       emit-ir change"); the self-host entry files were migrated to bare-name imports and both seeds
       refreshed so the bootstrap understands the new rule. Teeth-tested in `gate-cli.sh`; see
       DECISIONS.md #6.
@@ -315,7 +315,7 @@ Not staleness: specific guarantees the docs state and the implementation never h
 ## Batch 10 — No debug mode for a check to live in
 
 Coil is unsafe by design — legitimate. The finding is that the design's own escape hatch is missing.
-`lib/slice.coil`'s own comment promises "debug-mode bounds checking is Phase-2 safety work", but
+`src/stdlib/slice.coil`'s own comment promises "debug-mode bounds checking is Phase-2 safety work", but
 **there is no debug flag for Phase-2 to land in.**
 
 - [x] **mem-6** — ✅ DONE. `slice-get`/`slice-set!`/`subslice` bounds-check under `--debug-checks`,
@@ -325,10 +325,10 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
       object; sanitizer flags are filtered off the metaprogram dylib, so `--link-flag
       -fsanitize=address` no longer aborts the compiler. A non-LLVM backend is a clear error. See
       DECISIONS.md #9.
-- [x] **mem-2** — ✅ DONE. `(debug-allocator inner)` (bundled lib/dbgalloc.coil) — a macro that is
+- [x] **mem-2** — ✅ DONE. `(debug-allocator inner)` (bundled src/stdlib/dbgalloc.coil) — a macro that is
       `inner` when off; on, it detects double-free (located abort) and poisons freed memory to 0xDE
       (quarantine so detection is reliable). See DECISIONS.md #9.
-- [x] **mem-8 / diag-11** — ✅ DONE. A bundled `(checker …)` (lib/stacklint.coil) the driver
+- [x] **mem-8 / diag-11** — ✅ DONE. A bundled `(checker …)` (src/stdlib/stacklint.coil) the driver
       auto-applies under `--debug-checks` warns (like clang, non-fatal) when a user function returns
       a pointer to a stack local. No false positives on heap/param returns. See DECISIONS.md #9.
 - [x] Introduce the debug-checks build mode these all depend on. — ✅ DONE: `(debug-checks?)`, a
@@ -337,8 +337,8 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
 ## Batch 11 — Stdlib gaps (a 15-line CSV program needed 36 lines of stdlib first)
 
 - [x] **std-5** No file IO whatsoever — reading a file means hand-declaring libc `open` and hardcoding
-      `O_RDONLY=0`. Add `lib/fs.coil` (~60 lines; the difference between a demo and a usable language).
-- [x] **std-7** `lib/result.coil` is a **one-line empty module** — zero Option/Result combinators,
+      `O_RDONLY=0`. Add `src/stdlib/fs.coil` (~60 lines; the difference between a demo and a usable language).
+- [x] **std-7** `src/stdlib/result.coil` is a **one-line empty module** — zero Option/Result combinators,
       while every collection and allocation call returns Option. Fill it in.
 - [x] **std-13** No sort anywhere; no `str-split`/`trim`/`parse-int`; no `al-clear!`/`hm-keys`;
       `hm-put!` throws away the insert/update signal it already computes. Priority: sort first.
@@ -387,7 +387,7 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
       `(array T N)` as implementable without noting N must be literal.
 - [x] **tool-7** REPL is i64-only, can't `println`, and leaks `/tmp/coil-repl-eval.coil` in every error.
 - [x] **tool-8** `coil fmt` explodes `(defn f :cc c …)` into one token per line — and the mangled form
-      is a **stable fixpoint**, so fmt will never recover it. Mangles `examples/fib.coil`, the repo's
+      is a **stable fixpoint**, so fmt will never recover it. Mangles `src/examples/fib.coil`, the repo's
       own hello-world, and calling conventions are the headline feature.
 - [x] **tool-9** `coil fmt` disagrees with 43 of 44 repo examples and would rewrite 91% of their lines.
       Fix tool-8 **first**, or a mechanical reformat bakes in the mangled `:cc` signatures.
@@ -401,7 +401,7 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
       the `.dSYM` with the `.o` removed) — all FAIL on the seed. See DECISIONS.md #10. NOTE: a
       **function-name** breakpoint still needs the module-qualified name (`dbg.add`) — the subprogram
       `DW_AT_name` mirrors the mangled symbol; **line** breakpoints (the primary workflow) need no name.
-- [x] **tool-12** (test story) — ✅ DONE. `lib/assert.coil` is a bundled library: `(assert COND)` /
+- [x] **tool-12** (test story) — ✅ DONE. `src/stdlib/assert.coil` is a bundled library: `(assert COND)` /
       `(assert-eq A B)` bake the offending expression AND its `file:line` into the emitted code (the
       span machinery, via new `code-src`/`code-line` comptime ops) then abort like C's assert();
       `(deftest NAME body…)` is a macro, and a `(transform …)` discovers every test and synthesizes a
@@ -418,7 +418,7 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
   are now usable as bounds — their non-Self params are associated types determined by the impl — so
   generic code over any collection works, and there is a real `Iterator`/`Iterable` protocol: one
   `(for x (iter coll))` over slice/list/map, with `slice-for`/`al-for` collapsed to aliases and
-  `(in map)` iterating keys correctly (std-4). `lib/arraylist.coil`'s trait impls are no longer dead
+  `(in map)` iterating keys correctly (std-4). `src/stdlib/arraylist.coil`'s trait impls are no longer dead
   weight — `(C Pop)`, `(I Iterator)`, etc. are real bounds. See DECISIONS.md #5.
 - **gen-6** — ✅ DONE. Qualified-call syntax (`A::go`) added — pins dispatch to the named trait;
   same-name collisions are now recoverable. See DECISIONS.md #3.

@@ -8,11 +8,11 @@ if the abort comes back, start from [If it returns](#if-it-returns).
 
 ## What was originally reported
 
-Patching `selfhost/src/loader.coil` so `read-file` sized its output list up front instead
+Patching `src/compiler/loader.coil` so `read-file` sized its output list up front instead
 of pushing one byte at a time, rebuilding the compiler, then:
 
 ```
-coil build selfhost/src/main_wasm.coil --target wasm64-unknown-unknown --wasm-stack-size=64 -o /tmp/w.wasm
+coil build src/compiler/main_wasm.coil --target wasm64-unknown-unknown --wasm-stack-size=64 -o /tmp/w.wasm
 ```
 
 made the **host** compiler die with exit 134 (SIGABRT), writing nothing to stdout or
@@ -36,8 +36,8 @@ Both "aborts" rows were reconstructed and rebuilt. Neither aborts.
 | `al-reserve!(oldlen + n)` + `mem-copy` (row 3, i.e. the real fix) | builds; `gate-wasm` PASS |
 | `al-reserve!(oldlen + 4194304)`, far past the reported threshold | builds |
 
-Each was tried twice: against `lib/` as modified by the allocation work, and against
-`lib/` restored to its state at `77a5d8032` with the stock `./coil`. Same result. The
+Each was tried twice: against `src/stdlib/` as modified by the allocation work, and against
+`src/stdlib/` restored to its state at `77a5d8032` with the stock `build/bin/coil`. Same result. The
 wasm64 output passes `wasm-tools validate --features=memory64`, is a single static
 module, and self-checks the compiler source under Node, so these are real wasm64 builds
 and not a target-string fallback.
@@ -45,14 +45,14 @@ and not a target-string fallback.
 ## The stated hypothesis is disproved
 
 The original write-up reasoned that a silent `abort()` could only be `oom`
-(`lib/alloc.coil`), since every other abort in the tree prints first — and therefore that
+(`src/stdlib/alloc.coil`), since every other abort in the tree prints first — and therefore that
 something on the wasm64 path was running under an allocator that could not satisfy a
 ~64 KB request, with `Arena` the obvious suspect.
 
 The first half held: `oom` was the only silent abort. It no longer is.
 
 The second half does not. **The compiler never constructs an arena.** `arena-allocator`
-and `arena-over-buffer` appear nowhere under `selfhost/src` except inside `guide.coil`'s
+and `arena-over-buffer` appear nowhere under `src/compiler` except inside `guide.coil`'s
 documentation text. Every `ArrayList` in the compiler, on every target, is backed by
 `malloc-allocator`, whose `ma-resize` is `realloc` — so `al-reserve!` never reaches its
 `alloc-slice` fallback at all, and a 64 KB request cannot come back `(None)` short of
@@ -79,11 +79,11 @@ for the ~2 MB the compiler reads of its own tree, plus a realloc-and-copy at eve
 doubling.
 
 Both now share one `drain-fd!` helper that appends each read with a single `al-extend!`
-(`lib/arraylist.coil`), which reserves the run up front and `mem-copy`s it. Measured
+(`src/stdlib/arraylist.coil`), which reserves the run up front and `mem-copy`s it. Measured
 impact is about 10 ms of a ~470 ms whole-compiler frontend run — real, consistent with
 the ~14 ms originally predicted, and, as predicted, not separable from noise in any
 single measurement. It is a quality fix, not a performance one. See
-[ALLOCATION.md](ALLOCATION.md).
+[ALLOCATION.md](../reference/ALLOCATION.md).
 
 ## Why this class of bug cannot recur silently
 
@@ -95,7 +95,7 @@ out of memory: arraylist al-reserve! failed to allocate 2048 bytes; the allocato
 
 A silent exit 134 with an empty log is no longer a possible outcome of an allocation
 failure. It cost 49 KB of binary and about 3% of frontend wall time; that trade is
-measured and argued in [ALLOCATION.md](ALLOCATION.md).
+measured and argued in [ALLOCATION.md](../reference/ALLOCATION.md).
 
 ## If it returns
 
@@ -105,7 +105,7 @@ measured and argued in [ALLOCATION.md](ALLOCATION.md).
    `__chk` guard) rather than an allocation failure. `lldb -- <compiler> build …` with
    `break set -n abort` gets the frame in a minute.
 3. Confirm which allocator is actually in use before theorising about it. `grep -rn
-   'arena-allocator\|arena-over-buffer\|malloc-allocator' selfhost/src` is the whole
+   'arena-allocator\|arena-over-buffer\|malloc-allocator' src/compiler` is the whole
    answer and takes ten seconds; skipping it is what sent the first investigation after
    an arena that was never there.
 4. Record whether the working tree was clean. `git status` at the moment of the

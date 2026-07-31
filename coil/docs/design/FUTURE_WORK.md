@@ -7,7 +7,7 @@ the work is.
 ## Where Coil stands
 
 The compiler core is done and is not the bottleneck. Coil is self-hosted, self-verifying
-(rebootstrap fixpoint + the `selfhost/oracle` gates over a 96-file corpus), self-hosts on
+(rebootstrap fixpoint + the `tests/compiler/oracle` gates over a 96-file corpus), self-hosts on
 macOS arm64 and Linux x86-64, emits wasm, and even runs *inside* wasm where it
 self-compiles to a byte-identical arm64 binary. Diagnostics carry `file:line:col` and a
 caret. DWARF works through lldb. Traits, generics, sums, slices, strings, a module
@@ -45,13 +45,13 @@ The type checker reports one error and stops. Spans across `import`/`include` ar
 `DUMMY`, so a diagnostic about imported code cannot point at it — that needs multi-source
 span ids, which is also the last gap in DWARF for imported functions.
 
-This blocks more than daily use: `docs/SEMANTIC_METAPROGRAMS.md` needs a
+This blocks more than daily use: `docs/design/SEMANTIC_METAPROGRAMS.md` needs a
 collect-and-continue mode for metaprogram-authored diagnostics, so one fix pays twice.
 `warn`/`report` already collect — the compiler's own checker is the part that doesn't.
 
 ### 1.4 No LSP
 
-`emacs/coil-mode.el` is the entire editor story. Spans exist, the resolver already
+`src/tooling/editors/emacs/coil-mode.el` is the entire editor story. Spans exist, the resolver already
 computes definitions and references, and `coil check` is fast on a single file, so the
 hard inputs are in place — this is mostly plumbing, and it is the highest-visibility
 adoption item. It requires 1.3 first: an editor cannot show one error at a time.
@@ -65,12 +65,12 @@ adoption item. It requires 1.3 first: an editor cannot show one error at a time.
 25 modules, ~3.2k lines total. Missing outright: **time/clock**, **process/env**,
 **sockets**, **random**, general **sort**, **path** manipulation, **buffered** reader/
 writer, **UTF-8** handling beyond bytes, a growable **string builder**, **JSON** (it
-lives in `examples/`).
+lives in `src/examples/`).
 
-**Concurrency is the biggest hole**: `lib/thread.coil` is 23 lines wrapping
+**Concurrency is the biggest hole**: `src/stdlib/thread.coil` is 23 lines wrapping
 `pthread_create`/`join`, with no mutex, condvar, channel or thread pool — while
 `metaengine.coil` contains a working portable counting semaphore that should be lifted
-into `lib/`.
+into `src/stdlib/`.
 
 ### 2.2 Compile speed and scale
 

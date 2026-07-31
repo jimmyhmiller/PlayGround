@@ -1,0 +1,10 @@
+# Corpus entries that are deliberately NOT blessed for Linux, one path per line.
+# Read by `scripts/oracle.py linux-ir snapshot` and by its coverage check, which
+# skips them when checking that every corpus entry
+# has a reference on both platforms). ONE list, two readers — if this drifted into
+# two copies, the coverage gate would start reporting phantom gaps.
+#
+# Blank lines and #-comments are ignored.
+
+src/examples/shim.coil
+src/examples/everything.coil

@@ -3,14 +3,14 @@
 Coil self-hosts on Linux x86-64. From a clean checkout on an Ubuntu-ish box with
 LLVM 21 (apt.llvm.org) and a C compiler:
 
-    selfhost/rebootstrap-linux.sh          # seed -> stage1 -> stage2 -> stage3
+    python3 scripts/dev.py build linux          # seed -> stage1 -> stage2 -> stage3
                                            # fixpoint + linux gate-full + linux
-                                           # gate-run + gate-cli, installs ./coil-linux
+                                           # gate-run + gate-cli, installs build/bin/coil
 
-`./coil` and `./coil-nollvm` stay the committed **macOS arm64** binaries; the Linux
-compiler installs as `./coil-linux` and its seed is
-`selfhost/seed/coil-seed-linux-x86_64` (ELF, dynamic libLLVM 21). If your libLLVM
-doesn't match, bootstrap a stage0 from the shipped IR — `selfhost/seed/linux-ir/NOTES.md`.
+`build/bin/coil` and `build/bin/coil-nollvm` are ignored build outputs. The Linux
+compiler installs under ignored `build/bin/`, and its seed is
+`bootstrap/seeds/native/coil-seed-linux-x86_64` (ELF, dynamic libLLVM 21). If your libLLVM
+doesn't match, bootstrap a stage0 from the shipped IR — `bootstrap/seeds/native/linux-ir/NOTES.md`.
 
 ## How the port went in (July 2026)
 
@@ -51,11 +51,11 @@ except where noted):
 
 ## Verification (the Linux oracle)
 
-- `selfhost/oracle/linux/gate-run.sh` — builds the shared behavioral corpus with the
+- `python3 scripts/oracle.py runtime gate linux` — builds the shared behavioral corpus with the
   LLVM backend and diffs stdout+exit against the SAME reference snapshots the arm64
   gate uses (56/56; the two arm64-register-convention examples must fail with the
   per-arch diagnostic, asserted).
-- `selfhost/oracle/linux/gate-full.sh` + `snapshot-full.sh` — byte-exact `emit-ir`
+- `python3 scripts/oracle.py linux-ir gate|snapshot` — byte-exact `emit-ir`
   against a Linux-blessed IR snapshot (`full-reference/`, 58 refs + the 2 asserted
   per-arch errors). The macOS snapshot can't serve here (triple/datalayout/musttail
   legitimately differ).
@@ -63,7 +63,7 @@ except where noted):
   and dSYM checks run on Darwin only; the gen-10 perf probe skips when the committed
   (Mach-O) seed can't exec on the host; everything else — including the full
   compiled-comptime readback battery — runs on both.
-- `metaprog-poc/compile-and-run/parity.sh` — 114/116 byte-identical between the
+- `tests/metaprogramming/compile-and-run/parity.sh` — 114/116 byte-identical between the
   interpreter and compiled metaprogram engines on Linux. The 2 divergences are
   pre-existing engine differences, not port issues (see INTERP_DELETION.md).
 

@@ -15,9 +15,9 @@ names), `f65ab9213` (trait methods + the undefined-reference check).
 
 ```lisp
 (module app)                              ; this file's namespace
-(import "lib/control.coil" :use *)        ; refer ALL of control's exported names
-(import "lib/slice.coil"   :use [slice-for push])  ; refer just these
-(import "lib/io.coil"      :as io)        ; qualified access only: (io/print …)
+(import "src/stdlib/control.coil" :use *)        ; refer ALL of control's exported names
+(import "src/stdlib/slice.coil"   :use [slice-for push])  ; refer just these
+(import "src/stdlib/io.coil"      :as io)        ; qualified access only: (io/print …)
 (export foo Bar)                          ; what THIS module exposes (default: all public)
 ```
 
@@ -68,7 +68,7 @@ macros work without the user importing the library's dependencies.
 
 ## coil.core (the prelude)
 
-`selfhost/src/prelude.coil` is `(module coil.core)`, compiled into the compiler and
+`src/compiler/prelude.coil` is `(module coil.core)`, compiled into the compiler and
 auto-loaded. It defines the operator traits (`Eq`/`Hash`/`Add`/`Sub`/`Mul`/`Div`/
 `Rem`/`Ord`) and their `i64`/`f64` impls, so `=`, `+`, `<`, `hash`, `case` work in
 any module with **no import** — exactly like `clojure.core`. The auto-refer is the
@@ -150,15 +150,15 @@ ever needed to contain *more* metas, the two passes would become a fixpoint loop
 
 ## How this is gated
 
-Covered by `selfhost/oracle`:
+Covered by `tests/compiler/oracle`:
 
 - **`gate-cli.sh`** — end-to-end teeth, each written to FAIL on the pre-change seed:
   sibling imports resolving against the importing file's directory, imports from an
   arbitrary CWD, the bundled prelude reaching bundled `io` despite a same-named decoy
   in the entry directory, and `(:use [name])` of a symbol a module does not export
   being a located error that names the symbol and the module.
-- **`gate-resolved.sh` / `gate-expand.sh`** — snapshot the resolver's and expander's
+- **`python3 scripts/oracle.py gate resolved|expand`** — snapshot the resolver's and expander's
   output over the whole corpus, so any drift in name resolution or macro hygiene
   (including the second-order cross-module case) shows up as a diff.
-- **`gate-full.sh`** — emitted IR, byte-exact, which catches a resolution change that
+- **`python3 scripts/oracle.py gate full`** — emitted IR, byte-exact, which catches a resolution change that
   survives to codegen.

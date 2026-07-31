@@ -1,7 +1,7 @@
 (module tower_fmt_test)
-(import "lib/io.coil" :use *)
-(import "lib/fmt.coil" :use *)
-(import "lib/control.coil" :use *)
+(import "src/stdlib/io.coil" :use *)
+(import "src/stdlib/fmt.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
 ; fmt — a MACRO — used inside a macro body, for expansion-time debug logging.
 ; The tower expands it at definition time; RUNNING it needs the compiled engine
 ; (its expansion calls through Writer function pointers).

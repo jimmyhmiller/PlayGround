@@ -1,21 +1,22 @@
 # Compile-and-run metaprograms — built, default, and proven
 
-The one-command proof: `metaprog-poc/compile-and-run/verify-all.sh` (rebootstrap
-fixpoint + gates, 112-file engine parity, and every mechanism in `run.sh` — up to
-and including **the same-code proof** and **a GUI at compile time**).
+Run `python3 scripts/dev.py build full`, then
+`python3 scripts/dev.py test metaprogramming`. Together they cover the rebootstrap
+fixpoint, compiler gates, and every mechanism in this suite—including the
+**same-code proof** and **a GUI at compile time**.
 
 **The same-code proof** (`samecode.coil` + `samecode_test.coil`): one shared
 module of eight real computations — fnv hashing, a generic ArrayList sorted
 through a FUNCTION POINTER, a string-keyed HashMap, a recursive-descent parser,
-**the compiler's own reader** (`selfhost/src/reader.coil` — the compiler's code
+**the compiler's own reader** (`src/compiler/reader.coil` — the compiler's code
 is the shared code), a 64-step f64 iteration compared by RAW BITS, libc
 `snprintf` through real FFI, and TWO POSIX THREADS — each executed at compile
 time (called from a metaprogram, native code in the dylib) and at run time
 (called from `main`), on identical inputs, every result identical bit-for-bit.
 One definition, two phases, one behavior. Exit 0 says so:
-`coil run metaprog-poc/compile-and-run/samecode_test.coil`.
+`coil run tests/metaprogramming/compile-and-run/samecode_test.coil`.
 
-    COIL_META_MAIN=1 coil run metaprog-poc/compile-and-run/mandel_test.coil \
+    COIL_META_MAIN=1 coil run tests/metaprogramming/compile-and-run/mandel_test.coil \
       --link-flag -framework --link-flag AppKit --link-flag -lobjc
     # a Cocoa window opens DURING THE BUILD: WASD pan, Z/X zoom, I/O iters,
     # Q/RETURN accept — the program then renders the view you chose.
@@ -57,7 +58,7 @@ data: `report`, `warn`, `type-of`, `code-decl`.
 ## 2. A metaprogram as a normal program — `meta.coil` + `mhost.coil`
 
 `meta.coil` has **no `Code` type, no `ECodeOp`, no special forms, no interpreter**.
-It imports the compiler's real `selfhost/src/reader.coil` and `parser.coil` and
+It imports the compiler's real `src/compiler/reader.coil` and `parser.coil` and
 walks a real `Sexp` that the host built with the real reader.
 
     ./mhost       # metaprogram walked (a b c d e) -> 5 children
@@ -91,7 +92,7 @@ interpreter stays the default engine and the oracle.
     (parity.sh is retired: the interpreter was deleted — decision 7 — and the
     compiled engine is the only engine; gate-full/gate-run/gate-cli are the proof)
 
-The pieces (all in `selfhost/src/`):
+The pieces (all in `src/compiler/`):
 
 - **`metalower.coil`** — after `check-program`, rewrites the sub-program:
   `Code` -> `(ptr i8)` (opaque host-Sexp handle), `ECodeOp` -> shim arg-builder
@@ -113,7 +114,7 @@ deleted, and quasiquote lowers in `metalower`, not as a macro — so the interpr
 and the compiled engine coexist and can be diffed. Deleting the interpreter comes
 after the tower (below).
 
-**Verified**: `parity.sh` — 112/112 files (examples/, lib/, all of metaprog-poc:
+**Verified**: `parity.sh` — 112/112 files (src/examples/, src/stdlib/, all of tests/metaprogramming:
 checkers, transforms + fixpoint, `code-decl`/`type-of`, `report`/`warn`/`error`,
 quasiquote hygiene, gensym) produce **byte-identical** emit-ir output and
 byte-identical diagnostics under both engines. The compiler compiling **itself**

@@ -52,6 +52,16 @@
 (extern dup        :cc c [i32] (-> i32))
 (extern dup2       :cc c [i32 i32] (-> i32))
 (extern getpid     :cc c [] (-> i32))
+; Structured argv subprocesses (Process.runArgv). These live here so every C symbol has exactly
+; one declaration. The wasm branch never references them; browsers return an explicit unsupported
+; ProcessResult instead.
+(extern pipe       :cc c [(ptr i32)] (-> i32))
+(extern fork       :cc c [] (-> i32))
+(extern execvp     :cc c [(ptr i8) (ptr (ptr i8))] (-> i32))
+(extern setpgid    :cc c [i32 i32] (-> i32))
+(extern kill       :cc c [i32 i32] (-> i32))
+(extern waitpid    :cc c [i32 (ptr i32) i32] (-> i32))
+(extern _exit      :cc c [i32] (-> void))
 ; Phase 8b Env builtin: read a process environment variable. Declared here (the one extern home).
 (extern getenv     :cc c [(ptr i8)] (-> (ptr i8)))
 (extern atoi       :cc c [(ptr i8)] (-> i32))

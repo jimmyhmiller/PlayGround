@@ -1,5 +1,5 @@
 (module genrefl_test)
-(import "lib/control.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
 (defstruct Pair [T U] [(first T) (second U) (tag i64)])
 ; MACRO reflecting on a generic instantiation: field 0's type of (Pair i64 (ptr u8))
 ; should be i64; field 1 should be (ptr u8); field 2 stays i64.

@@ -10,19 +10,19 @@
 ; The set is chosen to cover the language: integer + f64 arithmetic (compared
 ; by BITS), strings and StrBuf, generic ArrayList with a FUNCTION-POINTER
 ; comparator, string-keyed HashMap, a hand-written recursive-descent parser,
-; THE COMPILER'S OWN READER (selfhost/src/reader.coil — the compiler's code is
+; THE COMPILER'S OWN READER (src/compiler/reader.coil — the compiler's code is
 ; the shared code), libc snprintf through real FFI, and POSIX THREADS.
 ; ============================================================================
 (module samecode)
-(import "lib/alloc.coil" :use *)
-(import "lib/slice.coil" :use *)
-(import "lib/str.coil" :use *)
-(import "lib/arraylist.coil" :use *)
-(import "lib/hashmap.coil" :use *)
-(import "lib/thread.coil" :use *)
-(import "lib/control.coil" :use *)
-(import "../../selfhost/src/reader.coil" :use *)   ; the compiler's own reader
-(import "../../selfhost/src/parser.coil" :use *)   ; its Sexp accessors (sx-*)
+(import "src/stdlib/alloc.coil" :use *)
+(import "src/stdlib/slice.coil" :use *)
+(import "src/stdlib/str.coil" :use *)
+(import "src/stdlib/arraylist.coil" :use *)
+(import "src/stdlib/hashmap.coil" :use *)
+(import "src/stdlib/thread.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
+(import "../../src/compiler/reader.coil" :use *)   ; the compiler's own reader
+(import "../../src/compiler/parser.coil" :use *)   ; its Sexp accessors (sx-*)
 
 (extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 
@@ -119,7 +119,7 @@
     (sc-expr p)))
 
 ; 5 ---- THE COMPILER'S OWN READER as shared code --------------------------------
-; read Coil source with selfhost/src/reader.coil (the code the compiler itself
+; read Coil source with src/compiler/reader.coil (the code the compiler itself
 ; runs) and fold the tree's shape: tags, symbol/string bytes, integer values.
 (defn sc-sexp-fold [(x Sexp) (h i64)] (-> i64)
   (let [tg (sx-tag x) (mut acc) (+ (* h 31) tg)]

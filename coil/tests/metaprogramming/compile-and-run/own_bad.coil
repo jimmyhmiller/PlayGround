@@ -1,8 +1,8 @@
 (module own_bad)
 ; Three ownership violations the checker must catch and locate; the build is
 ; vetoed. The shadow case in own_ok proves it is not just name-matching.
-(import "metaprog-poc/compile-and-run/ownership.coil" :use *)
-(import "lib/control.coil" :use *)
+(import "tests/metaprogramming/compile-and-run/ownership.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
 
 (defn acquire [(id i64)] (-> i64) id)
 (defn release [(h i64)] (-> i64) 0)

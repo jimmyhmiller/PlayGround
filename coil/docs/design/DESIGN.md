@@ -3,9 +3,9 @@
 > **Working name:** *Coil* (provisional — evokes low-level winding/control and "assembling"). Bikeshed later.
 >
 > **Status:** Implemented, and far past what the §12 roadmap describes — the compiler
-> is self-hosted in Coil (`selfhost/src/`) with LLVM, native arm64 and wasm backends.
+> is self-hosted in Coil (`src/compiler/`) with LLVM, native arm64 and wasm backends.
 > This document is the design *rationale*; for what exists today read
-> [LANGUAGE_GUIDE.md](LANGUAGE_GUIDE.md). Two notes
+> [LANGUAGE_GUIDE.md](../reference/LANGUAGE_GUIDE.md). Two notes
 > for the reader: (1) **allocation is no longer part of the pointer type.** The
 > original "region/allocator in `Ptr<T,R>`" sketch in §5.1–5.4 was *rejected* —
 > Coil moved to the **Zig model**: pointers are region-less (`(ptr T)`),
@@ -103,7 +103,7 @@ core, plus a macro system powerful enough that "high-level" features are
   inlined, self-tail-recursion is a real call — and the pipeline is what cleans
   that up (mem2reg, inlining, GVN, loop opts, **tail-call elimination** so the
   one loop form doesn't grow the stack). Same backend and opt tier as clang, so
-  the result is on par with `cc -O3` (`bench/`). The textual `emit-ir` dump skips
+  the result is on par with `cc -O3` (`src/benchmarks/`). The textual `emit-ir` dump skips
   this on purpose, so it shows the IR Coil generates and stays diff-able against
   clang's unoptimized output.
 - **Comptime is a tree-walking interpreter, not a JIT.** Macro expansion runs
@@ -312,7 +312,7 @@ does is the **Zig model**, in two parts:
    region/lifetime checker, matching the project's *descriptive, not
    memory-safe* stance.
 
-Both capabilities are **pure library code** (`lib/alloc.coil`, `lib/io.coil`) —
+Both capabilities are **pure library code** (`src/stdlib/alloc.coil`, `src/stdlib/io.coil`) —
 the compiler has no notion of either. Each is a vtable struct of function
 pointers plus an opaque `ctx`, threaded explicitly:
 
@@ -503,7 +503,7 @@ The allocation *operations* (§5.5) lower directly; there is no region tag to ca
 - `(alloc-stack T)` → `alloca`.
 - `(alloc-static T)` → an LLVM global.
 - `(alloc-heap T)` → a `malloc` call; `(free p)` → `free`.
-- A custom allocator value (`lib/alloc.coil`) is ordinary code: its `alloc`/
+- A custom allocator value (`src/stdlib/alloc.coil`) is ordinary code: its `alloc`/
   `free` are `extern`/fnptr calls, with no compiler involvement. A bump/arena
   allocator is just such a value carrying its block and offset.
 
@@ -665,16 +665,16 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   - **Allocators as values (Zig-style). ✅ done in userland.** An allocator is a
     vtable struct of function pointers, threaded explicitly: a function that
     allocates *takes* an `Allocator`, so allocation is visible in its type and
-    the strategy is the caller's choice. `lib/alloc.coil` ships a `malloc`-backed
+    the strategy is the caller's choice. `src/stdlib/alloc.coil` ships a `malloc`-backed
     and an `arena` (bump) allocator; `allocators.coil` runs the same code under
     both → 42. No compiler support — structs + fnptrs + `extern`.
   - **IO as a capability value. ✅ done in userland.** The same move for IO: a
     `Writer`/`Reader` is a vtable value `{ fn-ptr, ctx }` threaded in, so doing
-    IO shows in a function's type — no ambient stdout. `lib/io.coil` ships
+    IO shows in a function's type — no ambient stdout. `src/stdlib/io.coil` ships
     `write-all`/`print-int`/`print-str` over a `Writer` with `stdout`/`stderr`, a
     `null` sink, and a fixed-buffer sink (and a `Reader` with `stdin`); errors are
     a sum type (`(Result :i64 IoError)`). It composes with allocation — a `Writer`
-    formats into an allocator-provided buffer (`examples/io.coil` → `answer=42`).
+    formats into an allocator-provided buffer (`src/examples/io.coil` → `answer=42`).
     **Next:** a `defer`/scope macro for cleanup.
 - **Macros — ✅ done (engine).** Macros are ordinary Coil `[Code…] -> Code`
   functions (detected by type, no `defmacro`), run by the comptime interpreter
@@ -695,7 +695,7 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   **Automatic hygiene**: inside a quasiquote a symbol ending in `#` auto-gensyms
   consistently, so introduced temporaries can't capture caller bindings
   (`add-to` → 105, not 200). **Modules**: `(include "path")` splices another
-  file's macros/definitions with an include guard; `lib/closure.coil` ships
+  file's macros/definitions with an include guard; `src/stdlib/closure.coil` ships
   `defclosure` as a prelude. Remaining: hygiene is auto-gensym (not full
   referential `syntax-rules` hygiene — it doesn't unify a name across two
   separate quasiquotes); includes resolve from the working dir, not the
@@ -766,13 +766,12 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   `RESULT` type (so the form composes with the type system); the LLVM verifier
   checks the body. No per-opcode compiler code — every instruction/intrinsic,
   present or future, is reachable. The one supporting type is `(vec T N)` (LLVM
-  `<N x T>`); SIMD is then a macro library (`lib/simd.coil`: `vec4f`, `splat4f`,
+  `<N x T>`); SIMD is then a macro library (`src/stdlib/simd.coil`: `vec4f`, `splat4f`,
   `vmul4f`, `vfma4f`, `reduce-add4f`, `dot4f`), lowering to real NEON `fmul.4s`
-  (`examples/simd.coil`). Because Coil now hosts arbitrary LLVM IR, a C function
+  (`src/examples/simd.coil`). Because Coil now hosts arbitrary LLVM IR, a C function
   from `clang -emit-llvm` pastes into an `(llvm-ir …)` and runs identically.
   Deferred: passing a `vec` by value across the C ABI, and
   overloaded-intrinsic name mangling (write the suffixed name yourself for now).
 - **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`adapt`/`defer`, a small
   "normal" surface grown entirely in macros on top of the typed core.
-
 

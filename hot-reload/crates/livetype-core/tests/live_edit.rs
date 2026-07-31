@@ -310,10 +310,67 @@ fn bool_to_enum_breaks_transitively_then_repairs_code_and_live_values() {
         Err(Condition::MissingMigration { .. })
     ));
 
-    s.eval("migrate Lamp.lit { false => Switch::Off, true => Switch::On }")
+    s.eval(
+        "migrate Lamp.lit(old) { if old { return Switch::On; } Switch::Off }",
+    )
         .unwrap();
     assert_eq!(s.call("top_on", vec![]).unwrap(), Value::I64(1));
     assert_eq!(s.call("top_off", vec![]).unwrap(), Value::I64(0));
+}
+
+#[test]
+fn migration_expressions_are_general_not_bool_enum_primitives() {
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        struct Money { cents: i64 }
+        struct Boxed { value: i64 }
+        fn make() -> Boxed { Boxed { value: 7 } }
+        letonce boxed = make();
+        fn read() -> i64 { boxed.value }
+    "#,
+    )
+    .unwrap();
+
+    s.eval("struct Boxed { value: Money }").unwrap();
+    s.eval("fn read() -> i64 { boxed.value.cents }").unwrap();
+    assert!(matches!(
+        s.call("read", vec![]),
+        Err(Condition::MissingMigration { .. })
+    ));
+
+    // The transformer is ordinary pure language code: arithmetic plus a
+    // nominal constructor, with no bool/enum-specific runtime operation.
+    s.eval("migrate Boxed.value(old) { Money { cents: old * 100 } }")
+        .unwrap();
+    assert_eq!(s.call("read", vec![]).unwrap(), Value::I64(700));
+}
+
+#[test]
+fn migration_expressions_can_match_an_old_enum_into_a_scalar() {
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        enum Mode { A, B }
+        struct Holder { mode: Mode }
+        fn make() -> Holder { Holder { mode: Mode::B } }
+        letonce holder = make();
+        fn is_b() -> bool { match holder.mode { A => false, B => true } }
+    "#,
+    )
+    .unwrap();
+
+    s.eval("struct Holder { mode: str }").unwrap();
+    s.eval("fn is_b() -> bool { holder.mode == \"b\" }").unwrap();
+    s.eval(
+        r#"
+        migrate Holder.mode(old) {
+            match old { A => "a", B => "b" }
+        }
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.call("is_b", vec![]).unwrap(), Value::Bool(true));
 }
 
 #[test]

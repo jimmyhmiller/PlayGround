@@ -11,13 +11,13 @@
 ; READER, float iteration, libc snprintf, and two POSIX threads — produced the
 ; identical answer at compile time and at run time.
 ;
-;   coil run metaprog-poc/compile-and-run/samecode_test.coil
+;   coil run tests/metaprogramming/compile-and-run/samecode_test.coil
 ; ============================================================================
-(import "metaprog-poc/compile-and-run/samecode.coil" :use *)
-(import "lib/io.coil" :use *)
-(import "lib/fmt.coil" :use *)
-(import "lib/str.coil" :use *)
-(import "lib/control.coil" :use *)
+(import "tests/metaprogramming/compile-and-run/samecode.coil" :use *)
+(import "src/stdlib/io.coil" :use *)
+(import "src/stdlib/fmt.coil" :use *)
+(import "src/stdlib/str.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
 
 ; the metaprogram: eight computations at EXPANSION TIME, spliced as literals
 (defn ct-all [] (-> Code)

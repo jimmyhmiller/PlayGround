@@ -29,10 +29,10 @@ as a logic bug in the caller.
 
 ## Reproduce
 
-    docs/repro/callptr-c-abi/run.sh
+    tests/repro/callptr-c-abi/run.sh
 
 Exits 0 once the ABI is honoured, 1 while the bug is live. Sources:
-`docs/repro/callptr-c-abi/repro.coil` and `host.c` — one struct per size class
+`tests/repro/callptr-c-abi/repro.coil` and `host.c` — one struct per size class
 through a `(fnptr c …)` table, plus the 4-byte struct through a direct `extern`
 as the control.
 
@@ -41,7 +41,7 @@ as the control.
 `emit-callptr` never applies C-ABI argument lowering. It builds the call from
 the raw parameter types:
 
-`selfhost/src/codegen.coil:1153-1160`
+`src/compiler/codegen.coil:1153-1160`
 
 ```
 (defn emit-callptr [(cg (ptr Cg)) (fp (ptr Expr)) (args …) (scp (ptr Scope))] (-> Tv)
@@ -159,7 +159,7 @@ scalar-only ones. The call label is threaded through `emit-c-call-ty` so the
 indirect path keeps its historic `callptr` name — otherwise the IR gate reports
 all 60 corpus files as changed and the one real diff is lost in the noise.
 
-Regression coverage: `selfhost/oracle/features/export_c.coil` now passes a
+Regression coverage: `tests/compiler/oracle/features/export_c.coil` now passes a
 4-byte struct through a `(fnptr c …)` held in a struct field, which pins the
 padded slots, the packed `i64` argument, and the call name. It is IR-gate only —
 the arm64 backend rejects this shape, so it is deliberately not in the arm64

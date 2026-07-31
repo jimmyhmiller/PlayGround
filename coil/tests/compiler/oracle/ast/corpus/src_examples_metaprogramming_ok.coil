@@ -1,0 +1,10 @@
+(defstruct Node [(val :i64)])
+
+(defn
+  use-ok
+  [(p (ptr Node))]
+  (-> :i64)
+  (do (store! (field p val) 7) (load (field p val)) (free p) 0))
+
+(defn main [] (-> :i64) (let [n (alloc-heap Node)] (do (use-ok n) 42)))
+

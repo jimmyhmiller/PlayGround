@@ -60,8 +60,9 @@
     onStdout: write,
     // boot-time diagnostics go to the console, not the terminal, so the demo stays clean
     onStderr: (t) => console.warn("[scry]", t),
-    // A fake API key makes chooseBrain() pick the REAL AnthropicModel path, so the agent
-    // builds a request body, "sends" it, and parses the reply with std.json. host_http (in
+    // The key is only a secret. Provider/model/base selection below uses the same live
+    // Orchestrator methods as the viewer's agent-setup actions. The agent builds a request body,
+    // "sends" it, and parses the reply with std.json. host_http (in
     // scry-wasm.js) is the server: it parses that request and answers with Anthropic-shaped
     // JSON. Entirely offline — the base URL says so.
     env: { DEEPSEEK_API_KEY: "in-page-demo",
@@ -73,6 +74,9 @@
   setStatus("booting program…");
   const rc = scry.boot("/assistant.scry");
   if (rc !== 0) { setStatus(`boot failed (rc=${rc})`); write(`\nboot failed: rc=${rc}\n`); throw new Error("boot failed"); }
+  scry.eval('Orchestrator.instance(0).setApiBaseUrl("http://fake-api.in-page/v1")');
+  scry.eval('Orchestrator.instance(0).setModel("fake-1 (in-page)")');
+  scry.eval('Orchestrator.instance(0).useApi()');
 
   // The viewer's transport — same wire op, no server.
   globalThis.__scryWasm = scry;

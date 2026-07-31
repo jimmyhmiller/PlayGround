@@ -46,6 +46,24 @@ fn calls(function: &Function, callee: DefId) -> bool {
         .any(|i| matches!(i, Instruction::Call { function, .. } if *function == callee))
 }
 
+fn migration_function_is_pure(function: &Function) -> bool {
+    function.code.iter().all(|instruction| {
+        !matches!(
+            instruction,
+            Instruction::Call { .. }
+                | Instruction::IndirectCall { .. }
+                | Instruction::CallForeign { .. }
+                | Instruction::LoadGlobal { .. }
+                | Instruction::Emit { .. }
+                | Instruction::Yield
+                | Instruction::IndexSet { .. }
+                | Instruction::ArrayPush { .. }
+                | Instruction::Send { .. }
+                | Instruction::Recv { .. }
+        )
+    })
+}
+
 /// How supplying a value resumes a con-freeness trap, treating the paused frame
 /// as a one-shot delimited continuation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -344,24 +362,22 @@ impl World {
                         None
                     }
                 }
-                MigrationSource::BoolToVariant {
-                    source,
-                    type_id,
-                    false_variant,
-                    true_variant,
-                } => {
-                    let input_is_bool = old_field(*source).is_some_and(|f| f.ty == Type::Bool);
-                    let target = self
-                        .current_schemas
-                        .get(type_id)
-                        .and_then(|v| self.schemas.get(&(*type_id, *v)));
-                    let variants_are_fieldless = target.is_some_and(|schema| {
-                        schema.is_enum()
-                            && [false_variant, true_variant]
+                MigrationSource::Transform { source, function } => {
+                    let input = old_field(*source).map(|f| f.ty.clone());
+                    if function.params.first() != input.as_ref() || function.params.len() != 1 {
+                        errors.push(format!("migration for '{}' has the wrong input type", field.name));
+                    }
+                    if !migration_function_is_pure(function) {
+                        errors.push(format!("migration for '{}' is not pure", field.name));
+                    }
+                    if let Err(diagnostics) = verify_function(function, self) {
+                        errors.extend(
+                            diagnostics
                                 .into_iter()
-                                .all(|id| schema.variant(*id).is_some_and(|variant| variant.fields.is_empty()))
-                    });
-                    (input_is_bool && variants_are_fieldless).then_some(Type::Ref(*type_id))
+                                .map(|d| format!("migration for '{}': {d}", field.name)),
+                        );
+                    }
+                    Some(function.result.clone())
                 }
             };
             if source_ty.as_ref() != Some(&field.ty) {

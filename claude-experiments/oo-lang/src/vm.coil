@@ -403,7 +403,8 @@
         (store! (field-addr inst (+ (sizeof InstanceHeader) 8)) (cast i64 body))   ; field 1: body (String)
         inst))))
 
-(defn process-alloc-result [(exit-code i64) (stdout (ptr StringObj))] (-> i64)
+(defn process-alloc-result [(exit-code i64) (stdout (ptr StringObj)) (stderr (ptr StringObj))
+                            (timed-out i64) (truncated i64) (duration-ms i64)] (-> i64)
   (let [ti (find-typeinfo-by-name (load (field (vm) program)) (cast (ptr u8) c"ProcessResult") 13)]
     (if (= (cast i64 ti) 0)
       (do (eval-panic0 EK_RUNTIME c"internal: ProcessResult type not registered") (exit (cast i32 70)) 0)
@@ -411,6 +412,10 @@
         (vm-init-string-fields ti inst)
         (store! (field-addr inst (sizeof InstanceHeader)) exit-code)
         (store! (field-addr inst (+ (sizeof InstanceHeader) 8)) (cast i64 stdout))
+        (store! (field-addr inst (+ (sizeof InstanceHeader) 16)) (cast i64 stderr))
+        (store! (field-addr inst (+ (sizeof InstanceHeader) 24)) timed-out)
+        (store! (field-addr inst (+ (sizeof InstanceHeader) 32)) truncated)
+        (store! (field-addr inst (+ (sizeof InstanceHeader) 40)) duration-ms)
         inst))))
 
 ; ---- construction-visibility guard (02-runtime.md §4 / 05 M1 "construction ordering") ----
@@ -569,6 +574,316 @@
             (store! status-out (vm-wait-code raw-status)))
           (str-make (load buf) (load len)))))))
 
+; ---- structured native argv subprocess --------------------------------------
+; Unlike Process.run/exec, this never invokes a shell. stdout and stderr have independent pipes;
+; a hard deadline or combined output limit kills the child's whole process group. The polling loop
+; remains safepoint-cooperative, so the viewer stays live while a provider is thinking.
+(defstruct ProcBuf [(data (ptr u8)) (len i64) (cap i64)])
+
+(defn proc-buf-new [] (-> (ptr ProcBuf))
+  (let [b (cast (ptr ProcBuf) (xalloc (sizeof ProcBuf)))]
+    (store! (field b data) (xalloc 1024))
+    (store! (field b len) 0)
+    (store! (field b cap) 1024)
+    b))
+
+(defn proc-buf-append [(b (ptr ProcBuf)) (src (ptr i8)) (n i64)] (-> i64)
+  ; Keep one spare byte for proc-buf-string's terminating NUL.
+  (if (>= (+ (load (field b len)) n) (load (field b cap)))
+    (let [(mut nc) (load (field b cap))]
+      (loop (if (<= (load nc) (+ (load (field b len)) n)) (do (store! nc (* (load nc) 2)) 0) (break)))
+      (store! (field b data) (cast (ptr u8) (xrealloc (cast (ptr i8) (load (field b data))) (load nc))))
+      (store! (field b cap) (load nc)) 0)
+    0)
+  (if (> n 0) (xmemcpy (cast (ptr i8) (index (load (field b data)) (load (field b len)))) src n) (cast (ptr i8) 0))
+  (store! (field b len) (+ (load (field b len)) n))
+  n)
+
+(defn proc-buf-string [(b (ptr ProcBuf))] (-> (ptr StringObj))
+  (let [n (load (field b len)) data (load (field b data))]
+    (store! (index data n) (cast u8 0))
+    (str-make data n)))
+
+; pollfd is {i32 fd, i16 events, i16 revents}; packed into one i64 as elsewhere in this VM.
+(defn proc-pollfd [(fd i64)] (-> i64) (ior (iand fd 4294967295) (ishl 1 32)))
+(defn proc-revents [(packed i64)] (-> i64) (iand (ishr packed 48) 65535))
+
+(defn proc-kill-group [(pid i64)] (-> i64)
+  (kill (cast i32 (- 0 pid)) (cast i32 9))
+  0)
+
+(defn proc-free-argv [(argv (ptr (ptr i8))) (argc i64)] (-> i64)
+  (let [(mut i) 0]
+    ; argv[0] is the executable and argv[1..argc] are copied arguments.
+    (loop (if (< (load i) (+ argc 1))
+            (do (free (load (index argv (load i)))) (store! i (+ (load i) 1)) 0)
+            (break))))
+  (free (cast (ptr i8) argv))
+  0)
+
+(defstruct NativeChild
+  [(pid i64) (input-fd i64) (output-fd i64) (error-fd i64)
+   (start-ms i64) (timeout-ms i64) (max-bytes i64) (total-bytes i64)
+   (raw-status i64) (reaped bool) (output-done bool) (error-done bool)
+   (timed-out bool) (truncated bool) (killed bool)])
+
+(defn native-child-new [(timeout-ms i64) (max-bytes i64)] (-> (ptr NativeChild))
+  (let [ch (cast (ptr NativeChild) (xalloc (sizeof NativeChild)))]
+    (store! ch (zeroed NativeChild))
+    (store! (field ch pid) -1)
+    (store! (field ch input-fd) -1)
+    (store! (field ch output-fd) -1)
+    (store! (field ch error-fd) -1)
+    (store! (field ch start-ms) (clock-now))
+    (store! (field ch timeout-ms) timeout-ms)
+    (store! (field ch max-bytes) max-bytes)
+    ch))
+
+(defn vm-proc-spawn-argv [(exe (ptr StringObj)) (args (ptr ListObj))
+                           (timeout-ms i64) (max-bytes i64)] (-> i64)
+  (let [ch (native-child-new timeout-ms max-bytes)
+        outp (alloc-stack (array i32 2)) errp (alloc-stack (array i32 2)) inp (alloc-stack (array i32 2))]
+    (if (or (<= timeout-ms 0) (<= max-bytes 0))
+      (do (store! (field ch raw-status) (* 64 256)) (store! (field ch reaped) true)
+          (store! (field ch output-done) true) (store! (field ch error-done) true) (cast i64 ch))
+      (if (or (!= (cast i64 (pipe (cast (ptr i32) (index outp 0)))) 0)
+              (or (!= (cast i64 (pipe (cast (ptr i32) (index errp 0)))) 0)
+                  (!= (cast i64 (pipe (cast (ptr i32) (index inp 0)))) 0)))
+        (do (store! (field ch raw-status) (* 71 256)) (store! (field ch reaped) true)
+            (store! (field ch output-done) true) (store! (field ch error-done) true) (cast i64 ch))
+        (let [argc (list-len args) argv (cast (ptr (ptr i8)) (xalloc (* (+ argc 2) 8)))
+              exe-c (str-to-cstr-copy exe) (mut ai) 0]
+          (store! (index argv 0) exe-c)
+          (loop (if (< (load ai) argc)
+                  (do (store! (index argv (+ (load ai) 1))
+                              (str-to-cstr-copy (cast (ptr StringObj) (list-get args (load ai)))))
+                      (store! ai (+ (load ai) 1)) 0)
+                  (break)))
+          (store! (index argv (+ argc 1)) (cast (ptr i8) 0))
+          (let [pid (cast i64 (fork))]
+            (if (< pid 0)
+              (do (proc-free-argv argv argc)
+                  (close (load (index inp 0))) (close (load (index inp 1)))
+                  (close (load (index outp 0))) (close (load (index outp 1)))
+                  (close (load (index errp 0))) (close (load (index errp 1)))
+                  (store! (field ch raw-status) (* 71 256)) (store! (field ch reaped) true)
+                  (store! (field ch output-done) true) (store! (field ch error-done) true) (cast i64 ch))
+              (if (= pid 0)
+                (do (setpgid (cast i32 0) (cast i32 0))
+                    (dup2 (load (index inp 0)) (cast i32 0))
+                    (dup2 (load (index outp 1)) (cast i32 1))
+                    (dup2 (load (index errp 1)) (cast i32 2))
+                    (close (load (index inp 0))) (close (load (index inp 1)))
+                    (close (load (index outp 0))) (close (load (index outp 1)))
+                    (close (load (index errp 0))) (close (load (index errp 1)))
+                    (execvp exe-c argv)
+                    (_exit (cast i32 127)) 0)
+                (do (proc-free-argv argv argc)
+                    (setpgid (cast i32 pid) (cast i32 pid))
+                    (close (load (index inp 0))) (close (load (index outp 1))) (close (load (index errp 1)))
+                    (store! (field ch pid) pid)
+                    (store! (field ch input-fd) (cast i64 (load (index inp 1))))
+                    (store! (field ch output-fd) (cast i64 (load (index outp 0))))
+                    (store! (field ch error-fd) (cast i64 (load (index errp 0))))
+                    (cast i64 ch))))))))))
+
+(defn vm-child-write [(ch (ptr NativeChild)) (text (ptr StringObj))] (-> i64)
+  (if (< (load (field ch input-fd)) 0) 0
+    (let [(mut sent) 0 n (load (field text len))]
+      (loop (if (< (load sent) n)
+              (let [w (cast i64 (write (cast i32 (load (field ch input-fd)))
+                                       (cast (ptr i8) (index (load (field text data)) (load sent)))
+                                       (cast isize (- n (load sent)))))]
+                (if (> w 0) (do (store! sent (+ (load sent) w)) (continue)) (break)))
+              (break)))
+      (if (= (load sent) n) 1 0))))
+
+(defn vm-child-close-input [(ch (ptr NativeChild))] (-> i64)
+  (if (>= (load (field ch input-fd)) 0)
+    (do (close (cast i32 (load (field ch input-fd)))) (store! (field ch input-fd) -1) 0) 0))
+
+(defn vm-child-kill [(ch (ptr NativeChild))] (-> i64)
+  (if (and (not (load (field ch reaped))) (not (load (field ch killed))))
+    (let [status (alloc-stack i32)]
+      (proc-kill-group (load (field ch pid)))
+      (store! (field ch killed) true)
+      (waitpid (cast i32 (load (field ch pid))) status (cast i32 0))
+      (store! (field ch raw-status) (cast i64 (load status)))
+      (store! (field ch reaped) true)
+      (vm-child-close-input ch)
+      (if (not (load (field ch output-done)))
+        (do (close (cast i32 (load (field ch output-fd)))) (store! (field ch output-done) true) 0) 0)
+      (if (not (load (field ch error-done)))
+        (do (close (cast i32 (load (field ch error-fd)))) (store! (field ch error-done) true) 0) 0)
+      0) 0))
+
+(defn vm-child-poll [(vt (ptr VMThread)) (ch (ptr NativeChild)) (wait-ms i64)] (-> i64)
+  (let [ob (proc-buf-new) eb (proc-buf-new) pfds (alloc-stack (array i64 2))
+        status (alloc-stack i32) chunk (alloc-stack (array i8 8192))]
+    (safepoint-poll (field vt parked))
+    (store! (index pfds 0) (proc-pollfd (if (load (field ch output-done)) -1 (load (field ch output-fd)))))
+    (store! (index pfds 1) (proc-pollfd (if (load (field ch error-done)) -1 (load (field ch error-fd)))))
+    (poll (cast (ptr i8) (index pfds 0)) (cast i32 2) (cast i32 (if (> wait-ms 20) 20 (if (< wait-ms 0) 0 wait-ms))))
+    (if (and (not (load (field ch output-done)))
+             (or (load (field ch reaped)) (!= (proc-revents (load (index pfds 0))) 0)))
+      (let [n (cast i64 (read (cast i32 (load (field ch output-fd))) (cast (ptr i8) (index chunk 0)) (cast isize 8192)))]
+        (if (= n 0) (do (close (cast i32 (load (field ch output-fd)))) (store! (field ch output-done) true) 0)
+          (if (> n 0)
+            (let [room (- (load (field ch max-bytes)) (load (field ch total-bytes)))
+                  take (if (< room n) (if (> room 0) room 0) n)]
+              (proc-buf-append ob (cast (ptr i8) (index chunk 0)) take)
+              (store! (field ch total-bytes) (+ (load (field ch total-bytes)) take))
+              (if (< take n) (do (store! (field ch truncated) true) (vm-child-kill ch) 0) 0)) 0))) 0)
+    (if (and (not (load (field ch error-done)))
+             (or (load (field ch reaped)) (!= (proc-revents (load (index pfds 1))) 0)))
+      (let [n (cast i64 (read (cast i32 (load (field ch error-fd))) (cast (ptr i8) (index chunk 0)) (cast isize 8192)))]
+        (if (= n 0) (do (close (cast i32 (load (field ch error-fd)))) (store! (field ch error-done) true) 0)
+          (if (> n 0)
+            (let [room (- (load (field ch max-bytes)) (load (field ch total-bytes)))
+                  take (if (< room n) (if (> room 0) room 0) n)]
+              (proc-buf-append eb (cast (ptr i8) (index chunk 0)) take)
+              (store! (field ch total-bytes) (+ (load (field ch total-bytes)) take))
+              (if (< take n) (do (store! (field ch truncated) true) (vm-child-kill ch) 0) 0)) 0))) 0)
+    (if (not (load (field ch reaped)))
+      (let [wr (cast i64 (waitpid (cast i32 (load (field ch pid))) status (cast i32 1)))]
+        (if (= wr (load (field ch pid)))
+          (do (store! (field ch raw-status) (cast i64 (load status))) (store! (field ch reaped) true) 0) 0)) 0)
+    (let [finished (and (load (field ch reaped)) (and (load (field ch output-done)) (load (field ch error-done))))
+          code (if finished (if (load (field ch timed-out)) 124
+                              (if (load (field ch truncated)) 125 (vm-wait-code (load (field ch raw-status))))) -1)
+          outs (proc-buf-string ob) errs (proc-buf-string eb)]
+      (free (cast (ptr i8) ob)) (free (cast (ptr i8) eb))
+      (process-alloc-result code outs errs (if (load (field ch timed-out)) 1 0)
+                            (if (load (field ch truncated)) 1 0)
+                            (- (clock-now) (load (field ch start-ms)))))))
+
+(defn vm-proc-run-argv-host [(exe (ptr StringObj)) (args (ptr ListObj)) (input (ptr StringObj))
+                              (timeout-ms i64) (max-bytes i64)] (-> i64)
+  (let [msg (str-copy (cast (ptr u8) c"Process.runArgv is unavailable in WebAssembly") 45)
+        empty (str-copy (cast (ptr u8) c"") 0)]
+    (process-alloc-result 127 empty msg 0 0 0)))
+
+(defn vm-proc-run-argv [(vt (ptr VMThread)) (exe (ptr StringObj)) (args (ptr ListObj))
+                         (input (ptr StringObj)) (timeout-ms i64) (max-bytes i64)] (-> i64)
+  (when-wasm (vm-proc-run-argv-host exe args input timeout-ms max-bytes)
+             (vm-proc-run-argv-exec vt exe args input timeout-ms max-bytes)))
+
+(defn vm-proc-run-argv-exec [(vt (ptr VMThread)) (exe (ptr StringObj)) (args (ptr ListObj))
+                              (input (ptr StringObj)) (timeout-ms i64) (max-bytes i64)] (-> i64)
+  (let [outp (alloc-stack (array i32 2)) errp (alloc-stack (array i32 2)) inp (alloc-stack (array i32 2))
+        start (clock-now)]
+    (if (or (<= timeout-ms 0) (<= max-bytes 0))
+      (let [empty (str-copy (cast (ptr u8) c"") 0)
+            msg (str-copy (cast (ptr u8) c"timeoutMs and maxOutputBytes must be greater than zero") 54)]
+        (process-alloc-result 64 empty msg 0 0 0))
+      (if (or (!= (cast i64 (pipe (cast (ptr i32) (index outp 0)))) 0)
+              (or (!= (cast i64 (pipe (cast (ptr i32) (index errp 0)))) 0)
+                  (!= (cast i64 (pipe (cast (ptr i32) (index inp 0)))) 0)))
+        (let [empty (str-copy (cast (ptr u8) c"") 0)
+              msg (str-copy (cast (ptr u8) c"could not create subprocess pipes") 33)]
+          (process-alloc-result 71 empty msg 0 0 (- (clock-now) start)))
+        (let [argc (list-len args)
+              argv (cast (ptr (ptr i8)) (xalloc (* (+ argc 2) 8)))
+              exe-c (str-to-cstr-copy exe)
+              (mut ai) 0]
+          (store! (index argv 0) exe-c)
+          (loop (if (< (load ai) argc)
+                  (do (store! (index argv (+ (load ai) 1))
+                              (str-to-cstr-copy (cast (ptr StringObj) (list-get args (load ai)))))
+                      (store! ai (+ (load ai) 1)) 0)
+                  (break)))
+          (store! (index argv (+ argc 1)) (cast (ptr i8) 0))
+          (let [pid (cast i64 (fork))]
+            (if (< pid 0)
+              (do
+                (proc-free-argv argv argc)
+                (close (load (index inp 0))) (close (load (index inp 1)))
+                (close (load (index outp 0))) (close (load (index outp 1)))
+                (close (load (index errp 0))) (close (load (index errp 1)))
+                (let [empty (str-copy (cast (ptr u8) c"") 0)
+                      msg (str-copy (cast (ptr u8) c"could not fork subprocess") 25)]
+                  (process-alloc-result 71 empty msg 0 0 (- (clock-now) start))))
+              (if (= pid 0)
+                (do
+                  (setpgid (cast i32 0) (cast i32 0))
+                  (dup2 (load (index inp 0)) (cast i32 0))
+                  (dup2 (load (index outp 1)) (cast i32 1))
+                  (dup2 (load (index errp 1)) (cast i32 2))
+                  (close (load (index inp 0))) (close (load (index inp 1)))
+                  (close (load (index outp 0))) (close (load (index outp 1)))
+                  (close (load (index errp 0))) (close (load (index errp 1)))
+                  (execvp exe-c argv)
+                  (write (cast i32 2) (cast (ptr i8) c"execvp failed\n") (cast isize 14))
+                  (_exit (cast i32 127))
+                  0)
+                (do
+                  ; Parent owns stdin-write + stdout/stderr-read. setpgid closes the fork race if
+                  ; the parent reaches it before the child does.
+                  (proc-free-argv argv argc)
+                  (setpgid (cast i32 pid) (cast i32 pid))
+                  (close (load (index inp 0)))
+                  (close (load (index outp 1)))
+                  (close (load (index errp 1)))
+                  ; Provider stdin is normally empty. For explicit input, write it fully before
+                  ; entering the read loop, then close so the child always observes EOF.
+                  (let [(mut sent) 0 in-len (load (field input len))]
+                    (loop (if (< (load sent) in-len)
+                            (let [n (cast i64 (write (load (index inp 1))
+                                                    (cast (ptr i8) (index (load (field input data)) (load sent)))
+                                                    (cast isize (- in-len (load sent)))))]
+                              (if (> n 0) (do (store! sent (+ (load sent) n)) (continue)) (break)))
+                            (break))))
+                  (close (load (index inp 1)))
+                  (let [ob (proc-buf-new) eb (proc-buf-new)
+                        pfds (alloc-stack (array i64 2)) status (alloc-stack i32)
+                        chunk (alloc-stack (array i8 8192))
+                        (mut out-done) false (mut err-done) false (mut reaped) false
+                        (mut timed) false (mut trunc) false (mut killed) false (mut raw-status) 0]
+                    (loop
+                      (if (and (load reaped) (and (load out-done) (load err-done))) (break)
+                        (do
+                          (safepoint-poll (field vt parked))
+                          (if (and (not (load killed)) (>= (- (clock-now) start) timeout-ms))
+                            (do (proc-kill-group pid) (store! killed true) (store! timed true) 0) 0)
+                          (if (not (load reaped))
+                            (let [wr (cast i64 (waitpid (cast i32 pid) status (cast i32 1)))]
+                              (if (= wr pid) (do (store! raw-status (cast i64 (load status))) (store! reaped true) 0) 0)) 0)
+                          (store! (index pfds 0) (proc-pollfd (cast i64 (load (index outp 0)))))
+                          (store! (index pfds 1) (proc-pollfd (cast i64 (load (index errp 0)))))
+                          (let [pr (cast i64 (poll (cast (ptr i8) (index pfds 0)) (cast i32 2) (cast i32 20)))]
+                            (if (> pr 0)
+                              (do
+                                (if (and (not (load out-done)) (!= (proc-revents (load (index pfds 0))) 0))
+                                  (let [n (cast i64 (read (load (index outp 0)) (cast (ptr i8) (index chunk 0)) (cast isize 8192)))]
+                                    (if (= n 0) (do (close (load (index outp 0))) (store! out-done true) 0)
+                                      (if (> n 0)
+                                        (let [used (+ (load (field ob len)) (load (field eb len))) room (- max-bytes used)
+                                              take (if (< room n) (if (> room 0) room 0) n)]
+                                          (proc-buf-append ob (cast (ptr i8) (index chunk 0)) take)
+                                          (if (< take n) (do (store! trunc true) (if (not (load killed)) (do (proc-kill-group pid) (store! killed true) 0) 0) 0) 0))
+                                        0))) 0)
+                                (if (and (not (load err-done)) (!= (proc-revents (load (index pfds 1))) 0))
+                                  (let [n (cast i64 (read (load (index errp 0)) (cast (ptr i8) (index chunk 0)) (cast isize 8192)))]
+                                    (if (= n 0) (do (close (load (index errp 0))) (store! err-done true) 0)
+                                      (if (> n 0)
+                                        (let [used (+ (load (field ob len)) (load (field eb len))) room (- max-bytes used)
+                                              take (if (< room n) (if (> room 0) room 0) n)]
+                                          (proc-buf-append eb (cast (ptr i8) (index chunk 0)) take)
+                                          (if (< take n) (do (store! trunc true) (if (not (load killed)) (do (proc-kill-group pid) (store! killed true) 0) 0) 0) 0))
+                                        0))) 0)
+                                0)
+                              0))
+                          (continue))))
+                    (if (not (load reaped))
+                      (do (waitpid (cast i32 pid) status (cast i32 0))
+                          (store! raw-status (cast i64 (load status))) 0) 0)
+                    (let [code (if (load timed) 124 (if (load trunc) 125 (vm-wait-code (load raw-status))))
+                          outs (proc-buf-string ob) errs (proc-buf-string eb)]
+                      (free (cast (ptr i8) ob))
+                      (free (cast (ptr i8) eb))
+                      (process-alloc-result code outs errs (if (load timed) 1 0) (if (load trunc) 1 0)
+                                            (- (clock-now) start)))))))))))))
+
 ; File.read(path): whole-file slurp -> Some(String), or None if it can't be opened. Uses fopen (not
 ; open+mode) so we never touch open's variadic `mode` arg — that doesn't pass in a register on
 ; arm64, so open would have created files with a garbage mode.
@@ -653,11 +968,31 @@
     (= blt BLT_PROC_RUN) (let [cmd (vpop vt) status (alloc-stack i64)] (vpush vt (cast i64 (vm-proc-run vt (cast (ptr StringObj) cmd) true status))))
     ; Process.capture(cmd) -> stdout String (stderr remains attached to the parent process).
     (= blt BLT_PROC_CAPTURE) (let [cmd (vpop vt) status (alloc-stack i64)] (vpush vt (cast i64 (vm-proc-run vt (cast (ptr StringObj) cmd) false status))))
-    ; Process.exec(cmd) -> ProcessResult { exitCode, stdout }.
+    ; Process.exec(cmd) -> ProcessResult. Legacy shell-backed API: stderr stays attached.
     (= blt BLT_PROC_EXEC)
       (let [cmd (vpop vt) status (alloc-stack i64)
             out (vm-proc-run vt (cast (ptr StringObj) cmd) false status)]
-        (vpush vt (process-alloc-result (load status) out)))
+        (vpush vt (process-alloc-result (load status) out (str-copy (cast (ptr u8) c"") 0) 0 0 0)))
+    ; Process.runArgv(executable, args, stdin, timeoutMs, maxOutputBytes): no shell involved.
+    (= blt BLT_PROC_RUN_ARGV)
+      (let [max-bytes (vpop vt) timeout-ms (vpop vt) input (vpop vt)
+            args (vpop vt) exe (vpop vt)]
+        (vpush vt (vm-proc-run-argv vt (cast (ptr StringObj) exe) (cast (ptr ListObj) args)
+                                     (cast (ptr StringObj) input) timeout-ms max-bytes)))
+    (= blt BLT_PROC_SPAWN_ARGV)
+      (let [max-bytes (vpop vt) timeout-ms (vpop vt) args (vpop vt) exe (vpop vt)]
+        (vpush vt (vm-proc-spawn-argv (cast (ptr StringObj) exe) (cast (ptr ListObj) args)
+                                      timeout-ms max-bytes)))
+    (= blt BLT_CHILD_WRITE)
+      (let [text (vpop vt) ch (vpop vt)]
+        (vpush vt (vm-child-write (cast (ptr NativeChild) ch) (cast (ptr StringObj) text))))
+    (= blt BLT_CHILD_CLOSE_INPUT)
+      (let [ch (vpop vt)] (vm-child-close-input (cast (ptr NativeChild) ch)) (vpush vt 0))
+    (= blt BLT_CHILD_POLL)
+      (let [wait-ms (vpop vt) ch (vpop vt)]
+        (vpush vt (vm-child-poll vt (cast (ptr NativeChild) ch) wait-ms)))
+    (= blt BLT_CHILD_KILL)
+      (let [ch (vpop vt)] (vm-child-kill (cast (ptr NativeChild) ch)) (vpush vt 0))
     ; File.read(path) -> Option<String>
     (= blt BLT_FILE_READ) (let [path (vpop vt)] (vpush vt (cast i64 (vm-file-read (cast (ptr StringObj) path)))))
     ; File.write/append(path, content) -> Bool.  Args pushed (path, content) => pop content then path.

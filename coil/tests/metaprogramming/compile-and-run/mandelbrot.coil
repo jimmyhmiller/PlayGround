@@ -11,7 +11,7 @@
 ; (a scripted zoom, no focus steal) so builds are reproducible/CI-able.
 ;
 ; Build (the metaprogram dylib links the same flags as the program):
-;   COIL_META_MAIN=1 coil run metaprog-poc/compile-and-run/mandel_test.coil \
+;   COIL_META_MAIN=1 coil run tests/metaprogramming/compile-and-run/mandel_test.coil \
 ;     --link-flag -framework --link-flag AppKit --link-flag -lobjc
 ;
 ; COIL_META_MAIN=1 routes metaprogram calls to the REAL main thread (AppKit
@@ -23,11 +23,11 @@
 ; metaprogram is just a program.
 ; ============================================================================
 (module mandelbrot)
-(import "lib/alloc.coil" :use *)
-(import "lib/slice.coil" :use *)
-(import "lib/io.coil" :use *)
-(import "lib/fmt.coil" :use *)
-(import "lib/control.coil" :use *)
+(import "src/stdlib/alloc.coil" :use *)
+(import "src/stdlib/slice.coil" :use *)
+(import "src/stdlib/io.coil" :use *)
+(import "src/stdlib/fmt.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
 
 ; ---- Objective-C runtime + CoreGraphics, plain C ----------------------------
 (extern objc_getClass    :cc c [(ptr i8)] (-> (ptr i8)))
@@ -44,7 +44,7 @@
 
 (defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
 
-; the CLASSIC objc `msg` macro (apps/chip8/objc.coil), used INSIDE a metaprogram
+; the CLASSIC objc `msg` macro (src/apps/chip8/objc.coil), used INSIDE a metaprogram
 ; body: its type-syntax arguments ((ptr i8) returns, [CGRect i64 …] argtype
 ; vectors) make the raw call unparseable as an expression, which is exactly the
 ; tower's syntactic trigger — it expands here at definition time like anywhere else

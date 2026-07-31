@@ -197,12 +197,11 @@ pub struct GlobalInit {
     pub init_fn: DefId,
 }
 
-pub struct BoolToEnumMigration {
+pub struct MigrationRecipe {
     pub type_id: DefId,
     pub field_id: FieldId,
-    pub enum_id: DefId,
-    pub false_variant: VariantId,
-    pub true_variant: VariantId,
+    pub binding: String,
+    pub body: Vec<Stmt>,
 }
 
 /// The result of lowering one program (or one live edit).
@@ -210,7 +209,7 @@ pub struct Lowered {
     pub schemas: Vec<Schema>,
     pub functions: Vec<Function>,
     pub global_inits: Vec<GlobalInit>,
-    pub bool_to_enum_migrations: Vec<BoolToEnumMigration>,
+    pub migrations: Vec<MigrationRecipe>,
 }
 
 pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
@@ -246,11 +245,11 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
             _ => None,
         })
         .collect();
-    let migration_defs: Vec<&BoolToEnumMigrationDef> = program
+    let migration_defs: Vec<&MigrationDef> = program
         .items
         .iter()
         .filter_map(|i| match i {
-            Item::BoolToEnumMigration(m) => Some(m),
+            Item::Migration(m) => Some(m),
             _ => None,
         })
         .collect();
@@ -388,7 +387,7 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
         functions.push(lower_fn(f, ids)?);
     }
 
-    let mut bool_to_enum_migrations = Vec::new();
+    let mut migrations = Vec::new();
     for m in migration_defs {
         let type_id = ids
             .struct_of(&m.struct_name)
@@ -398,25 +397,11 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
             .get(&(type_id, m.field_name.clone()))
             .copied()
             .ok_or_else(|| format!("unknown field `{}.{}` in migration", m.struct_name, m.field_name))?;
-        let enum_id = ids
-            .struct_of(&m.enum_name)
-            .ok_or_else(|| format!("unknown enum `{}` in migration", m.enum_name))?;
-        let false_variant = ids
-            .variant_ids
-            .get(&(enum_id, m.false_variant.clone()))
-            .copied()
-            .ok_or_else(|| format!("unknown variant `{}::{}`", m.enum_name, m.false_variant))?;
-        let true_variant = ids
-            .variant_ids
-            .get(&(enum_id, m.true_variant.clone()))
-            .copied()
-            .ok_or_else(|| format!("unknown variant `{}::{}`", m.enum_name, m.true_variant))?;
-        bool_to_enum_migrations.push(BoolToEnumMigration {
+        migrations.push(MigrationRecipe {
             type_id,
             field_id,
-            enum_id,
-            false_variant,
-            true_variant,
+            binding: m.binding.clone(),
+            body: m.body.clone(),
         });
     }
 
@@ -424,7 +409,37 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
         schemas,
         functions,
         global_inits,
-        bool_to_enum_migrations,
+        migrations,
+    })
+}
+
+pub fn lower_migration(
+    recipe: &MigrationRecipe,
+    input: Type,
+    result: Type,
+    ids: &IdEnv,
+) -> Result<Function, String> {
+    let mut lo = Lower {
+        ids,
+        code: Vec::new(),
+        labels: Vec::new(),
+        next_reg: 0,
+        scopes: vec![HashMap::new()],
+    };
+    let input_reg = lo.fresh_reg();
+    lo.bind(&recipe.binding, input_reg, input.clone());
+    for statement in &recipe.body {
+        lo.stmt(statement)?;
+    }
+    lo.patch_labels()?;
+    Ok(Function {
+        id: u64::MAX - recipe.field_id,
+        version: Version(1),
+        name: format!("<migration:{}>", recipe.field_id),
+        params: vec![input],
+        result,
+        registers: lo.next_reg,
+        code: lo.code,
     })
 }
 

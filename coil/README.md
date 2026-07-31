@@ -1,6 +1,6 @@
 # Coil (working name)
 
-> **New to Coil? Run `coil guide`** (or read [docs/LANGUAGE_GUIDE.md](docs/LANGUAGE_GUIDE.md)) — a dense language reference for humans and agents.
+> **New to Coil? Run `coil guide`** (or read [docs/reference/LANGUAGE_GUIDE.md](docs/reference/LANGUAGE_GUIDE.md)) — a dense language reference for humans and agents.
 
 A low-level, Lisp-macro language where **calling convention** and **allocation**
 are part of the **type system** — assembly-level control over where values live
@@ -29,21 +29,45 @@ optimizer (a 100M-deep recursion runs in constant stack even at `-O0`).
 is then **fully optimized**: every object runs LLVM's `-O3` pipeline (mem2reg,
 inlining, GVN, loop optimizations, tail-call elimination). On matched compute
 benchmarks this lands Coil at **parity with `cc -O3`** (within measurement
-noise, same LLVM backend and opt tier) — see [`bench/`](bench/README.md).
+noise, same LLVM backend and opt tier) — see [`src/benchmarks/`](src/benchmarks/README.md).
 (`emit-ir` deliberately shows the *un*optimized IR Coil generates, which is what
 the struct-ABI gate diffs against clang.)
 
-- Full design: [`docs/DESIGN.md`](docs/DESIGN.md)
+- Full design: [`docs/design/DESIGN.md`](docs/design/DESIGN.md)
 
 ## Status
 
 **Self-hosted and self-verifying.** The compiler is written in Coil
-(`selfhost/src/*.coil`, ~31k lines) and builds itself to a fixed point; committed
+(`src/compiler/*.coil`, ~31k lines) and builds itself to a fixed point; committed
 seeds mean a fresh checkout needs no toolchain beyond `cc` (and, outside the
 LLVM-free flavor, libLLVM).
 Verification is a rebootstrap (stage2 == stage3, byte for byte) plus the
-`selfhost/oracle` gates, which snapshot every pipeline stage over a 96-file corpus
+`tests/compiler/oracle` gates, which snapshot every pipeline stage over a 96-file corpus
 of the standard library, examples, and real apps.
+
+## Repository layout
+
+All product source is under `src/`; tests, automation, documentation, bootstrap
+seeds, and generated output each have one separate top-level home:
+
+| Path | Purpose |
+|---|---|
+| `src/compiler/` | The self-hosted compiler implementation. Yes: this is the compiler. |
+| `src/stdlib/` | Standard-library modules imported by Coil programs; it is not another compiler. |
+| `src/apps/` | Larger programs built with Coil. |
+| `src/examples/` | Small, focused language examples. |
+| `src/experiments/` | Prototypes that are not stable APIs. |
+| `src/bootstrap/` | Source for the portable C/wasm bootstrap. |
+| `src/tooling/` | Editor and wasm-host source. |
+| `src/benchmarks/` | Benchmark source and results. |
+| `tests/` | Compiler snapshots, fixtures, and regression tests. |
+| `scripts/` | All shell/Python automation, grouped by purpose. No scripts live among source files. |
+| `bootstrap/seeds/` | Committed native and wasm bootstrap seeds. |
+| `build/` | Ignored generated compilers and bootstrap artifacts. Safe to recreate. |
+
+There are deliberately no `coil` or `coil-nollvm` files at repository root.
+Rebootstrap commands install them as `build/bin/coil` and
+`build/bin/coil-nollvm`.
 
 - **Targets:** macOS arm64 and Linux x86-64 (both self-host natively), plus
   `wasm32`/`wasm64` modules. Cross-compilation with `--target <triple>`.
@@ -62,7 +86,7 @@ of the standard library, examples, and real apps.
   `Coil.toml` project mode, `-g` DWARF debugging through lldb, `--debug-checks` and
   `--sanitize=address` for safety-in-debug, `cimport`/`cheader` for C interop.
 
-Known gaps are tracked honestly in [`docs/FUTURE_WORK.md`](docs/FUTURE_WORK.md):
+Known gaps are tracked honestly in [`docs/design/FUTURE_WORK.md`](docs/design/FUTURE_WORK.md):
 no package manager, no LSP, no Windows target, and diagnostics still stop at the
 first type error.
 
@@ -91,19 +115,19 @@ first type error.
   *takes* an `Allocator` and its type shows it. The interface is alignment-aware
   (`alloc(len,align)` / `resize(ptr,old,new,align)` / `free(ptr,len,align)`) and
   signals failure with a **sum type** (`(Option (ptr i8))`, `None` = OOM), never
-  a null sentinel. `lib/alloc.coil` ships a `malloc`-backed and an `arena` (bump)
+  a null sentinel. `src/stdlib/alloc.coil` ships a `malloc`-backed and an `arena` (bump)
   allocator plus a typed generic layer — `(create [T] a)`, `(destroy a p)` (`T`
   inferred), `(alloc-slice [T] a n)` — that sizes/aligns itself with
   `sizeof`/`alignof`. The same code runs under either allocator by swapping the
   value; the compiler has no allocator concept (structs + fnptrs + `extern`).
 - IO (Zig-style): a `Writer`/`Reader` is likewise an explicit capability value
   `{ fn-ptr, ctx }` threaded in, so doing IO shows up in a function's type — no
-  ambient stdout. `lib/io.coil` ships `write-all`/`write-byte`/`print-int`/
+  ambient stdout. `src/stdlib/io.coil` ships `write-all`/`write-byte`/`print-int`/
   `print-str` over a `Writer`, with `stdout`/`stderr`, a `null` sink, and a
   fixed-buffer (in-memory) sink; `Reader` mirrors it (`stdin`, `read-some`).
   Errors are a sum type (`(Result :i64 IoError)`). It composes with allocation —
   the same `Writer` interface formats into an allocator-provided buffer or a file
-  descriptor (see `examples/io.coil`).
+  descriptor (see `src/examples/io.coil`).
 - Macros: there is **no separate macro dialect and no `defmacro`**. A macro is an
   ordinary Coil function whose parameters and return are `Code` — detected by
   type — with quasiquote `` ` ``, unquote `~`, splicing `~@`, `(gensym)`, and `&`
@@ -117,7 +141,7 @@ first type error.
   | :use *)`, with `(export …)` controlling visibility. Paths resolve relative to
   the **importing file's own directory**; bare names (`str.coil`, `hashmap.coil`,
   …) reach the standard library bundled inside the compiler, so imports work from
-  any directory with no install step. `lib/closure.coil` ships `defclosure` as a
+  any directory with no install step. `src/stdlib/closure.coil` ships `defclosure` as a
   userland macro — `(import "closure.coil" :use *)` then `(defclosure NAME
   [captures] [params] RET body...)`.
 - C interop: `(extern name :cc c [types] (-> ret))` declares a foreign
@@ -195,7 +219,7 @@ first type error.
   integer, accessed by value as `uN` via `(get p f)` / `(set! p f v)`.
   Compile-time `(sizeof T)`, `(alignof T)`, `(offsetof Struct field)` and
   `(static-assert COND "msg")` pin a layout down — a wrong size/offset is a
-  compile error. (Per-field endianness sketched in [`docs/LAYOUT.md`](docs/LAYOUT.md).)
+  compile error. (Per-field endianness sketched in [`docs/design/LAYOUT.md`](docs/design/LAYOUT.md).)
 - Generics (monomorphization): `(defn id [T] [(x T)] (-> T) x)`, generic
   structs `(defstruct Pair [A B] ...)` used as `(Pair i64 i64)`. Generic **sum
   types** too: `(defsum Option [T] (None) (Some [(val T)]))` with
@@ -215,7 +239,7 @@ first type error.
   convention). Closures are **not** a language primitive — a closure is a struct
   of `{ code pointer, environment pointer }`. `closure.coil` shows heterogeneous
   heap closures (different captures, one type, one generic `apply`); `defclosure`
-  (`lib/closure.coil`) is a userland macro that generates the whole closure
+  (`src/stdlib/closure.coil`) is a userland macro that generates the whole closure
   (env struct + code + new/call/free) from one line — closures as a library.
 
 Per-arch shim lowering is done: `:shim` trampolines and register-constrained
@@ -233,7 +257,7 @@ per-field endianness. See the design docs.
 When a struct crosses the C boundary by value — an `extern`/`c`-convention
 parameter or return, in either direction — Coil lowers it with the real C ABI
 rather than passing a pointer. The compiler classifies each struct for the target
-(`selfhost/src/codegen.coil` for the LLVM path, `codegen_a64.coil` for the native
+(`src/compiler/codegen.coil` for the LLVM path, `codegen_a64.coil` for the native
 arm64 backend) and produces exactly the LLVM-level coercion clang emits:
 
 - **System V AMD64.** Structs ≤ 16 bytes are split into eightbytes, each
@@ -248,12 +272,12 @@ arm64 backend) and produces exactly the LLVM-level coercion clang emits:
   `iN` width for a small return). Composites > 16 bytes go indirect.
 
 This is **verified two ways**: the emitted IR's `declare`/`define` lines are
-snapshot-gated for both lowerings (`selfhost/oracle/features/x86_sysv_abi.coil`
-through `gate-full.sh` for the host and `gate-x86.sh` for the SysV path, each
+snapshot-gated for both lowerings (`tests/compiler/oracle/features/x86_sysv_abi.coil`
+through `python3 scripts/oracle.py gate full` for the host and `gate x86` for the SysV path, each
 originally blessed against what `clang -arch <a> -S -emit-llvm` produces for the
 equivalent C), and real programs are linked against C — calling libc `div`/`ldiv`,
 a C `<=16B`/`>16B` round-trip helper, and a C caller of Coil functions that
-*return* structs (`examples/structabi.coil`, `examples/cinterop.coil`, both in the
+*return* structs (`src/examples/structabi.coil`, `src/examples/cinterop.coil`, both in the
 gate corpus) — and run. An unclassifiable shape is a hard error, never a silent
 pointer.
 
@@ -271,10 +295,10 @@ body. Every instruction and intrinsic (present or future) is reachable this way.
 
 The one supporting *type* is `(vec T N)` — an LLVM `<N x T>` SIMD vector (`load`/
 `store!` and the existing arithmetic work on it lane-wise). On top, **SIMD is a
-macro library** (`lib/simd.coil`): `vec4f`, `splat4f`, `vadd4f`/`vmul4f`, `vfma4f`
+macro library** (`src/stdlib/simd.coil`): `vec4f`, `splat4f`, `vadd4f`/`vmul4f`, `vfma4f`
 (via `@llvm.fma`), `reduce-add4f`, and a `dot4f` — each a one-line macro over
 `(llvm-ir …)`. So it's *explicit* SIMD (you choose the width, not the
-auto-vectorizer) that still optimizes: `examples/simd.coil`'s dot product lowers
+auto-vectorizer) that still optimizes: `src/examples/simd.coil`'s dot product lowers
 to NEON `ldr q`, `fmul.4s`, and a horizontal reduce (`coil emit-ir` shows the
 `<4 x float>` ops pre-inline). Because Coil hosts arbitrary LLVM IR, a C function
 compiled with `clang -emit-llvm` can be pasted into an `(llvm-ir …)` and runs
@@ -372,7 +396,7 @@ can, say, require that every exported function is documented.
 
 ## Testing
 
-`lib/assert.coil` and `deftest` are a library, not a compiler feature — `assert`
+`src/stdlib/assert.coil` and `deftest` are a library, not a compiler feature — `assert`
 recovers the failing expression and its `file:line` through the same span
 machinery checkers use, and a `(transform …)` discovers every `deftest` and
 synthesizes a `main` that runs each in a forked child, so an aborting test prints
@@ -387,73 +411,73 @@ its message and never stops the suite.
 ```
 
 ```sh
-./coil test mytests.coil     # exit 0 iff every test passes
+build/bin/coil test mytests.coil     # exit 0 iff every test passes
 ```
 
 ## Build & run
 
-The compiler ships as a committed, self-hosted native binary — `./coil` — with no
-toolchain to install. To rebuild it from source, see [Bootstrap](#bootstrap); day to
-day you just run `./coil`.
+The repository ships committed bootstrap seeds, not root-level compiler
+launchers. Run a rebootstrap command once to create the ignored
+`build/bin/coil`; after that, day to day you run that binary.
 
 ```sh
 # AOT: compile + link a native executable, then run it (exit code = result)
-./coil run   examples/everything.coil; echo $?                       # => 42 (every feature, 24 self-checks)
-./coil run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
-./coil run   examples/closure-lib.coil; echo $?                      # => 42 (uses (include ...))
-./coil run   examples/per-arch.coil; echo $?                         # => 42
-./coil run   examples/closure.coil; echo $?                          # => 42
-./coil run   examples/allocation.coil; echo $?                       # => 42
-./coil run   examples/inference.coil; echo $?                        # => 42 (literal inference)
-./coil run   examples/extern.coil                                    # prints 12345
-./coil run   examples/io.coil                                        # prints answer=42 (Writer capability)
-./coil run   examples/structabi.coil; echo $?                        # => 92 (struct-by-value C ABI: libc div)
-./coil run   examples/simd.coil; echo $?                             # => 42 (explicit SIMD: NEON fmul.4s via macros)
-./coil run   examples/references.coil; echo $?                       # => 42 (mut refs + let stack locals)
-./coil build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
+build/bin/coil run   src/examples/everything.coil; echo $?                       # => 42 (every feature, 24 self-checks)
+build/bin/coil run   src/examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
+build/bin/coil run   src/examples/closure-lib.coil; echo $?                      # => 42 (uses (include ...))
+build/bin/coil run   src/examples/per-arch.coil; echo $?                         # => 42
+build/bin/coil run   src/examples/closure.coil; echo $?                          # => 42
+build/bin/coil run   src/examples/allocation.coil; echo $?                       # => 42
+build/bin/coil run   src/examples/inference.coil; echo $?                        # => 42 (literal inference)
+build/bin/coil run   src/examples/extern.coil                                    # prints 12345
+build/bin/coil run   src/examples/io.coil                                        # prints answer=42 (Writer capability)
+build/bin/coil run   src/examples/structabi.coil; echo $?                        # => 92 (struct-by-value C ABI: libc div)
+build/bin/coil run   src/examples/simd.coil; echo $?                             # => 42 (explicit SIMD: NEON fmul.4s via macros)
+build/bin/coil run   src/examples/references.coil; echo $?                       # => 42 (mut refs + let stack locals)
+build/bin/coil build src/examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
 
 # Projects, tests, formatting, docs
-./coil new myapp && cd myapp && ../coil run          # Coil.toml + src/main.coil
-./coil test  mytests.coil                            # run every (deftest …), forked per test
-./coil check examples/fib.coil                       # typecheck only, no object
-./coil fmt   --check examples/fib.coil               # format (--write to apply)
-./coil doc   lib/arraylist.coil                      # markdown from `;;` doc comments
+build/bin/coil new myapp && cd myapp && .build/bin/coil run          # Coil.toml + src/main.coil
+build/bin/coil test  mytests.coil                            # run every (deftest …), forked per test
+build/bin/coil check src/examples/fib.coil                       # typecheck only, no object
+build/bin/coil fmt   --check src/examples/fib.coil               # format (--write to apply)
+build/bin/coil doc   src/stdlib/arraylist.coil                      # markdown from `;;` doc comments
 
 # Debug info: -g emits DWARF (line tables + a .dSYM on macOS) so lldb/gdb can set
 # breakpoints by line and function and show file:line in backtraces.
-./coil build examples/fib.coil -o /tmp/fib -g && lldb /tmp/fib        # see docs/DEBUGINFO_DWARF.md
+build/bin/coil build src/examples/fib.coil -o /tmp/fib -g && lldb /tmp/fib        # see docs/reference/DEBUGINFO_DWARF.md
 
 # Safety in debug: slice bounds checks, a poisoning debug allocator, and a
 # stack-escape lint — off by default and zero-cost when off (every check lives
 # behind a macro branched on (debug-checks?) at expansion time).
-./coil run examples/arraylist.coil --debug-checks
+build/bin/coil run src/examples/arraylist.coil --debug-checks
 # ⚠ --debug-checks auto-loads the stack lint as a metaprogram, so the file must
 #   declare (module NAME) — a bare single-file program without one is refused.
 
 # LLVM's AddressSanitizer instruments the program object:
-./coil run myapp.coil --sanitize=address
+build/bin/coil run myapp.coil --sanitize=address
 # ⚠ The final link is done by the system `cc`, which must supply an ASan runtime
 #   matching the LLVM that instrumented. On macOS with Homebrew LLVM + Apple
 #   clang they do not match and the link fails; --debug-checks is the portable
 #   option there.
 
 # WebAssembly: a self-contained module, no linker process involved.
-./coil build web/counter.coil --target wasm32-unknown-unknown -o /tmp/counter.wasm
+build/bin/coil build src/apps/web/counter.coil --target wasm32-unknown-unknown -o /tmp/counter.wasm
 
 # Benchmark the optimized output against C (clang -O3) on matched programs
-bench/run.sh                                              # => bench/RESULTS.md (≈ cc -O3)
+python3 scripts/dev.py benchmark runtime                                              # => src/benchmarks/RESULTS.md (≈ cc -O3)
 
 # Inspect the pipeline
-./coil emit-obj    examples/shim.coil -o /tmp/shim.o   # native object file
-./coil dump-ir     examples/shim.coil                  # LLVM IR (trampoline + inline asm)
-./coil dump-expand examples/macros.coil                # program after macro expansion
+build/bin/coil emit-obj    src/examples/shim.coil -o /tmp/shim.o   # native object file
+build/bin/coil dump-ir     src/examples/shim.coil                  # LLVM IR (trampoline + inline asm)
+build/bin/coil dump-expand src/examples/macros.coil                # program after macro expansion
 
 # Cross-compile for a non-host target with --target <triple> (any command).
 # The triple drives both the IR/ABI lowering and the linker's -arch; on macOS a
 # cross binary runs under Rosetta, so `run` works end-to-end.
-./coil run     examples/per-arch.coil --target x86_64-apple-macosx11.0.0; echo $?  # => 42
-./coil build   examples/per-arch.coil -o /tmp/pa --target x86_64-apple-macosx11.0.0
-./coil dump-ir examples/per-arch.coil --target x86_64-apple-macosx11.0.0   # x86-64 SysV lowering
+build/bin/coil run     src/examples/per-arch.coil --target x86_64-apple-macosx11.0.0; echo $?  # => 42
+build/bin/coil build   src/examples/per-arch.coil -o /tmp/pa --target x86_64-apple-macosx11.0.0
+build/bin/coil dump-ir src/examples/per-arch.coil --target x86_64-apple-macosx11.0.0   # x86-64 SysV lowering
 ```
 
 There is no `eval`: the only way to run a program is to AOT-compile it. `main`
@@ -464,27 +488,39 @@ dylib — but nothing interprets your program, at either phase.
 
 ## Bootstrap
 
-The compiler is self-hosted (`selfhost/src/*.coil`) and prebuilt seeds are committed,
+The compiler is self-hosted (`src/compiler/*.coil`) and prebuilt seeds are committed,
 so a fresh checkout can rebuild a fully verified compiler from scratch — and in the
 LLVM-free flavor, with no LLVM at all:
 
 ```sh
-selfhost/rebootstrap-nollvm.sh   # LLVM-free: needs only `cc`  -> ./coil-nollvm
-selfhost/rebootstrap.sh          # full (LLVM + arm64): needs cc + libLLVM -> ./coil
-selfhost/rebootstrap-linux.sh    # Linux x86-64: needs cc + libLLVM 21 -> ./coil-linux
-selfhost/refresh-seed.sh         # after changing the compiler's own source, update the seeds
+python3 scripts/dev.py build nollvm   # LLVM-free: needs only `cc`  -> build/bin/coil-nollvm
+python3 scripts/dev.py build full          # full (LLVM + arm64): needs cc + libLLVM -> build/bin/coil
+python3 scripts/dev.py build linux    # Linux x86-64: needs cc + libLLVM 21 -> build/bin/coil
+scripts/compiler/refresh-seed.sh         # after changing the compiler's own source, update the seeds
 ```
 
-The LLVM-free build (`selfhost/src/main_a64.coil`, arm64 backend only) links no
+The same developer entry point handles the other recurring workflows:
+
+```sh
+python3 scripts/dev.py test snapshots
+python3 scripts/dev.py snapshot all
+python3 scripts/dev.py bootstrap c
+python3 scripts/dev.py benchmark runtime
+python3 scripts/dev.py example mini-scheme
+```
+
+Those commands create ignored compiler binaries under `build/bin/`; a fresh
+checkout starts from the committed seeds under `bootstrap/seeds/`.
+The LLVM-free build (`src/compiler/main_a64.coil`, arm64 backend only) links no
 libLLVM — a fresh machine needs only a C compiler. The full build additionally has
 the LLVM backend and `emit-ir`/`dump-ir`, so it links `libLLVM.dylib`
 (`brew install llvm`). Both share one backend-agnostic driver (`driver.coil`) with the
 LLVM entry points injected as function pointers; each seed is re-derived from source
 and proven faithful (fixpoint + gates) on every run. Coil also self-hosts on
 **Linux x86-64** with its own committed seed (see
-[docs/LINUX_PORT.md](docs/LINUX_PORT.md)), and the compiler runs **inside wasm**,
+[docs/reference/LINUX_PORT.md](docs/reference/LINUX_PORT.md)), and the compiler runs **inside wasm**,
 where it self-compiles to a byte-identical arm64 binary. See
-[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md).
+[docs/reference/BOOTSTRAP.md](docs/reference/BOOTSTRAP.md).
 
 ## REPL (and Emacs)
 
@@ -495,7 +531,7 @@ an expression, compiled (session definitions + a generated entry that prints
 the value) and run:
 
 ```
-$ ./coil repl
+$ build/bin/coil repl
 coil> (defn square [(x i64)] (-> i64) (imul x x))
 #'repl/square
 coil> (square 12)
@@ -531,11 +567,11 @@ pointers, SIMD vectors) prints as `#<its-type>`. Commands: `:help`, `:type
 EXPR`, `:session`, `:load file.coil`, `:reset`, `:quit`. Externs that need
 libraries take the same link flags as `run`: `coil repl -lSDL2`.
 
-The REPL is wire-compatible with Emacs' stock `inferior-lisp`; `emacs/coil-mode.el`
+The REPL is wire-compatible with Emacs' stock `inferior-lisp`; `src/tooling/editors/emacs/coil-mode.el`
 packages that up (a `lisp-mode` derivative for `.coil` plus `M-x run-coil`):
 
 ```elisp
-(add-to-list 'load-path "/path/to/coil/emacs")
+(add-to-list 'load-path "/path/to/coil/src/tooling/editors/emacs")
 (require 'coil-mode)
 ;; (setq coil-program "/path/to/coil/coil") ; if not on PATH
 ```

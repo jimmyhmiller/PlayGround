@@ -2,7 +2,7 @@
 
 > **Status: all ten are shipped.** This document is now the record of what was decided
 > and what each change turned out to be, not a work queue. For what is still open, see
-> [`FUTURE_WORK.md`](FUTURE_WORK.md).
+> [`FUTURE_WORK.md`](../design/FUTURE_WORK.md).
 
 These are the chosen directions for the rough-edge findings that were design calls, not
 bugs. Ordered here by a sensible execution sequence, not by decision number. Each is real
@@ -16,11 +16,11 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    is in flight or it conflicts with everything. Jimmy: "We have lint and fix stuff. Use it!"
    → drive the ripple sweep with the `hivemind` test-gated swarm (gate = the real rebootstrap
    / gate suite) and/or `verify`, not by hand. Make `store!` return unit (or canonical i64 0);
-   sweep lib/, selfhost/, examples; keep gates green.
+   sweep `src/stdlib/`, `src/compiler/`, and `src/examples/`; keep gates green.
    OUTCOME: `store!` now yields unit (canonical `i64` 0) — changed in `check.coil` (`synth-store`
    type), both codegen backends (`codegen.coil` LLVM + `codegen_a64.coil` arm64), and the
    `comptime.coil` evaluator; guide/LANGUAGE_GUIDE updated. The actual tree-wide ripple was 3
-   sites (a full emit-obj survey of lib/, examples/, apps/ found zero others — the codebase
+   sites (a full emit-obj survey of src/stdlib/, src/examples/, src/apps/ found zero others — the codebase
    already wrapped non-`i64` stores), so the swarm wasn't warranted; the 3 were fixed by hand
    with the `(do (store! …) 0)` idiom. Full IR snapshot regenerated (82 store→0 phi/ret lines);
    fixpoint + all 7 gates green; teeth-tested regression added to `gate-cli.sh`.
@@ -131,7 +131,7 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
        uniformly, and `(for x COLL …)` (bare-symbol binding) is the `(for x (iter coll))`
        surface. `slice-for`/`al-for` collapse to thin aliases over it; `hm-for` stays the
        direct key+value walk. gate-full IR byte-identical (dead-stripped when unused); the only
-       churn is gate-expand (pre-codegen loaded forms) + `lib/fs.coil` joining that corpus
+       churn is gate-expand (pre-codegen loaded forms) + `src/stdlib/fs.coil` joining that corpus
        (stale-missing). Teeth for BOTH halves in `gate-cli.sh` (Pop/custom bounds; iter-slice,
        in-map, generic `(I Iterator)`, al-for alias) — all FAIL on the pre-gen-1 seed.
 
@@ -145,17 +145,17 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    wrappers and the two `cheader` call sites in `driver.coil`; nested imports already used each
    imported file's `incdir`, so no other site needed touching. `cwd` still flows for DWARF comp_dir.
    The self-host ENTRY files (`main.coil`, `main_a64.coil`) were the only source written root-relative
-   (`"selfhost/src/driver.coil"`); every sub-module already imported siblings by bare name, so the
+   (`"src/compiler/driver.coil"`); every sub-module already imported siblings by bare name, so the
    migration was just those two files' import blocks → bare names.
    THE TWO THINGS THE PRIOR ATTEMPT HIT, run down:
    (a) *"broke the bootstrap's own imports"* — a naive base switch made the OLD seed unable to build
        the migrated `main.coil` (its `(import "driver.coil")` no longer resolves under the old
        CWD rule). Inherent: the seed must understand the new rule. Both seeds were REFRESHED (built
-       via an intermediate compiler that has the new resolution) — see `selfhost/seed/SEED_VERSION*`.
+       via an intermediate compiler that has the new resolution) — see `bootstrap/seeds/native/SEED_VERSION*`.
    (b) *"emit-ir change I couldn't explain"* — under a file-relative base, a BUNDLED lib's imports
        (and the prelude's `control.coil`→`print`→`io` chain) were resolving against the entry file's
-       directory, where demos like `examples/io.coil` / `examples/control.coil` SHADOW the real
-       library — so the io/fmt half of the prelude silently vanished from every `examples/*` build.
+       directory, where demos like `src/examples/io.coil` / `src/examples/control.coil` SHADOW the real
+       library — so the io/fmt half of the prelude silently vanished from every `src/examples/*` build.
        Fixed: the prelude and any bundled lib resolve their own imports against a `<bundled>` sentinel
        (`loader.coil::bundled-base`), never a real directory — the bundled stdlib is self-contained.
        With that, emit-ir is byte-IDENTICAL to the reference (disk lib == bundled lib, so which copy
@@ -165,7 +165,7 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
        teeth in `gate-cli.sh` (sibling import in project mode; from an arbitrary CWD; and the prelude
        reaching bundled io despite a same-named decoy in the entry dir) — all FAIL on the pre-tool-1
        seed. The three gated fixtures that imported non-bundled/root-relative paths were migrated too
-       (`examples/dyn_write.coil` → `../lib/dyn.coil`; a diag + a resolve fixture).
+       (`src/examples/dyn_write.coil` → `../src/stdlib/dyn.coil`; a diag + a resolve fixture).
 
 7. **Delete the comptime interpreter — 3 steps (mac-8 · mac-12 · diag-4).**
    1) ✅ DONE. Route `(comptime E)`/`(const …)` through the compiled engine (closes mac-8).
@@ -221,7 +221,7 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    diag build-fixtures 06/07 flipped from "error" to a folded literal (regenerated, exit 1→0). Five
    teeth in `gate-cli.sh` (sizeof→8, generic→7, `(const … (sizeof))`→8, c-string-in-comptime→5, and an
    aggregate-comptime no-regression check) — the four capability tests FAIL on the pre-mac-8 seed.
-   STEP 3 ✅ COMPLETE (2026-07-22) — the deletion landed; `docs/INTERP_DELETION.md` is the
+   STEP 3 ✅ COMPLETE (2026-07-22) — the deletion landed; `docs/archive/INTERP_DELETION.md` is the
    record. Sub-parts:
    3a) ✅ DONE — aggregate/string comptime ON the compiled engine (native-memory readback). The
        scalar path reads int/bool/f64 out of the return register; an AGGREGATE now uses a
@@ -238,8 +238,8 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
        generic call / sizeof that returns an aggregate); a monomorphic aggregate still folds on the
        interpreter untouched. Purely additive: the compiler's own source has no comptime sites, so the
        hook never fires during the self-build — fixpoint byte-identical on BOTH rebootstraps (LLVM +
-       nollvm), all 7 gates green with ZERO snapshot regen. Verified on BOTH engines (LLVM ./coil and
-       the arm64-engine ./coil-nollvm). Teeth in `gate-cli.sh` (struct-via-sizeof→16, string-via-
+       nollvm), all 7 gates green with ZERO snapshot regen. Verified on BOTH engines (LLVM build/bin/coil and
+       the arm64-engine build/bin/coil-nollvm). Teeth in `gate-cli.sh` (struct-via-sizeof→16, string-via-
        generic-call→109, sum-with-gap declines→exit 1) — the two capability teeth FAIL on the seed.
        (NOTE: a PRE-EXISTING, engine-independent `build-content`/codegen bug mis-lowers a comptime
        struct whose fields are all <8 bytes — the interpreter has it too — is orthogonal to interp-
@@ -263,12 +263,12 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    `own AND ko-owns?`: a rehash MOVE (`hm-grow!`, `own=0`) relocates the owned fat pointer without
    re-copying or freeing, and `hm-remove!`/`hm-drop-keys!` (walked by `hm-free!`/`hm-clear!`, only
    when `ko-owns?`) free exactly the state-1 keys — no double-free of a tombstone, no leak.
-   `str-keyops` (lib/str.coil) is now the owning default (`str-key-copy` = raw-alloc+mem-copy+
+   `str-keyops` (src/stdlib/str.coil) is now the owning default (`str-key-copy` = raw-alloc+mem-copy+
    slice-new; `str-key-free` = raw-free; empty keys own nothing and are skipped); `str-keyops-
    borrowed` is the deliberate opt-in that leaves the hooks zero. Scalar/derive/struct keyops leave
    `owns` at the `alloc-static` zero-init default (borrow — correct, since their value carries no
    external storage) and pay nothing: the guards are dead branches. AUDIT of existing string-key
-   users (self-host `driver.cheader`/`cimport`, examples/json·lisp·calc, lib/sexp): all key off
+   users (self-host `driver.cheader`/`cimport`, src/examples/json·lisp·calc, src/stdlib/sexp): all key off
    freshly-allocated bytes or static literals and only put/get, so owning is a pure superset — every
    corpus program's stdout+exit is byte-identical (owning changes memory ownership, not results),
    and none of them run during the self-build (cimport/cheader are CLI subcommands), so the fixpoint
@@ -282,7 +282,7 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
 9. **Debug-checks build mode — BOTH (mem-2 · mem-6 · mem-7 · mem-8).** ✅ DONE.
    (a) `--debug-checks`: a comptime predicate exposed to library code so slice-get/subslice
        bounds-check (and reject negative-length subslice), a poison-on-free debug-allocator in
-       lib/alloc.coil, and a stack-return lint, all zero-cost when off.
+       src/stdlib/alloc.coil, and a stack-return lint, all zero-cost when off.
    (b) `--sanitize=address`: wire LLVM's ASan pass + link the runtime; and stop
        `--link-flag -fsanitize=address` aborting the compiler.
    OUTCOME: `(debug-checks?)` is a new comptime code op (39), answered in BOTH engines (the
@@ -296,12 +296,12 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
      the length-(-2) invariant break). The panic helper is GENERIC (T inferred from the slice) so
      it is emitted only when instantiated — off, nothing calls it and no byte reaches the output;
      slice.coil gained an `(export …)` list so its private `write` extern can't collide with io's.
-   • **mem-2**: `(debug-allocator inner)` (a NEW bundled module lib/dbgalloc.coil — kept out of the
+   • **mem-2**: `(debug-allocator inner)` (a NEW bundled module src/stdlib/dbgalloc.coil — kept out of the
      always-loaded alloc.coil, whose concrete hooks mono can't dead-strip) — a macro that is `inner`
      when off, and when on wraps with a `{magic,size}`-header allocator that detects double-free
      (located abort) and poisons freed payloads to 0xDE (quarantining blocks so detection is
      reliable). Zero effect on existing dumps.
-   • **mem-8**: a bundled `(checker …)` (lib/stacklint.coil) the driver auto-`--use`s under
+   • **mem-8**: a bundled `(checker …)` (src/stdlib/stacklint.coil) the driver auto-`--use`s under
      --debug-checks; it WARNS (like clang, non-fatal) when a user function returns a pointer to a
      stack local (direct or let-bound alloc-stack). No false positives on heap/param returns or the
      corpus. LESSON: the checker-dylib closure walk skips a user call nested in an expanded and/or.
@@ -314,13 +314,13 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
      `cc -fsanitize=address`.)
    Teeth for all four in `gate-cli.sh` (all FAIL on the seed).
 
-10. **Testing & debugging story (tool-12 · tool-11).** ✅ DONE. `lib/assert.coil` (assert/assert-eq with
+10. **Testing & debugging story (tool-12 · tool-11).** ✅ DONE. `src/stdlib/assert.coil` (assert/assert-eq with
     file:line via the span machinery), a `coil test` runner that discovers + runs test mains,
     a `deftest` macro as a pure library (per the macro-power thesis), AND fix `-g`: run
     dsymutil, keep the .o, and fix the arm64 line-program so lldb maps source (currently 0 line
     rows / "No source available").
     OUTCOME (two independently-green sub-steps):
-    (a) **Testing (tool-12).** `lib/assert.coil` is a bundled library, entirely macros + one
+    (a) **Testing (tool-12).** `src/stdlib/assert.coil` is a bundled library, entirely macros + one
         `(transform …)` — no compiler builtin. `(assert COND)` / `(assert-eq A B)` / `(assert-ne A B)`
         check at runtime and, on failure, print the OFFENDING EXPRESSION and its `file:line` then
         abort (SIGABRT) like C's assert(). To recover the expression + location at expansion time,
@@ -352,4 +352,4 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
 - The mechanical rough-edge fixes are DONE (~60 findings across many commits + two workflows).
 - diag-9 is half done (body/return spanned; param/field/return needs spans on AST type nodes).
 - gen-10 (mono O(n^1.7)→O(n)) is a deferred workflow item worth reviving as focused work.
-- The debug-checks mode (#9) is the landing spot lib/slice.coil's own "Phase-2" comment promises.
+- The debug-checks mode (#9) is the landing spot src/stdlib/slice.coil's own "Phase-2" comment promises.

@@ -1692,8 +1692,8 @@ def run_agent_online_test(binary, filt):
     environment only, never written to disk, never committed."""
     if filt and "agent" not in filt and "online" not in filt:
         return 0, 0
-    # Default target is DeepSeek's Anthropic-compatible endpoint; chooseBrain resolves the key
-    # from DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY and the base from ANTHROPIC_BASE_URL.
+    # Provider choice is live Orchestrator state. The test switches it through the same useApi()
+    # method the viewer action invokes; only the secret itself remains process configuration.
     # The keys were scrubbed from os.environ for hermetic determinism; read the saved copy and
     # re-inject it into THIS child only, so the live model is exercised here and nowhere else.
     saved = globals().get("SAVED_LLM_ENV", {})
@@ -1710,16 +1710,18 @@ def run_agent_online_test(binary, filt):
     child_env = dict(os.environ, **saved)
     demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
     try:
-        p = subprocess.run([binary, "run", "--no-viewer", demo],
-                           input="what is 17 times 23?\nexit\n",
+        p = subprocess.run([binary, "eval", demo,
+                            "-e", "Orchestrator.instance(0).useApi()",
+                            "-e", "Orchestrator.instance(0)",
+                            "-e", 'Orchestrator.instance(0).agent.runLoop("what is 17 times 23?")'],
                            capture_output=True, text=True, timeout=120, env=child_env)
         out = p.stdout
     except subprocess.TimeoutExpired:
         print("FAIL agent_online\n     timed out talking to the live API")
         return 0, 1
     problems = []
-    if "AnthropicModel" not in out:
-        problems.append("did not announce the AnthropicModel brain (key not seen?)")
+    if "Anthropic-compatible API" not in out:
+        problems.append("viewer-equivalent useApi() did not select the native API brain (key not seen?)")
     if "[agent] -> tool_use: calculate" not in out:
         problems.append(f"live model never emitted a tool_use for calculate; out={out.strip()!r}")
     if "391" not in out:

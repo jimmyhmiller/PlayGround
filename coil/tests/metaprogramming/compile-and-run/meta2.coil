@@ -1,5 +1,5 @@
 (module meta2)
-; A COMPILED metaprogram using the real code-* library (selfhost/src/codelib.coil).
+; A COMPILED metaprogram using the real code-* library (src/compiler/codelib.coil).
 ;
 ; It reaches the library only through its NON-RESERVED entry points, because every
 ; `code-nth`/`code-count`/... name is a special form at parse time (parser.coil:411):
@@ -11,9 +11,9 @@
 (import "alloc.coil" :use *)
 (import "slice.coil" :use *)
 (import "io.coil" :use *)
-(import "selfhost/src/reader.coil" :use *)
-(import "selfhost/src/parser.coil" :use *)
-(import "selfhost/src/codelib.coil" :use *)
+(import "src/compiler/reader.coil" :use *)
+(import "src/compiler/parser.coil" :use *)
+(import "src/compiler/codelib.coil" :use *)
 
 ; recursive tree-walk that ACCUMULATES -- the thing no interpreted checker could do,
 ; since it had no collections. Uses code-tag/code-listish? (not reserved).

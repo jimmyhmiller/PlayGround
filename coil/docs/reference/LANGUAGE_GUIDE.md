@@ -444,7 +444,7 @@ its **original bytes**, so comments and formatting inside an untouched branch su
 and only the part that changed is new text. A round that stops compiling is reverted.
 Comments between nodes — the one thing no `Code` value records — are carried across the
 rewrite, so collapsing a commented `if` chain keeps every comment. See
-`docs/AUTOFIX.md`, and `metaprog-poc/condlint.coil` for a rule that turns a chain of
+`docs/archive/AUTOFIX.md`, and `src/examples/metaprogramming/condlint.coil` for a rule that turns a chain of
 three or more nested `if`s into a `cond`:
 
     coil lint app.coil --use condlint-on.coil          # report + `help: try:` lines
@@ -516,7 +516,7 @@ something is opt-in and an incidental note never becomes API docs.
     ; internal note — NOT documentation
     (defn al-raw [] (-> i64) …)
 
-    coil doc lib/arraylist.coil     ; markdown: name, signature, doc, per definition
+    coil doc src/stdlib/arraylist.coil     ; markdown: name, signature, doc, per definition
 
 `defn`, `defstruct`, `defsum`, `deftrait`, `defcc`, `const` and `extern` are all
 documentable. The doc lives in the source and nowhere else — there is no separate

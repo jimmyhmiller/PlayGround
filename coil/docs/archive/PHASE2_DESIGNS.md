@@ -93,7 +93,7 @@ needed; borrow a place to get a pointer."**
 > `Type::Slice(T)` (a fat pointer, mirroring `Type::Vec`) + the two literal
 > lowerings — `"…"` is a static `[N x i8]` global + a `{ptr, len}` constant (no
 > allocator, IR-verified `[5 x i8]` vs cstr `[6 x i8] …\00`). Everything else is
-> library: `lib/slice.coil` (ops via `llvm-ir` insert/extractvalue), `lib/str.coil`
+> library: `src/stdlib/slice.coil` (ops via `llvm-ir` insert/extractvalue), `src/stdlib/str.coil`
 > (`str-eq`/`str-hash`/`str-find`/`str-concat`, `str-keyops` content-keyed map,
 > owned `StrBuf` over `ArrayList<u8>`). fmt/io migrated (`print-str` takes a slice,
 > `print-cstr` for FFI); calc lexes a `(slice u8)`. Decisions resolved below.
@@ -107,7 +107,7 @@ Strings are C-`(ptr i8)` (NUL-terminated): no length, no content ops without
 1. **CORE (the only core piece): string literals lower to a `(slice u8)` value** — the
    reader/codegen emits a private `[N x i8]` global and constructs the `{ptr, len}`
    (len known at compile time). Everything else is library.
-2. **`lib/str.coil` over `(slice u8)`**: `str-len` (=slice-len), `str-eq` (content),
+2. **`src/stdlib/str.coil` over `(slice u8)`**: `str-len` (=slice-len), `str-eq` (content),
    `str-hash` (content, FNV over the bytes), `substr` (=subslice), `char-at`, `find`,
    `starts-with`, concatenation (allocator-aware) — all library over slices + mem.
 3. **String-keyed HashMap**: a `str-keyops` (a `KeyOps` whose hash/eq read the slice's
@@ -136,10 +136,10 @@ library — consistent with the macros/library-first thesis.
   fat-pointer type (mirroring `(vec T N)`), not a library struct: a string literal
   needs a type with no import-coupling and no ambient allocator, so the type is the
   justified core piece; all ops stay library. (The old `Slice` library struct is
-  gone; `lib/slice.coil` is now ops over the core type.)
+  gone; `src/stdlib/slice.coil` is now ops over the core type.)
 
 ### Recommendation
-Target `(slice u8)` strings with core literal-lowering + a `lib/str.coil` + `str-keyops`.
+Target `(slice u8)` strings with core literal-lowering + a `src/stdlib/str.coil` + `str-keyops`.
 For the migration, I lean toward **(a)** (migrate `"…"`→`(slice u8)`, add `c"…"` for FFI)
 as the clean end state, but it's a breaking change touching fmt/io, so it's exactly the
 identity call for jimmyhmiller. If a lower-risk first step is preferred, **(c)** (a library

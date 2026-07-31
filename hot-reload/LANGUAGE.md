@@ -48,7 +48,7 @@ if cond { ... } else { ... }                    while cond { ... }
 emit(expr);              yield;                 f(a, b)
 a.field                  Account { balance: 100 }
 Shape::Circle { r: 5 }   Shape::Point
-migrate Lamp.lit { false => Switch::Off, true => Switch::On }
+migrate Lamp.lit(old) { if old { return Switch::On; } Switch::Off }
 match s {
     Circle { r } => { ... }                     // binds the variant's fields
     Rect { w, h } => { ... }
@@ -162,8 +162,9 @@ not the running world.
 
 Closures (lambdas with captures — function *values* exist, capture-free),
 maps/other collections, modules, generics, and general migration expressions.
-The surface currently supports checked `bool` → fieldless-enum migration as
-shown above; other transformers are supplied through the engine API / the
-REPL's `:migrate`.
+Migration bodies are ordinary pure language code: `old` has the field's
+previous type and the body must return its new type. Calls, globals, effects,
+and mutation are excluded so an installed migration is deterministic and
+frozen in history.
 Each of these lands the same way everything above did: on every tier at once,
 with its live-evolution semantics defined before its syntax.

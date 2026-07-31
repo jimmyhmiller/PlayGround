@@ -827,7 +827,7 @@ const WATCH = [
   "The particles resize on the very next frame. Frames keep climbing and the canvas is never reopened — the loop is not restarted.",
   "The same particles gain colour. `Particle` becomes v2 in the live world and the objects already on screen migrate as they are read. No reseeding.",
   "`visible` changes from bool to `Visibility`. The type edit installs; stale functions turn Broken transitively and the animation freezes at the outer call boundary.",
-  "Repair the two root functions and install the bool-to-enum migration. Untouched callers revive; resume and the same Particle objects migrate lazily.",
+  "Repair the two root functions and install a typed migration expression. Untouched callers revive; resume and the same Particle objects migrate lazily.",
   "Particles on the right half become actual rings: a `match` on `Kind` picks which foreign function draws them, so the arms differ in shape, not just in size.",
   "`draw` is published Broken at install, and it takes `on_frame` and `main` with it. The animation freezes on its last good frame — watch the live world panel go red.",
   "Only the root cause is repaired, and the whole chain revives. Resume, and the suspended program continues at the instruction that trapped — the far right fills in with bars.",

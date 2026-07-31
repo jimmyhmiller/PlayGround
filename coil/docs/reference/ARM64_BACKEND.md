@@ -1,6 +1,6 @@
 # The arm64 backend (selfhost, zero-deps)
 
-A second backend for the **self-hosted** Coil compiler (`selfhost/src/`), written
+A second backend for the **self-hosted** Coil compiler (`src/compiler/`), written
 in Coil, that lowers the monomorphized `Program` directly to AArch64 machine code
 in a Mach-O object — no LLVM anywhere in the path. It is the **debug backend**:
 DWARF (line tables + subprograms + frame variables) is always on, generated-code
@@ -8,17 +8,17 @@ quality is secondary, and compile speed is primary (target: ≥10× faster than 
 LLVM backend end-to-end).
 
 ## Files
-- `selfhost/src/a64.coil` — AArch64 instruction encoder. Pure: appends u32
+- `src/compiler/a64.coil` — AArch64 instruction encoder. Pure: appends u32
   instructions to a code buffer; label/fixup management for branches.
-- `selfhost/src/macho.coil` — Mach-O `MH_OBJECT` writer: sections, relocations
+- `src/compiler/macho.coil` — Mach-O `MH_OBJECT` writer: sections, relocations
   (`BRANCH26`, `PAGE21`, `PAGEOFF12`, `UNSIGNED`), symbol table, string table.
-- `selfhost/src/dwarf.coil` — DWARF v4 emitters: `__debug_line` (per-expression
+- `src/compiler/dwarf.coil` — DWARF v4 emitters: `__debug_line` (per-expression
   rows), `__debug_abbrev`/`__debug_info` (CU, subprograms, params/locals),
   `__debug_str`.
-- `selfhost/src/codegen_a64.coil` — the lowering: mono `Program` → code+data+
+- `src/compiler/codegen_a64.coil` — the lowering: mono `Program` → code+data+
   relocs+DWARF. Mirrors `codegen.coil`'s `emit-expr` structure and semantics
   (the LLVM backend is the behavioral spec) but emits machine code.
-- `selfhost/src/main.coil` — `build <file> -o out --backend arm64` plumbs the
+- `src/compiler/main.coil` — `build <file> -o out --backend arm64` plumbs the
   same pipeline into the new backend; link step stays `cc <out>.o -o <out>`.
 
 ## Code generation model (deliberately naive — it's a debug backend)
@@ -68,7 +68,7 @@ the `.o`; the linker's debug map makes lldb find it (same as `clang -g` without
 dsymutil).
 
 ## Gates (behavioral — runtime equality, not IR equality)
-`selfhost/oracle/arm64/`:
+`tests/compiler/oracle/arm64/`:
 - `tests/*.coil` — 10 adversarial feature tests beyond the examples corpus:
   narrow-width wraparound + signed div/rem negatives + u2/i3/u7 arithmetic,
   NaN-aware float comparisons + frem + f32 rounding, ABI stress (10 stack
@@ -81,16 +81,16 @@ dsymutil).
   8-variant sums + Option<Result<struct>> nesting + recursive trees,
   atomic old-value semantics + static globals. Verified byte-for-byte against
   the LLVM backend. Teeth re-proven: compiling signed `<` as unsigned fails 8/54.
-- `snapshot-run.sh <bin>` — builds the corpus with the **LLVM** backend and
+- `python3 scripts/oracle.py runtime snapshot arm64 --compiler <bin>` — builds the corpus with the **LLVM** backend and
   records stdout+exit per program.
-- `gate-run.sh <bin>` — builds the same corpus with `--backend arm64`, runs,
+- `python3 scripts/oracle.py runtime gate arm64 --compiler <bin>` — builds the same corpus with `--backend arm64`, runs,
   diffs stdout+exit byte-for-byte. Teeth: a miscompiled corpus program fails.
 - lldb gate (`gate-cli.sh`): breakpoint-by-line, step, `frame variable` on
   scalars/structs.
 - The finale: the arm64-built self-host compiler must itself pass the existing
   oracle gates (it is a working compiler), and `bench` compile-time comparison
   must show ≥10× vs the LLVM backend on both a small program and
-  `selfhost/src/main.coil`.
+  `src/compiler/main.coil`.
 
 ## Results (2026-07-01, M-series host, hyperfine, warm)
 Same compiler binary (`coil-self`, O3-built stage1), LLVM backend vs
@@ -98,9 +98,9 @@ Same compiler binary (`coil-self`, O3-built stage1), LLVM backend vs
 
 | input                              | LLVM (O3) | arm64    | speedup |
 |------------------------------------|-----------|----------|---------|
-| `selfhost/src/main.coil` (whole compiler, ~15k lines w/ libs) | 7.995 s | **0.467 s** | **17.1×** |
-| `examples/json.coil`               | 89.4 ms   | 52.9 ms  | 1.7×    |
-| `examples/fib.coil`                | 55.4 ms   | 51.4 ms  | 1.1×    |
+| `src/compiler/main.coil` (whole compiler, ~15k lines w/ libs) | 7.995 s | **0.467 s** | **17.1×** |
+| `src/examples/json.coil`               | 89.4 ms   | 52.9 ms  | 1.7×    |
+| `src/examples/fib.coil`                | 55.4 ms   | 51.4 ms  | 1.1×    |
 
 The ≥10× target is beaten on the input that matters (the compiler itself).
 Small programs are bound by the shared `cc`-link + process floor (~45 ms);
@@ -115,7 +115,7 @@ once with the LLVM backend, iterate with the arm64 backend.
 
 ## Status / progress log
 - [x] Architecture survey, lowering spec, llvm-ir + extern + DWARF inventories.
-- [x] Behavioral snapshot harness (`snapshot-run.sh`).
+- [x] Behavioral snapshot harness (`python3 scripts/oracle.py runtime snapshot arm64`).
 - [x] a64 encoder (llvm-mc-verified) + spike: fib → .o → link → runs (exit 55).
 - [x] Mach-O writer (BRANCH26/PAGE21/PAGEOFF12/UNSIGNED relocs, symbol permutation).
 - [x] Full Expr lowering: **42/42 behavioral corpus gate** (sums/match, slices,
@@ -132,10 +132,10 @@ once with the LLVM backend, iterate with the arm64 backend.
       DI types for scalars/pointers/structs/slices/arrays (sums omitted — never
       a wrong type). Mach-O convention: debug sections carry NO relocations
       (section-relative addresses; ld64 debug map + lldb translate).
-      `gate-lldb.sh` 12/12: name+file:line breakpoints land post-prologue at
+      debugger checks: name+file:line breakpoints land post-prologue at
       source lines, `frame variable` shows typed values, `p *p` renders
       structs, slices render as {data,len}.
-- [x] Self-host-via-arm64 bootstrap + oracle gates (`bootstrap-arm64.sh`):
+- [x] Self-host-via-arm64 bootstrap + oracle gates (`python3 scripts/dev.py build full`):
       stage2/stage3 pass gate-full; stage2.o == stage3.o byte-identical.
 - [x] :shim conventions natively (trampoline + register-constrained call
       sites) + frem-via-fmod — `everything.coil` and `shim.coil` compile and run
@@ -144,6 +144,6 @@ once with the LLVM backend, iterate with the arm64 backend.
 - [x] 10× bench report (see Results above: 17.1× on the compiler itself).
 - [ ] (future) direct executable emission + ad-hoc codesign to drop the `cc`
       link and its ~45 ms floor on small programs.
-- Note: `selfhost/oracle/full` snapshots are of the compiler's OWN source —
-  regenerate (`snapshot-full.sh`) after changing selfhost/src, or gate-full
-  reports a stale mismatch on `selfhost/src/main.coil`.
+- Note: `tests/compiler/oracle/full` snapshots are of the compiler's OWN source —
+  regenerate (`python3 scripts/oracle.py snapshot full`) after changing src/compiler, or the full gate
+  reports a stale mismatch on `src/compiler/main.coil`.

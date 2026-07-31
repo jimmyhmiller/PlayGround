@@ -105,6 +105,12 @@
 (const BLT_FILE_EXISTS 38)       ; pop path(String) -> push Bool (stat succeeds)
 (const BLT_PROC_CAPTURE 39)      ; pop cmd(String) -> run `/bin/sh -c <cmd>`, push stdout only String (cooperative)
 (const BLT_PROC_EXEC 40)         ; pop cmd(String) -> push ProcessResult { exitCode, stdout } (cooperative)
+(const BLT_PROC_RUN_ARGV 41)     ; pop maxBytes,timeoutMs,stdin,args,exe -> structured native subprocess
+(const BLT_PROC_SPAWN_ARGV 42)   ; pop maxBytes,timeoutMs,args,exe -> ChildProcess
+(const BLT_CHILD_WRITE 43)       ; pop text,child -> Bool
+(const BLT_CHILD_CLOSE_INPUT 44) ; pop child -> Void
+(const BLT_CHILD_POLL 45)        ; pop waitMs,child -> ProcessResult (-1 means still running)
+(const BLT_CHILD_KILL 46)        ; pop child -> Void
 
 ; ============================ FieldInfo kinds ===============================
 (const FIELD_I64 0) (const FIELD_F64 1) (const FIELD_BOOL 2)

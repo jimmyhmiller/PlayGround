@@ -5,7 +5,7 @@
 (import "io.coil"  :use *)
 (import "fmt.coil" :use *)
 (import "result.coil" :use *)
-(import "selfhost/src/reader.coil" :use *)
+(import "src/compiler/reader.coil" :use *)
 
 (extern dlopen :cc c [(ptr i8) :i64] (-> (ptr i8)))
 (extern dlsym  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))

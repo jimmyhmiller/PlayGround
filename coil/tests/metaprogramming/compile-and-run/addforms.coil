@@ -9,7 +9,7 @@
 ;
 ; The transform is MODULE-SHAPED: it receives ((name form…) …) and returns the
 ; same shape, so an emitted form is tagged with the module it names.
-(import "lib/control.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
 
 ; does form `f` contain a (gen-answer) marker anywhere?
 (defn has-gen? [(f Code)] (-> bool)

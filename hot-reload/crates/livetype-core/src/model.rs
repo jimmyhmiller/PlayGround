@@ -184,14 +184,12 @@ pub enum MigrationSource {
         field: FieldId,
         source: FieldId,
     },
-    /// Read an old boolean field and construct one of two fieldless variants.
-    /// This is the first surface-level non-representational transformer: unlike
-    /// `Copy`/`Wrap`, the output depends on the old value.
-    BoolToVariant {
+    /// Run a checked, pure language function from one old field value to the
+    /// new field value. The function is frozen into the migration plan, so a
+    /// later function redefinition cannot change historical migration meaning.
+    Transform {
         source: FieldId,
-        type_id: DefId,
-        false_variant: VariantId,
-        true_variant: VariantId,
+        function: Box<Function>,
     },
 }
 

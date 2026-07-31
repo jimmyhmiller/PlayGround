@@ -71,7 +71,7 @@ must let semantic queries return `:unresolved` / `:unknown` gracefully instead o
 aborting, and must be re-answerable after each rewrite.
 
 **Wall B — the oracle byte-exact constraint.** AST and checked-program dumps are
-blessed byte-for-byte by `selfhost/oracle/*.sh`. Adding a `ty` field to `Expr` or
+blessed byte-for-byte by `scripts/compiler/oracle/*.sh`. Adding a `ty` field to `Expr` or
 changing dump output re-blesses the oracle. The semantic data must therefore live
 in a **side table** keyed on node identity, not in the dumped AST.
 
@@ -186,7 +186,7 @@ aborting, so metaprograms can run over not-yet-valid programs (Wall A).
   (checkers) or the current fixpoint round (transforms). Op code **36**; parser
   recognizes `type-of`; no checker-typing change (`TCode`). Reads INFERRED types, not
   syntax — a call `(getf)` reports `f64` because `getf`'s return type is `f64`, invisible
-  at the call site. Demo: `metaprog-poc/nofloat*.coil` — a checker that bans any
+  at the call site. Demo: `tests/metaprogramming/nofloat*.coil` — a checker that bans any
   floating-point-typed expression, flagging `(getf)` by its inferred result type.
   Verified: rebootstrap fixpoint + gates byte-exact (the type map is a side table, not
   dumped). **Known limit (v1):** the join key is the source span
@@ -256,7 +256,7 @@ Four load-bearing properties:
 
 ## 6. Delivery plan (additive, oracle-gated)
 
-Each phase is independently shippable and gated by `selfhost/oracle/*.sh` +
+Each phase is independently shippable and gated by `scripts/compiler/oracle/*.sh` +
 rebootstrap fixpoint, in the established style.
 
 - **S0 — node identity — ✅ SHIPPED.** A non-dumped `nid : i64` on `Sexp` and `Expr`,
@@ -267,7 +267,7 @@ rebootstrap fixpoint, in the established style.
   byte-exact; assignment is deterministic, so the rebootstrap fixpoint holds. **`type-of`
   now keys the type map on `nid`** (`type-map-*` + `do-synth` record `e.nid → type`),
   making it exact per node instead of span-collidable — correct even for macro-generated
-  code (demo `metaprog-poc/nofloat_macro.coil` + `sneakymac.coil`: the checker reads the
+  code (demo `tests/metaprogramming/nofloat_macro.coil` + `sneakymac.coil`: the checker reads the
   inferred type of a node inside a macro expansion). Verified: rebootstrap fixpoint +
   gates byte-exact.
 
@@ -279,7 +279,7 @@ rebootstrap fixpoint, in the established style.
   (`cp-find-fn-exact` on the qualified name), unambiguous even when the simple name lives
   in several modules; otherwise it falls back to the name-based lookup (which still
   reports `:ambiguous` for a bare cross-module clash). So a checker passes the **call
-  node** (not just the head symbol) for exact answers. Demo: `metaprog-poc/dup_app.coil` —
+  node** (not just the head symbol) for exact answers. Demo: `tests/metaprogramming/dup_app.coil` —
   `dupa` and `dupb` both define `probe`; the checker vetoes only the pointer-returning
   `db/probe` call (name-based lookup would say `:ambiguous` and miss it). Reset per check
   pass; rebootstrap fixpoint + gates green.
@@ -306,7 +306,7 @@ rebootstrap fixpoint, in the established style.
   `type-res-lookup(src-mod-lookup(node.source), decl-node-name(node))` → the qualified type,
   fed through `cp-find-exact-decl`. Authoritative (it is the real resolver's output, so it
   handles imports/aliases), zero changes to `Type`, and the recording is a pure side effect
-  so all dumps stay byte-exact. Demo: `metaprog-poc/typecheck_test.coil` — `wa` and `wb` both
+  so all dumps stay byte-exact. Demo: `tests/metaprogramming/typecheck_test.coil` — `wa` and `wb` both
   define `Box`; the checker bans only `wb/Box` references, resolving each to the right module.
   So resolution now covers **every** reference — calls, fn-ptrs, variant constructions, and
   named types. Rebootstrap fixpoint + gates green.
@@ -345,7 +345,7 @@ rebootstrap fixpoint, in the established style.
   `Type`→`Code` reconstructor (`ty->sexp`). Op code **35**; parser recognizes
   `code-decl`; no checker-typing change (defaults to `TCode`). No oracle re-bless —
   rebootstrap fixpoint + all gates green; every existing checker/transformer demo
-  unchanged. Demo: `metaprog-poc/sigcheck{,_ok,_bad,_cross}.coil` — a policy checker
+  unchanged. Demo: `tests/metaprogramming/sigcheck{,_ok,_bad,_cross}.coil` — a policy checker
   that reads each callee's real declared **return type** (incl. a function imported
   from another module) and vetoes calls to pointer-returning functions (type-correct
   code the policy forbids). **Known limits (v1):** looks up by simple/module-qualified
@@ -372,7 +372,7 @@ rebootstrap fixpoint, in the established style.
   `expander.coil::run-transforms-and-check` (fixpoint via `run-transform-fixpoint`, then
   the strict check) → checkers → mono. `try-resolve-check` builds the per-round model
   (swallowing errors, resetting `check_diags`); `clear-sem-model` empties it when the
-  program is not yet valid. Demos: `metaprog-poc/retkind{,_test}.coil` (rewrites a marker
+  program is not yet valid. Demos: `tests/metaprogramming/retkind{,_test}.coil` (rewrites a marker
   to `1`/`2` by the wrapped call's real return type — exit 12 = `1*10 + 2`, 0 without)
   and `dialect.coil`/`tx_test.coil` (`inc`→`iadd` via the tolerant path). Verified:
   rebootstrap fixpoint + gates green; every existing transform/checker demo unchanged.

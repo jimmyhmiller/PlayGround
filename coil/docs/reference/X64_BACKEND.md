@@ -1,28 +1,28 @@
 # The x86-64 backend (selfhost, zero-deps)
 
-A third backend for the **self-hosted** Coil compiler (`selfhost/src/`), written
+A third backend for the **self-hosted** Coil compiler (`src/compiler/`), written
 in Coil, that lowers the monomorphized `Program` directly to x86-64 machine code
 in an **ELF** object — no LLVM anywhere in the path. It is the Linux sibling of
-the arm64 backend (`docs/ARM64_BACKEND.md`), and everything that document says
+the arm64 backend (`docs/reference/ARM64_BACKEND.md`), and everything that document says
 about *why* (debug backend, DWARF always on, compile speed over code quality)
 applies here unchanged.
 
 ## Files
-- `selfhost/src/x64.coil` — x86-64 instruction encoder. Pure: composes REX /
+- `src/compiler/x64.coil` — x86-64 instruction encoder. Pure: composes REX /
   ModRM / SIB / displacement bytes into a plain byte buffer; label+fixup
   management for branches.
-- `selfhost/src/elf.coil` — ELF64 `ET_REL` writer: sections, `.rela.*`
+- `src/compiler/elf.coil` — ELF64 `ET_REL` writer: sections, `.rela.*`
   relocations (`R_X86_64_64`, `PC32`, `PLT32`), symbol table with the
   local-before-global ordering ELF requires, string tables.
-- `selfhost/src/dwarf.coil` — **shared** with the arm64 backend; the frame-base
+- `src/compiler/dwarf.coil` — **shared** with the arm64 backend; the frame-base
   register and slot bias are now parameters (`fbreg`/`fbbias`) rather than
   hardcoded to x29.
-- `selfhost/src/codegen_x64.coil` — the lowering: mono `Program` → code + data +
+- `src/compiler/codegen_x64.coil` — the lowering: mono `Program` → code + data +
   relocs + DWARF. Mirrors `codegen_a64.coil` function for function, so the two
   can be diffed against each other.
-- `selfhost/src/main_x64.coil` — the LLVM-free entry point (the `main_a64.coil`
+- `src/compiler/main_x64.coil` — the LLVM-free entry point (the `main_a64.coil`
   equivalent): omits `codegen.coil`/`normalize.coil` entirely.
-- `selfhost/src/x64_selftest.coil` — the encoder's verification harness.
+- `src/compiler/x64_selftest.coil` — the encoder's verification harness.
 
 ## What differs from the arm64 backend
 Everything not listed here is deliberately identical.
@@ -58,7 +58,7 @@ Everything not listed here is deliberately identical.
   for the reverse case, rather than silently picking the same-numbered register.
 
 ## Gates
-`selfhost/oracle/x64/`:
+`tests/compiler/oracle/x64/`:
 - `gate-encode.sh` — every instruction the encoder can emit is diffed against
   **llvm-mc**, an independent assembler. 108 cases covering the encoding edge
   cases: `r8`–`r15` in each operand position, `rsp`/`r12` as a memory base
@@ -73,7 +73,7 @@ Everything not listed here is deliberately identical.
   checks readelf's view and that the link produces no warnings (a missing
   `.note.GNU-stack` silently gives the whole program an executable stack).
   *Teeth: a wrong `sh_info` makes the real linker reject the object.*
-- `gate-run.sh` — builds the 56-program corpus with `--backend x64`, runs each,
+- `python3 scripts/oracle.py runtime gate x64` — builds the 56-program corpus with `--backend x64`, runs each,
   and diffs stdout+exit byte-for-byte against the LLVM backend's behavior.
   Runtime equality, not IR equality, is the contract between backends.
   *Teeth: compiling signed `<` as unsigned fails 8 programs.*
@@ -85,13 +85,10 @@ Everything not listed here is deliberately identical.
   distinct prime weight — the first draft summed them evenly, which meant a
   backend that swapped two arguments still produced the right total.
   *Teeth: this is where the bug that broke the first self-host attempt lived.*
-- `gate-gdb.sh` — 10 checks that the DWARF actually drives a debugger:
-  breakpoint by name, correct line, `info args`/`info locals` showing real
-  values, struct rendering through a pointer, stepping, backtrace.
-- `selfhost/bootstrap-x64.sh` — the finale: stage2/stage3 through the x64
+- `python3 scripts/dev.py build x64` — the finale: stage2/stage3 through the x64
   backend, **stage2.o == stage3.o byte-identical**, and the x64-built compiler
   itself passes the corpus.
-- `selfhost/rebootstrap-nollvm-linux.sh` — builds `main_x64.coil` and proves
+- `python3 scripts/dev.py build nollvm-linux` — builds `main_x64.coil` and proves
   with `ldd` that the result links no libLLVM (only libc + libm).
 
 ## Results (2026-07-28, Strix Halo x86-64 host)
@@ -100,8 +97,8 @@ including the `cc` link:
 
 | input                             | LLVM     | x64      | speedup   |
 |-----------------------------------|----------|----------|-----------|
-| `selfhost/src/main.coil` (~15k lines w/ libs) | 21.25 s | **1.61 s** | **13.2×** |
-| `examples/json.coil`              | 129 ms   | 58 ms    | 2.2×      |
+| `src/compiler/main.coil` (~15k lines w/ libs) | 21.25 s | **1.61 s** | **13.2×** |
+| `src/examples/json.coil`              | 129 ms   | 58 ms    | 2.2×      |
 
 The ≥10× target the arm64 backend set is beaten on the input that matters.
 Small programs are bound by the shared `cc`-link and process floor.

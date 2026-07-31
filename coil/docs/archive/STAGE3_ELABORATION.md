@@ -5,7 +5,7 @@
 > reflects the plan, not the final shape. For how the implemented system actually
 > resolves names — module scoping, `coil.core` auto-refer, trait/method
 > namespacing, and the two-phase resolve with its `strict` gating — see
-> **[NAMESPACING.md](NAMESPACING.md)**.
+> **[NAMESPACING.md](../reference/NAMESPACING.md)**.
 
 Goal: make **macros ordinary Coil code** that run during compilation, manipulate
 **code as a first-class value**, and use the **real (typed) reflection** — replacing
@@ -68,7 +68,7 @@ Because expansion is interleaved with checking, a macro can query types.
   `~`(unquote) splices a comptime value into the template. (Today these live only
   in the macro Lisp; Stage 3 lifts them into the runtime/comptime layer — the same
   syntax, now one mechanism.)
-- Accessors (mirroring `lib/sexp.coil`, but over the compiler's `Sexp` at comptime):
+- Accessors (mirroring `src/stdlib/sexp.coil`, but over the compiler's `Sexp` at comptime):
   `code-list?` / `code-sym?` / `code-int?`, `code-count`, `code-nth`, `code-sym`
   (→ string), `code-int` (→ i64). `gensym` for hygiene.
 

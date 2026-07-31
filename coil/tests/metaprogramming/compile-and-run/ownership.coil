@@ -8,9 +8,9 @@
 ; DISTINCT resource — the correctness a name-matching checker cannot achieve.
 ; This is the shape of a real borrow checker: whole program, post-typecheck,
 ; dataflow over binding identity, multi-error located reporting, veto.
-(import "lib/alloc.coil" :use *)
-(import "lib/hashmap.coil" :use *)
-(import "lib/control.coil" :use *)
+(import "src/stdlib/alloc.coil" :use *)
+(import "src/stdlib/hashmap.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
 
 ; released: bid -> 1 once a binding has been released
 (defn own-scan [(form Code) (released (ptr (HashMap i64 i64)))] (-> i64)

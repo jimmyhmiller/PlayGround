@@ -5,14 +5,14 @@
 ;   (if c body 0)   ->  (when c body)
 ;   (if c 0 body)   ->  (unless c body)
 ;
-; Both are EXACT: lib/control.coil defines `when` as `(if ~c (do ~@body) 0)` and
+; Both are EXACT: src/stdlib/control.coil defines `when` as `(if ~c (do ~@body) 0)` and
 ; `unless` as `(if ~c 0 (do ~@body))`, so the rewrite is the same code spelled without
 ; the arm that never mattered. The `0` has to be the literal integer — `code-eq`
 ; against `0`, not "looks falsy".
 ;
 ; This reads like a cosmetic rule and is not. Checkers run on the EXPANDED program,
 ; where a macro's output is marked (`code-macro?`), so an `if` that becomes a `when`
-; stops counting as one of the author's nested ifs. Measured over selfhost/src + fmt,
+; stops counting as one of the author's nested ifs. Measured over src/compiler + fmt,
 ; applying it drops the forms nesting three or more ifs deep from 321 to 197 without
 ; restructuring a single branch.
 ;

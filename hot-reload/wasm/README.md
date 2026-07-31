@@ -51,7 +51,7 @@ difference.
 | 1 | `edit_1_radius.lt` | Redefining a function takes effect at the next call. The loop is never restarted. |
 | 2 | `edit_2_migrate.lt` | A struct gains defaulted fields; the particles already on screen migrate lazily at their next field read. Same objects, no reseed. |
 | 3 | `edit_3_non_preserving.lt` | `Particle.visible` changes from `bool` to an enum. The edit installs, stale functions become Broken transitively, and the animation freezes at the outer boundary. |
-| 4 | `edit_3_repair.lt` | Code is repaired and a checked bool-to-enum migration is installed. Untouched callers revive and the same particles migrate lazily after resume. |
+| 4 | `edit_3_repair.lt` | Code is repaired and a general typed migration expression maps the old field into its new representation. Untouched callers revive and the same particles migrate lazily after resume. |
 | 5 | `edit_4_enum.lt` | Another enum is introduced and dispatched on: `draw`'s arms call different foreign functions, so the right half becomes stroked rings. |
 | 6 | `edit_5_break.lt` | Adding a variant makes `draw`'s `match` non-exhaustive. Brokenness propagates before the frame performs any effect. |
 | 7 | `edit_6_repair.lt` | Repairing only the root cause revives the whole chain, and the suspended computation resumes at the trapping instruction. |

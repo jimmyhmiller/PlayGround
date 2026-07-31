@@ -1,0 +1,277 @@
+(module alloc)
+; Zig-style allocators: an allocator is a VALUE (a vtable struct) threaded
+; explicitly. There is no ambient heap -- a function that allocates *takes* an
+; Allocator, so allocation is visible in its type. Built entirely in Coil; the
+; compiler has no allocator concept.
+;
+; The vtable is alignment-aware and carries the size+alignment back to `free`
+; (so bump/pool allocators can reclaim precisely), mirroring Zig's interface:
+;   alloc  (ctx, len, align)            -> (Option bytes)   None = out of memory
+;   resize (ctx, ptr, old, new, align)  -> (Option bytes)   None = couldn't grow
+;   free   (ctx, ptr, len, align)       -> _
+; Failure is a sum type (Option), never a null sentinel.
+
+(import "result.coil" :use *)   ; Option/Result/Some/None/Ok/Err, brought in bare
+
+(extern malloc  :cc c [isize] (-> (ptr i8)))            ; void* malloc(size_t)
+(extern realloc :cc c [(ptr i8) isize] (-> (ptr i8)))   ; void* realloc(void*, size_t)
+(extern abort   :cc c [] (-> :i64))                    ; void abort() — unrecoverable hard-fail
+
+; ---- reporting an unrecoverable allocation failure -------------------------
+;; write(2), for the abort message below. io.coil and slice.coil already declare this
+;; exact signature; an identical redeclaration names the same symbol rather than adding
+;; a new one, and nothing here is referenced by a program that never allocates, so
+;; --gc-sections still drops it and freestanding builds stay libc-free.
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t write(int, const void*, size_t)
+
+;; Write a NUL-terminated literal to stderr. The length is measured by scanning so this
+;; needs no `strlen` extern, and the write is unbuffered so nothing is lost to `abort`.
+(defn oom-puts [(s (ptr i8))] (-> :i64)
+  (let [(mut n) 0]
+    (loop (if (icmp-eq (cast :i64 (load (index s (load n)))) 0)
+              (break)
+              (store! n (iadd (load n) 1))))
+    (write 2 s (cast isize (load n)))
+    0))
+
+;; Decimal-print a non-negative i64 to stderr. Digits are built back-to-front in a
+;; call-site-static scratch buffer — `alloc-static` gives one cell per call site, which
+;; is exactly right here: this runs once, on the way to `abort`.
+(defn oom-putd [(v :i64)] (-> :i64)
+  (let [buf     (alloc-static (array i8 24))
+        (mut i) 24
+        (mut x) v]
+    (loop
+      (do (store! i (isub (load i) 1))
+          (store! (index buf (load i)) (cast i8 (iadd 48 (irem (load x) 10))))
+          (store! x (idiv (load x) 10))
+          (if (icmp-eq (load x) 0) (break) 0)))
+    (write 2 (cast (ptr i8) (index buf (load i))) (cast isize (isub 24 (load i))))
+    0))
+
+;; Report a failed allocation, then hard-abort the process. `site` names the caller and
+;; `bytes` is the request that could not be satisfied (pass -1 when the size is not
+;; known). This used to be a bare `abort()`: exit 134, empty stdout, empty stderr — so
+;; every allocator-exhaustion bug cost an afternoon of bisecting builds to locate what
+;; one line of output identifies. See docs/reference/ALLOCATION.md.
+(defn oom-at [(site (ptr i8)) (bytes :i64)] (-> :i64)
+  (oom-puts c"out of memory: ")
+  (oom-puts site)
+  (oom-puts c" failed to allocate")
+  (if (icmp-ge bytes 0)
+      (do (oom-puts c" ") (oom-putd bytes) (oom-puts c" bytes"))
+      0)
+  (oom-puts c"; the allocator is exhausted\n")
+  (abort)
+  0)
+
+;; Hard-abort on an unrecoverable allocation failure, without a known site or size.
+;; Prefer `oom-at` — the site and the request size are what make the abort diagnosable.
+;; Exposed as a defn (not the bare extern) so callers share ONE `abort` declaration:
+;; Coil doesn't dedup identical externs across modules, and defns ARE shared via
+;; `:use *` while extern decls are not — so collections route OOM through here instead
+;; of each declaring their own `abort` (which would collide when two such libs are
+;; imported together).
+(defn oom [] (-> :i64) (oom-at c"an allocation" -1))
+
+(defstruct Allocator
+  [(alloc  (fnptr c [(ptr i8) :i64 :i64] (Option (ptr i8))))
+   (resize (fnptr c [(ptr i8) (ptr i8) :i64 :i64 :i64] (Option (ptr i8))))
+   (free   (fnptr c [(ptr i8) (ptr i8) :i64 :i64] :i64))
+   (ctx    (ptr i8))])
+
+; ---- raw, byte-level interface --------------------------------------------
+(defn raw-alloc [(a (ptr Allocator)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (call-ptr (load (field a alloc)) (load (field a ctx)) size align))
+(defn raw-resize [(a (ptr Allocator)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  (call-ptr (load (field a resize)) (load (field a ctx)) p old new align))
+(defn raw-free [(a (ptr Allocator)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64)
+  (call-ptr (load (field a free)) (load (field a ctx)) p size align))
+
+; ---- typed interface (generic; sizes/aligns itself with sizeof/alignof) ----
+;; `create` and `alloc-slice` take T explicitly (it appears only in the result);
+;; `destroy` infers T from its pointer argument.
+(defn create [T] [(a (ptr Allocator))] (-> (Option (ptr T)))
+  (match (raw-alloc a (sizeof T) (alignof T))
+    (None []  (None))
+    (Some [p] (Some (cast (ptr T) p)))))
+
+(defn alloc-slice [T] [(a (ptr Allocator)) (n :i64)] (-> (Option (ptr T)))
+  (match (raw-alloc a (imul n (sizeof T)) (alignof T))
+    (None []  (None))
+    (Some [p] (Some (cast (ptr T) p)))))
+
+(defn destroy [T] [(a (ptr Allocator)) (p (ptr T))] (-> :i64)
+  (raw-free a (cast (ptr i8) p) (sizeof T) (alignof T)))
+
+;; `.?`-style escape hatch: take the pointer, or null on failure (Coil doesn't
+;; promise memory safety, so this is a legitimate, Zig-like convenience).
+(defn unwrap-ptr [T] [(o (Option (ptr T)))] (-> (ptr T))
+  (match o (None [] (cast (ptr T) 0)) (Some [p] p)))
+
+;; `(box A T VAL)` — heap-allocate a T from allocator A, store VAL into it, and
+;; yield the `(ptr T)`. Removes the create + unwrap-ptr + store! dance for the
+;; common "put one value on the heap" case (e.g. a recursive sum's child node).
+;; Returns a null pointer on OOM (via unwrap-ptr — descriptive, not safe).
+(defn box [(a Code) (ty Code) (val Code)] (-> Code)
+  (let [bp (gensym)]
+    `(let [~bp (unwrap-ptr [~ty] (create [~ty] ~a))]
+       (store! ~bp ~val)
+       ~bp)))
+
+; ---- a malloc-backed general-purpose allocator ----
+;; malloc/realloc guarantee alignment up to max_align_t (16 on x86-64), which
+;; covers every scalar and pointer; over-aligned requests aren't honored here.
+(defn ma-alloc [(ctx (ptr i8)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (let [p (malloc (cast isize size))]
+    (if (icmp-eq (cast :i64 p) 0) (None) (Some p))))
+(defn ma-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  (let [q (realloc p (cast isize new))]
+    (if (icmp-eq (cast :i64 q) 0) (None) (Some q))))
+(defn ma-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) (free p))
+(defn malloc-allocator [] (-> (ptr Allocator))
+  (let [a (alloc-static Allocator)]
+    (store! (field a alloc)  (fnptr-of ma-alloc))
+    (store! (field a resize) (fnptr-of ma-resize))
+    (store! (field a free)   (fnptr-of ma-free))
+    (store! (field a ctx)    (cast (ptr i8) a))
+    a))
+
+; ---- an arena (bump) allocator: alloc bumps a pointer (rounded up to the
+;;      requested alignment), per-alloc free is a no-op, everything is reclaimed
+;;      at once by freeing the backing block ----
+(defstruct Arena [(base (ptr i8)) (off :i64) (cap :i64)])
+(defn align-up [(x :i64) (a :i64)] (-> :i64)
+  (imul (idiv (iadd x (isub a 1)) a) a))
+(defn ar-alloc [(ctx (ptr i8)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (let [ar (cast (ptr Arena) ctx)
+        o  (align-up (load (field ar off)) align)]
+    (if (icmp-gt (iadd o size) (load (field ar cap)))
+        (None)                                  ; arena exhausted
+        (do (store! (field ar off) (iadd o size))
+            (Some (index (load (field ar base)) o))))))     ; base + o
+;; The standard bump-allocator in-place path: a block whose end is exactly the bump
+;; pointer is the MOST RECENT allocation, so it can grow (or shrink) by moving `off` and
+;; nothing else. Any other block has live allocations stacked on top of it and genuinely
+;; cannot grow — `(None)`, and the caller copies.
+;;
+;; This is not an optimisation, it is what makes growable collections usable on an arena
+;; at all. Without it `al-reserve!` always takes its allocate-new-and-copy fallback and
+;; `ar-free` is a no-op, so an ArrayList doubling to n strands 4+8+16+…+n ≈ 2n bytes it
+;; can never reuse: append-heavy growth is quadratic in SPACE. With it, a list that is
+;; the arena's top allocation grows by pure pointer bump.
+(defn ar-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  (let [ar    (cast (ptr Arena) ctx)
+        start (isub (cast :i64 p) (cast :i64 (load (field ar base))))]
+    ; `p` must be one of OUR blocks before its address is interpreted as an offset. A
+    ; strict arena only ever hands out its own, but `p` is also NULL for a collection
+    ; that has not allocated yet, and the overflow flavour below passes malloc blocks
+    ; through here — both must miss, not land on a bogus `start`.
+    (if (and (icmp-ge start 0) (icmp-lt start (load (field ar cap))))
+        (if (icmp-eq (iadd start old) (load (field ar off)))
+            (if (icmp-gt (iadd start new) (load (field ar cap)))
+                (None)                              ; would run past the end of the arena
+                (do (store! (field ar off) (iadd start new))
+                    (Some p)))
+            (None))                                 ; not the top block — cannot grow
+        (None))))                                   ; not ours at all
+(defn ar-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) 0) ; bulk-freed
+
+; ---- an arena that OVERFLOWS to malloc instead of failing --------------------
+;; A bump allocator is the right shape for a compiler's root allocator — nearly nothing
+;; is individually freed — but a FIXED region is the wrong contract for one: a capacity
+;; cliff turns "this input is bigger than I guessed" into a hard abort. Measured on the
+;; REPL, which reuses one allocator across every evaluation and retains ~17 MiB per eval
+;; (that retention is not new — the malloc-backed build grows identically): a 4 GiB
+;; strict arena aborts at roughly 240 evaluations, where malloc simply keeps going.
+;;
+;; So this flavour bumps while the region lasts and falls back to malloc afterwards. It
+;; is strictly better than either half: the fast path stays a pointer increment, and the
+;; worst case degrades to exactly the malloc behaviour it replaced rather than dying.
+;;
+;; It is a SEPARATE vtable rather than a flag on `Arena` deliberately. `arena-over-buffer`
+;; must stay reachable from freestanding code, and a branch to `malloc` on the live path
+;; keeps the symbol referenced even when it can never be taken — `--gc-sections` can only
+;; drop what nothing mentions. Distinct hooks keep the bare-metal arena genuinely libc-free.
+(defn ar-in-block? [(ctx (ptr i8)) (p (ptr i8))] (-> bool)
+  (let [ar (cast (ptr Arena) ctx)
+        d  (isub (cast :i64 p) (cast :i64 (load (field ar base))))]
+    (and (icmp-ge d 0) (icmp-lt d (load (field ar cap))))))
+
+(defn aro-alloc [(ctx (ptr i8)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (match (ar-alloc ctx size align)
+    (Some [p] (Some p))
+    (None []  (ma-alloc ctx size align))))          ; region full — malloc it (ctx unused)
+
+(defn aro-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  ; A null `p` is a collection's first growth, not a block to resize. Answering it with
+  ; `realloc(NULL, n)` would silently route EVERY list's initial buffer to malloc and
+  ; leave the arena unused for exactly the allocations it exists to serve; `(None)` sends
+  ; the caller to `alloc-slice`, which bumps.
+  (if (icmp-eq (cast :i64 p) 0)
+      (None)
+      (if (ar-in-block? ctx p)
+          (ar-resize ctx p old new align)
+          (ma-resize ctx p old new align))))
+
+(defn aro-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64)
+  (if (ar-in-block? ctx p) 0 (ma-free ctx p size align)))   ; overflow blocks are real
+;; Build an arena over a caller-provided buffer — no malloc, so it works
+;; FREESTANDING (the buffer can be an `alloc-static` array in .bss). The malloc-backed
+;; `arena-allocator` below is the convenience wrapper; this is the primitive.
+;; The caller owns the Arena and Allocator cells. This used to build both with
+;; `alloc-static`, which gives ONE cell per CALL SITE — not per call — so every arena in
+;; the program shared one Arena: a second `arena-allocator` silently reset the first and
+;; orphaned its buffer, and a scratch arena inside a helper stomped its caller's. Instance
+;; state can never come from a static. (`alloc-static` at the CALLER's own site is the
+;; correct use: one static per arena the caller actually writes. `malloc-allocator` below
+;; keeps its static legitimately — it is a genuine singleton.)
+(defn arena-over-buffer [(ar (ptr Arena)) (a (ptr Allocator)) (buf (ptr i8)) (cap :i64)]
+    (-> (ptr Allocator))
+  (store! (field ar base) buf)
+  (store! (field ar off) 0)
+  (store! (field ar cap) cap)
+  (store! (field a alloc)  (fnptr-of ar-alloc))
+  (store! (field a resize) (fnptr-of ar-resize))
+  (store! (field a free)   (fnptr-of ar-free))
+  (store! (field a ctx)    (cast (ptr i8) ar))
+  a)
+; A poison-on-free DEBUG allocator (mem-2) lives in the sibling module dbgalloc.coil,
+; NOT here: its hooks are concrete C-ABI functions mono cannot dead-strip, so bundling
+; them into this always-loaded core would emit them into every allocating program. Wrap
+; any allocator with `(debug-allocator a)` from `(import "dbgalloc.coil")` — under
+; --debug-checks it detects double-free and poisons freed memory; off, it is just `a`.
+
+;; convenience: malloc the backing buffer AND the arena's own state, so each call yields
+;; an independent arena rather than a fresh view onto one shared static.
+(defn arena-allocator [(cap :i64)] (-> (ptr Allocator))
+  (arena-over-buffer (cast (ptr Arena) (malloc (cast isize (sizeof Arena))))
+                     (cast (ptr Allocator) (malloc (cast isize (sizeof Allocator))))
+                     (malloc (cast isize cap)) cap))
+
+;; The overflow flavour (see `aro-alloc`): bump through a `cap`-byte region, then fall
+;; back to malloc. Suitable as a program's ROOT allocator, which the strict arena is not.
+;;
+;; If the region itself cannot be allocated this returns a plain `malloc-allocator`
+;; rather than an arena over a null base — a zero base with a nonzero cap would hand out
+;; addresses counted from NULL, which is not a failure you want to debug. Asking for a
+;; large region and getting the ordinary allocator is a graceful outcome; the caller sees
+;; a working `(ptr Allocator)` either way.
+(defn overflow-arena-allocator [(cap :i64)] (-> (ptr Allocator))
+  (let [buf (malloc (cast isize cap))]
+    (if (icmp-eq (cast :i64 buf) 0)
+        (malloc-allocator)
+        (let [ar (cast (ptr Arena) (malloc (cast isize (sizeof Arena))))
+              a  (cast (ptr Allocator) (malloc (cast isize (sizeof Allocator))))]
+          (store! (field ar base) buf)
+          (store! (field ar off) 0)
+          (store! (field ar cap) cap)
+          (store! (field a alloc)  (fnptr-of aro-alloc))
+          (store! (field a resize) (fnptr-of aro-resize))
+          (store! (field a free)   (fnptr-of aro-free))
+          (store! (field a ctx)    (cast (ptr i8) ar))
+          a))))

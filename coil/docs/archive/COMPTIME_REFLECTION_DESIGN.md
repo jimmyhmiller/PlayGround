@@ -4,7 +4,7 @@
 > `sum-variants`, `type-kind`, `type-params`) over a type-shape table on
 > `MacroCtx` (populated in pass 1 from the raw forms via `parse_defstruct`/
 > `parse_defsum`, grown in pass 2 so macro-generated types are reflectable). All
-> six decision-leans were blessed and implemented as-designed. `lib/derive.coil`
+> six decision-leans were blessed and implemented as-designed. `src/stdlib/derive.coil`
 > (`derive-eq`/`derive-hash`/`derive-keyops`) is a PURE LIBRARY over them — a
 > struct becomes a content-keyed HashMap key with three macro calls (closes
 > friction D10). NO layout/size leak (sizeof/alignof stay separate); hard-error on
@@ -99,7 +99,7 @@ macro's output and resolve normally through existing hygiene.
 
 ### 3. How a `derive` becomes a library macro (the payoff)
 ```clojure
-; lib/derive.coil — PURE LIBRARY, no compiler support
+; src/stdlib/derive.coil — PURE LIBRARY, no compiler support
 (defmacro derive-eq [tname]
   (let [fields (struct-fields tname)]
     `(defn ~(symbol "eq-" tname) [(a ~tname) (b ~tname)] (-> bool)
@@ -154,6 +154,6 @@ follow the same shape — each a library macro over `struct-fields`/`sum-variant
 ## Why this is the right next milestone
 Perf is at `cc -O3` parity, control is beyond C, and the prime directive has held
 through Phase-1/2 — the one gap that *defines* the goal is that type-directed features
-still can't be macros. This closes it. After the bridge lands, `lib/derive.coil`
+still can't be macros. This closes it. After the bridge lands, `src/stdlib/derive.coil`
 (eq/hash/show) + a string/struct `KeyOps` derive become the proof, and the friction
 D10 ("no generic ==/hashing/derive") is answered the Coil way: as a library.

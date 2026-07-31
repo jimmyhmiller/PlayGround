@@ -32,7 +32,7 @@ is the same impl the runtime uses — literally the same `=`.
   monomorphizes and builds it, runs the entry, and reads the result back — scalars out
   of the return register, aggregates through a write-through pointer thunk walked by
   the natural C layout. `build-value` turns that into a literal. There is no
-  interpreter (`docs/INTERP_DELETION.md`).
+  interpreter (`docs/archive/INTERP_DELETION.md`).
 - ⚠ Because the thunk is real compiled code, a runaway comptime computation is
   **unbounded**, and deep self-recursion is not tail-call-optimized on this path, so
   it crashes rather than reporting. Division by zero **is** explicitly guarded

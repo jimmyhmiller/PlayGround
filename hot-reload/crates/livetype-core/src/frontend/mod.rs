@@ -152,7 +152,7 @@ impl Session {
                 .map_err(|e| format!("installing a struct: {e:?}"))?;
         }
 
-        for m in &lowered.bool_to_enum_migrations {
+        for m in &lowered.migrations {
             let (from, to, old, new) = self.engine.with_world(|w| {
                 let to = w.current_schemas[&m.type_id];
                 let from = Version(to.0.saturating_sub(1));
@@ -165,16 +165,25 @@ impl Session {
             });
             let old = old.ok_or_else(|| "a migration needs an older type version".to_string())?;
             let new = new.ok_or_else(|| "migration target type is missing".to_string())?;
+            let input = old
+                .field(m.field_id)
+                .ok_or_else(|| format!("old type `{}` has no migrated field", old.name))?
+                .ty
+                .clone();
+            let result = new
+                .field(m.field_id)
+                .ok_or_else(|| format!("new type `{}` has no migrated field", new.name))?
+                .ty
+                .clone();
+            let function = lower::lower_migration(m, input, result, &self.ids)?;
             let mut fields = BTreeMap::new();
             for field in &new.fields {
                 if field.id == m.field_id {
                     fields.insert(
                         field.id,
-                        MigrationSource::BoolToVariant {
+                        MigrationSource::Transform {
                             source: m.field_id,
-                            type_id: m.enum_id,
-                            false_variant: m.false_variant,
-                            true_variant: m.true_variant,
+                            function: Box::new(function.clone()),
                         },
                     );
                 } else if old.field(field.id).is_some_and(|f| f.ty == field.ty) {

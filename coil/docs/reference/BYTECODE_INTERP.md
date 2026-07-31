@@ -1,6 +1,6 @@
 # The Coil Bytecode Interpreter
 
-`selfhost/src/interp.coil` is a bytecode interpreter for the self-hosted Coil
+`src/compiler/interp.coil` is a bytecode interpreter for the self-hosted Coil
 compiler. It consumes the **same monomorphized `Program`** the native backends
 consume — the output of `parse -> resolve -> check -> mono` — compiles each
 mono'd function to a compact stack-bytecode ISA, and executes it on a small VM
@@ -8,8 +8,8 @@ with a **real memory model**. It is reached only through the additive
 `coil interp <file>` driver subcommand; the compile pipeline and the native
 backends are byte-unchanged.
 
-    coil interp examples/fib.coil ; echo $?     # => 55
-    coil interp examples/extern.coil            # => prints 12345 (via libc putchar)
+    coil interp src/examples/fib.coil ; echo $?     # => 55
+    coil interp src/examples/extern.coil            # => prints 12345 (via libc putchar)
 
 `main`'s `i64` return **is** the process exit code. Program stdout goes to real
 stdout (the VM calls real libc).
@@ -184,7 +184,7 @@ matching the compiler's existing declarations of those symbols.
 
 ## What is implemented and what hard-errors
 
-Implemented end-to-end (verified by `selfhost/oracle/interp/gate-interp.sh`):
+Implemented end-to-end (verified by `python3 scripts/dev.py test interpreter`):
 integer + float arithmetic and comparisons (incl. unsigned logical right shift and
 float remainder via `fmod`), `bool`, casts (int width, int↔float honouring source
 signedness, float↔float, pointer/fnptr identity), `let`/`(mut …)` locals, `if`,
@@ -207,11 +207,11 @@ variadic FFI, and calling a real C function address as a Coil `fnptr`.
 
 ## Gate
 
-There are two gates, both over `selfhost/oracle/arm64/corpus.txt` (all 44
-`examples/` programs plus the 12 `tests/` programs = 56 entries). Runtime equality
+There are two gates, both over `tests/compiler/oracle/arm64/corpus.txt` (all 44
+`src/examples/` programs plus the 12 `tests/` programs = 56 entries). Runtime equality
 with the compiled program is the contract.
 
-**`selfhost/oracle/interp/gate-interp-vs-compiled.sh <coil-bin>` — the contract
+**`python3 scripts/dev.py test interpreter --compiler <coil-bin>` — the contract
 gate (56/56).** For every corpus program it BUILDS the program (default backend,
 or `--backend arm64` for the `R`-marked inline-asm `:shim` programs, exactly as the
 corpus declares), runs the compiled binary, and diffs its stdout+exit against
@@ -222,15 +222,15 @@ filesystem path; an interpreter reports the source path it was handed), so the
 compiled side is invoked with `exec -a <srcpath>` and BOTH sides see the identical
 `argv[0]` (= the source path). This normalization is applied **uniformly** to all
 56 programs: for the 54 that never read `argv[0]` it changes nothing; for
-`examples/args.coil` and `examples/everything.coil` (which `puts(argv[0])`) it
+`src/examples/args.coil` and `src/examples/everything.coil` (which `puts(argv[0])`) it
 makes the diff a comparison of program *semantics* rather than of where the binary
 happens to live. Nothing is faked, skipped, or special-cased.
 
-**`selfhost/oracle/interp/gate-interp.sh <coil-bin>` — the snapshot gate (54/56).**
+**`python3 scripts/oracle.py interpreter snapshot --compiler <coil-bin>` — the snapshot gate (54/56).**
 This diffs `coil interp` against the frozen LLVM reference snapshots in
-`selfhost/oracle/arm64/reference` (the same snapshots the arm64 backend gate uses).
-It reports **54/56**: the two "failures" are `examples/args.coil` and
-`examples/everything.coil`, whose snapshots bake the *compiled binary's* path
+`tests/compiler/oracle/arm64/reference` (the same snapshots the arm64 backend gate uses).
+It reports **54/56**: the two "failures" are `src/examples/args.coil` and
+`src/examples/everything.coil`, whose snapshots bake the *compiled binary's* path
 (`/tmp/coil-arm64-fixed-…`) as `argv[0]` — a filesystem location an interpreter
 structurally cannot and should not reproduce (fabricating it would be a hardcode,
 not a real result). Both programs otherwise run identically. The contract gate

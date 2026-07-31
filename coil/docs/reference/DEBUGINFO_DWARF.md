@@ -5,7 +5,7 @@ program to its source. **`-g` implies the native arm64 backend** (`--backend arm
 which is the debug backend: it always emits DWARF, it does not optimize, and it is the
 only path that emits debug info — the LLVM backend emits none.
 
-    coil build examples/fib.coil -o /tmp/fib -g
+    coil build src/examples/fib.coil -o /tmp/fib -g
     lldb /tmp/fib
     (lldb) breakpoint set --file fib.coil --line 7
     Breakpoint 1: where = fib`fib + 68 at fib.coil:7:26
@@ -15,7 +15,7 @@ only path that emits debug info — the LLVM backend emits none.
 
 ## What is emitted
 
-`selfhost/src/dwarf.coil` (419 lines, no dependencies) builds the
+`src/compiler/dwarf.coil` (419 lines, no dependencies) builds the
 `__debug_abbrev` / `__debug_info` / `__debug_str` / `__debug_line` section bytes
 directly, from events `codegen_a64.coil` collects during emission. DWARF v4, language
 C:
@@ -54,7 +54,7 @@ producing an empty `.dSYM`, zero line rows, and "No source available" in lldb.
   `DUMMY` until the reader stamps real multi-source spans) — never wrong info, just
   none.
 
-Gated in `selfhost/oracle/gate-cli.sh`: with the `.o` deleted so lldb must use the
+Gated in `scripts/compiler/oracle/gate-cli.sh`: with the `.o` deleted so lldb must use the
 `.dSYM` alone, a line breakpoint still resolves — which fails on a seed that emits no
 relocations. Beyond the gate, `frame variable` at such a breakpoint reports typed
 values (`(app.Pt *) p = 0x16fdfde70`, `(long) s = 42`).

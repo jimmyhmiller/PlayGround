@@ -22,48 +22,51 @@ would make the viewer misleading.
 
 ## Current daily-use entry point
 
-Authenticate once with each provider's own CLI, then run:
+Authenticate once with each provider's own CLI, then run Scry normally:
 
 ```bash
 claude auth status
 codex login status
 
-SCRY_PROVIDER=claude ./scry run examples/assistant.scry
-SCRY_PROVIDER=codex  ./scry run examples/assistant.scry
+./scry run examples/assistant.scry
 ```
 
-Both adapters default to read-only delegated work. To let the provider edit the current workspace:
+At `you>`, type `/models`. The in-terminal model picker contains the current subscription-backed
+Claude aliases (Fable 5, Opus, Sonnet) and Codex GPT-5.6 family (Sol, Terra, Luna). Selection applies
+to the current session immediately; `status` shows the active model. Startup remains safely
+offline/read-only until a model is selected.
 
-```bash
-SCRY_PROVIDER=codex SCRY_AGENT_ACCESS=workspace-write ./scry run examples/assistant.scry
-```
-
-`SCRY_MODEL` optionally selects a provider model; unset means the CLI's current default.
-`SCRY_MAX_TURNS` bounds delegated Claude turns (default 8). Unknown providers fall back to the
-offline `ScriptedModel` rather than silently selecting a paid provider.
+The developer viewer mirrors these controls for live inspection, but it is not required to operate
+the agent. Provider/access/model policy is ordinary inspectable runtime state; no provider or
+permission environment variable exists. API keys remain environment secrets and are never rendered.
 
 ### As-built provider commands
 
-- Claude: `claude -p --output-format json --max-turns N --permission-mode plan|acceptEdits`
-- Codex: `codex exec --ephemeral --sandbox read-only|workspace-write --skip-git-repo-check`
+- Claude: `claude -p --output-format stream-json --include-partial-messages --model ALIAS`
+- Codex: `codex app-server` over its JSONL protocol (`thread/start`, `turn/start`,
+  `item/agentMessage/delta`, `turn/completed`)
 
-Prompts and model names are shell-quoted. Child stdin is `/dev/null`, so a provider cannot steal
-input from Scry's REPL. `Process.capture` returns stdout only while leaving provider progress on
-stderr; a private output marker carries the real child exit status. CLI rate-limit and auth errors
-become model errors instead of empty assistant messages.
+Provider invocations use native `Process.spawnArgv`: executable and arguments go directly to
+`execvp`, with no `/bin/sh` interpolation. The runtime exposes writable child stdin plus incremental
+stdout/stderr polling, so both providers stream response deltas into the agent TUI. The browsable
+result chunks contain `exitCode`, separately captured
+`stdout`/`stderr`, `timedOut`, `truncated`, and `durationMs`. The native runtime polls both streams
+cooperatively, enforces the TUI-configured deadline and combined output budget, and kills the whole
+child process group on either limit. CLI rate-limit and auth errors become model errors instead of
+empty assistant messages.
 
 ## Production gates
 
 The current slice is usable, but the runtime is not yet production-ready. Work proceeds in this
 order; each phase must be testable without live provider access.
 
-### P1 — trustworthy process boundary
+### P1 — trustworthy process boundary (native core landed)
 
-- Replace shell-string execution for provider adapters with `Process.spawn(executable, args,
-  stdin, cwd, envPolicy) -> Child` and structured `ProcessResult { exitCode, stdout, stderr }`.
-- Add wall-clock timeout, cancellation, process-group termination, output byte limits, and explicit
-  UTF-8/binary behavior.
-- Stream stdout/stderr incrementally while keeping safepoints cooperative.
+- **Done:** native argv execution for provider adapters; structured stdout/stderr, wall-clock
+  timeout, process-group termination, combined output byte limit, duration, and cooperative polling.
+- **Done:** first-class asynchronous `ChildProcess`, writable stdin, incremental output chunks, and
+  provider delta streaming.
+- **Next:** explicit user cancellation, cwd/environment policy, and explicit UTF-8/binary behavior.
 - Add hermetic fake-provider contract tests for success, malformed output, rate limit, timeout,
   cancellation, oversized output, and a child that attempts to read stdin.
 
@@ -127,6 +130,6 @@ Exit gate: a clean machine can install, authenticate, run, inspect, upgrade, and
 
 ## Immediate next implementation
 
-P1 is next. The concrete vertical slice is structured process results plus timeout/cancellation,
-then moving `CliModel` off shell strings. That unlocks honest streaming into `Turn` and
-`ToolInvocation` entities without baking provider quirks into the language's core agent model.
+P1's synchronous native boundary is built and used by both subscription adapters. The next vertical
+slice is first-class `Run`/`Turn` state plus asynchronous cancellation and streaming into
+`ToolInvocation` entities, without baking provider quirks into the language's core agent model.

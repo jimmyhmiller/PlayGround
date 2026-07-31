@@ -1,20 +1,12 @@
-/target
-/.cargo
-apps/chip8/chip8-gui
-
-# Copyrighted arcade ROM — user must supply (see apps/invaders/README.md)
-roms/invaders.rom
-roms/invaders.[hgfe]
+/build
+src/apps/chip8/chip8-gui
+src/apps/web/*.wasm
 
 # compiled app binaries
-apps/invaders/invaders
-apps/invaders/*.o
-
-# the Linux compiler installs here (rebootstrap-linux.sh); the committed binaries
-# stay ./coil and ./coil-nollvm (macOS) + selfhost/seed/coil-seed-linux-x86_64
-/coil-linux
+src/apps/invaders/invaders
+src/apps/invaders/*.o
 
 # repro build artifacts
-docs/repro/*/repro
-docs/repro/*/librepro.a
-docs/repro/*/librepro.o
+tests/repro/*/repro
+tests/repro/*/librepro.a
+tests/repro/*/librepro.o

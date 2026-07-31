@@ -24,7 +24,7 @@ fn tint(p: Particle) -> i64 {
     }
 }
 
-migrate Particle.visible {
-    false => Visibility::Hidden,
-    true => Visibility::Visible,
+migrate Particle.visible(old) {
+    if old { return Visibility::Visible; }
+    Visibility::Hidden
 }

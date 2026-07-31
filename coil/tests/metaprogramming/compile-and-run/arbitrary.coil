@@ -6,11 +6,11 @@
 ; COIL_META=compiled, because the metaprogram is a normal program compiled by the
 ; normal pipeline: mono does generics, malloc is malloc, an extern is a linked
 ; symbol bound at dlopen.
-(import "lib/alloc.coil" :use *)
-(import "lib/slice.coil" :use *)
-(import "lib/str.coil" :use *)
-(import "lib/arraylist.coil" :use *)
-(import "lib/hashmap.coil" :use *)
+(import "src/stdlib/alloc.coil" :use *)
+(import "src/stdlib/slice.coil" :use *)
+(import "src/stdlib/str.coil" :use *)
+(import "src/stdlib/arraylist.coil" :use *)
+(import "src/stdlib/hashmap.coil" :use *)
 
 ; real libc, called AT COMPILE TIME from a macro
 (extern strlen :cc c [(ptr i8)] (-> i64))

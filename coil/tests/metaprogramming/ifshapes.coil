@@ -64,7 +64,7 @@
   (ish-not? (ish-test f)))
 
 ;; `(if c body 0)` is `when`; `(if c 0 body)` is `unless`. Both already exist in
-;; lib/control.coil and expand to exactly this.
+;; src/stdlib/control.coil and expand to exactly this.
 (defn ish-when? [(f Code)] (-> bool)
   (ish-zero? (ish-else f)))
 (defn ish-unless? [(f Code)] (-> bool)

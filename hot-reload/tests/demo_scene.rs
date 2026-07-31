@@ -289,7 +289,7 @@ fn scenarios_3_and_4_bool_to_enum_freezes_then_repairs_and_migrates() {
 
     session
         .eval(include_str!("../demo/edit_3_repair.lt"))
-        .expect("code repair and bool-to-enum migration install");
+        .expect("code repair and typed migration expression install");
     session.engine.thaw(&mut actor);
     assert_eq!(frame(&mut session, &mut actor), Turn::Yielded);
     let t = tk.lock().unwrap();

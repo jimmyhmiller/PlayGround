@@ -7,9 +7,9 @@
 ; apart. `(my-free X)` kills X's binding; any later reference to that same binding
 ; is reported. Runs as a compiled checker (arbitrary code + collections + the
 ; binding oracle) — the shape a real borrow checker takes.
-(import "lib/alloc.coil" :use *)
-(import "lib/hashmap.coil" :use *)
-(import "lib/control.coil" :use *)
+(import "src/stdlib/alloc.coil" :use *)
+(import "src/stdlib/hashmap.coil" :use *)
+(import "src/stdlib/control.coil" :use *)
 
 ; walk a form; `killed` maps binding-id -> 1 for freed locals
 (defn bc-scan [(form Code) (killed (ptr (HashMap i64 i64)))] (-> i64)

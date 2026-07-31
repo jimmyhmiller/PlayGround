@@ -66,7 +66,7 @@ Both fall back to the host when no `--target` is given.
 
 That distinction is the whole point, and it is easy to get wrong: a platform
 constant folded at compile time from a *runtime* probe silently records the
-build host, so cross-compiling bakes in the wrong answer. `lib/fs.coil` is the
+build host, so cross-compiling bakes in the wrong answer. `src/stdlib/fs.coil` is the
 worked example — its `open()` flags differ per OS (512 is `O_CREAT` on darwin
 and `O_TRUNC` on Linux), and it selects them with
 
@@ -80,7 +80,7 @@ and `O_TRUNC` on Linux), and it selects them with
 ```
 
 so the flags stay true compile-time literals (no runtime branch at any use) and
-are still right under cross-compilation. `selfhost/oracle/gate-target-os.sh`
+are still right under cross-compilation. `scripts/compiler/oracle/gate-target-os.sh`
 pins this by diffing `emit-ir` across `--target` values, which is the only place
 the property is observable — a cross-built binary never runs on the builder.
 
@@ -88,9 +88,9 @@ New API this project added (all shipped):
 
 - **`(report NODE MSG)`** — a located compile-time **error** at `NODE`. It **collects**:
   a checker keeps running and surfaces EVERY error in one pass; the build fails after
-  printing them all (see `metaprog-poc/located_multi.coil` → 2 errors, then failure).
+  printing them all (see `tests/metaprogramming/located_multi.coil` → 2 errors, then failure).
 - **`(warn NODE MSG)`** — a located, **non-fatal** warning at `NODE`; collects and all
-  print, the build succeeds. What a *linter* wants — `metaprog-poc/lint.coil` warns at
+  print, the build succeeds. What a *linter* wants — `tests/metaprogramming/lint.coil` warns at
   every `icmp-*`, suggesting `< > = …`.
 - **`(suggest NODE MSG REPLACEMENT)`** — a `warn` that also proposes a **rewrite**.
   `REPLACEMENT` is a `Code` value, normally built from the author's own subnodes; the
@@ -99,18 +99,18 @@ New API this project added (all shipped):
   so comments and formatting in untouched branches survive. A round that stops compiling
   is reverted. Comments BETWEEN nodes — the one thing no `Code` value records — are
   carried across the rewrite too, so a commented chain is fixed like any other. Demo:
-  `metaprog-poc/condlint.coil` rewrites a chain of 3+ nested `if`s as a `cond` with
-  `:else`. Full design + what changed on contact with reality: `docs/AUTOFIX.md`.
+  `src/examples/metaprogramming/condlint.coil` rewrites a chain of 3+ nested `if`s as a `cond` with
+  `:else`. Full design + what changed on contact with reality: `docs/archive/AUTOFIX.md`.
 - **`(code-macro? NODE)` → bool** — true for a node the expander produced. Checkers run
   on the EXPANDED program, so every `cond`/`when`/`case` the author wrote is already
   nested `if`s by the time a rule sees it; this is how a rule about `if` tells the two
   apart. It is the same `ctxt ≠ 0` test autofix uses internally to refuse to edit
   macro-generated code.
 - **Metaprograms are fed the WHOLE program, including all imports** (their own modules
-  and bundled stdlib). A checker sees imported code too — `metaprog-poc/imports_test.coil`
+  and bundled stdlib). A checker sees imported code too — `tests/metaprogramming/imports_test.coil`
   shows the linter flag an `icmp` in an imported user module.
 - **Checkers run AFTER resolve + typecheck** (the *semantic* layer; see
-  `docs/SEMANTIC_METAPROGRAMS.md`). A checker is registered at `expand-stage3` but
+  `docs/design/SEMANTIC_METAPROGRAMS.md`). A checker is registered at `expand-stage3` but
   executed later, once the whole program is checked, so it reads the compiler's
   authoritative output. A checker therefore layers *policy* on a program that already
   typechecks.
@@ -119,18 +119,18 @@ New API this project added (all shipped):
   checker) and FN returns the same shape; every form in a returned module record is
   tagged with that module, so a transform may EMIT new top-level defns (a GC dialect's
   per-type `trace-T`, a root table, a runtime import) or drop forms. Demo:
-  `metaprog-poc/compile-and-run/addforms.coil` emits a whole new defn.
+  `tests/metaprogramming/compile-and-run/addforms.coil` emits a whole new defn.
 - **`(binding-of NODE)` → the local-binding identity** a reference resolves to (an
   i64; 0 = a global const/function), recorded by the type-checker per reference.
   Two references with the same positive id name the SAME local, so a checker
   distinguishes a **shadowed** local from its outer namesake — which name-matching
   cannot. This is what a borrow/move checker keys its dataflow on. Demo:
-  `metaprog-poc/compile-and-run/borrowlike.coil` (a use-after-free checker).
+  `tests/metaprogramming/compile-and-run/borrowlike.coil` (a use-after-free checker).
 - **Generic reflection.** `code-field-type`/`code-field-kind` accept a type
   **instantiation** `(Gen A B)`, not only a bare name, and substitute the type
   parameters — `code-field-type (Pair i64 (ptr u8)) 1` → `(ptr u8)`. So a derive/
   trace generator sees concrete field types through a generic. Demo:
-  `metaprog-poc/compile-and-run/genrefl_test.coil`.
+  `tests/metaprogramming/compile-and-run/genrefl_test.coil`.
 - **`(transform FN)`** — there is ONE kind of transform, and it is semantic. It runs
   to a fixpoint: each round it reads the checked program (via `code-decl` etc.) to
   decide its rewrite, then the pipeline re-resolves + re-typechecks. It also TOLERATES
@@ -138,7 +138,7 @@ New API this project added (all shipped):
   `:unresolved`) and the transform rewrites purely syntactically until the program
   becomes valid (e.g. `inc`→`iadd`, where `inc` is undefined until the rewrite). The
   authoritative strict check happens once, after the fixpoint. So one primitive covers
-  both type-aware rewrites and syntactic desugarings. Demos: `metaprog-poc/retkind*.coil`
+  both type-aware rewrites and syntactic desugarings. Demos: `tests/metaprogramming/retkind*.coil`
   (rewrites a marker by the wrapped call's real return type) and `dialect.coil`/`tx_test`
   (`inc`→`iadd`).
 - **`(code-decl NODE)` → a declaration record**, read from that authoritative checked
@@ -158,10 +158,10 @@ New API this project added (all shipped):
 - **`(type-of NODE)` → the expression's inferred type** as `Code` (e.g. `i64`,
   `(ptr i64)`), or `:unknown`. This is the type the real type-checker inferred, not
   syntax — a call `(getf)` reports `f64` because `getf` returns `f64`. Demo:
-  `metaprog-poc/nofloat*.coil` bans floating-point-typed expressions.
+  `tests/metaprogramming/nofloat*.coil` bans floating-point-typed expressions.
 - **`(code-file NODE)` → the source file name** of a node, and **`(code-from-user? NODE)`
   → bool** (true for a real file, false for a bundled `<…>` source). So a linter can
-  *scope itself* — `metaprog-poc/lint.coil` warns only where `(code-from-user? f)`, which
+  *scope itself* — `tests/metaprogramming/lint.coil` warns only where `(code-from-user? f)`, which
   skips the standard library while still linting the user's own modules. (Checkers can't
   call imported string functions — the closure doesn't include them — so `code-from-user?`
   does the check in the compiler and hands the checker a bool.)
@@ -169,7 +169,7 @@ New API this project added (all shipped):
 - **A dialect is a single import.** A module that contains `(checker …)`/`(transform …)`
   registrations *is* a dialect — importing it applies the whole stack (import order =
   pass order; transformers run before checkers). No new syntax; the module is the
-  manifest. See `metaprog-poc/safe_dialect.coil`.
+  manifest. See `tests/metaprogramming/safe_dialect.coil`.
 
 ## The engine: everything compiles
 
@@ -178,7 +178,7 @@ program (`metalower.coil`: `Code` -> opaque handle, code ops -> boundary calls),
 compiles it with the ordinary pipeline (cached content-addressed under
 `~/.cache/coil/metaprog`), and runs each entry as **native code**. Everything the
 language can do, a metaprogram can do — generics, HashMap, `malloc`, libc FFI at
-expansion time (`metaprog-poc/compile-and-run/arbitrary.coil`).
+expansion time (`tests/metaprogramming/compile-and-run/arbitrary.coil`).
 
 This covers **every** compile-time call site with one semantics: macros, `(meta …)`
 generators, checkers, transforms, and `(comptime E)` / `(const …)` folding. So a helper
@@ -187,7 +187,7 @@ behaves the same whether it is reached from a macro, a generator, or a `const`.
 How the metaprogram object is produced depends on the host, invisibly: the LLVM build
 uses the LLVM backend, the LLVM-free `main_a64` compiler uses the arm64 backend's
 `export-c`, and inside a wasm sandbox the bytecode interpreter (`interp.coil`, see
-`docs/BYTECODE_INTERP.md`) runs the same mono'd sub-program in-process. Same semantics,
+`docs/reference/BYTECODE_INTERP.md`) runs the same mono'd sub-program in-process. Same semantics,
 three ways of getting native (or emulated) execution.
 
 **Macro bodies can call macros** (the TOWER): `when`/`cond`/`try!`/`fmt` inside a
@@ -238,9 +238,9 @@ bounds-checking on unmodified Coil.
 Function-signature reflection, for auto-coercion at dialect boundaries.
 
 ## Related work in the repo
-- `gc-dialect-poc/` — a precise mark-sweep GC built entirely as macros + a runtime
+- `src/experiments/gc-dialect/` — a precise mark-sweep GC built entirely as macros + a runtime
   library (implicit allocation + reclamation, reflection-generated tracers).
-- `transparent-gc/` — the same idea with rooting made transparent by a transform, so
+- `src/experiments/transparent-gc/` — the same idea with rooting made transparent by a transform, so
   no explicit `gc-let`/`gctype` is needed.
 - Jai comparison: it confirms codegen only sees post-comptime concrete code and keeps
   generics duck-typed, and leaves the comptime↔instantiation cycle undocumented.

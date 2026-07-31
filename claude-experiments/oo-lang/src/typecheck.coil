@@ -1219,17 +1219,48 @@
   ; Phase 8b: object Env { get(name: String) -> Option<String> } — read a process env var.
   (let [e (mkbuiltin DK_BUILTIN_OBJ c"Env")]
     (bdm e (bt-fn1 c"get" (bt-param c"name" (bt-type c"String")) (bt-type1 c"Option" (bt-type c"String")))))
-  ; class ProcessResult { exitCode: Int ; stdout: String }
+  ; Structured process outcome. `timedOut` and `truncated` mean the runtime killed the entire child
+  ; process group; stdout/stderr contain the bounded bytes captured before termination.
   (let [px (mkbuiltin DK_CLASS c"ProcessResult")]
     (bdm px (bt-field c"exitCode" (bt-type c"Int")))
-    (bdm px (bt-field c"stdout" (bt-type c"String"))))
-  ; object Process { run(cmd) -> String ; capture(cmd) -> String ; exec(cmd) -> ProcessResult }
+    (bdm px (bt-field c"stdout" (bt-type c"String")))
+    (bdm px (bt-field c"stderr" (bt-type c"String")))
+    (bdm px (bt-field c"timedOut" (bt-type c"Bool")))
+    (bdm px (bt-field c"truncated" (bt-type c"Bool")))
+    (bdm px (bt-field c"durationMs" (bt-type c"Int"))))
+  ; Opaque native subprocess handle. Polling yields incremental ProcessResult chunks; exitCode -1
+  ; means the child is still running. This is the primitive used by streaming model adapters.
+  (let [ch (mkbuiltin DK_BUILTIN_CLASS c"ChildProcess")]
+    (bdm ch (bt-fn1 c"write" (bt-param c"text" (bt-type c"String")) (bt-type c"Bool")))
+    (bdm ch (bt-fn0 c"closeInput" (bt-type c"Void")))
+    (bdm ch (bt-fn1 c"poll" (bt-param c"waitMs" (bt-type c"Int")) (bt-type c"ProcessResult")))
+    (bdm ch (bt-fn0 c"kill" (bt-type c"Void"))))
+  ; object Process { legacy shell helpers + native argv execution with explicit policy }
   ; run returns combined stdout+stderr for interactive tools; capture keeps stderr separate so
   ; machine-readable stdout from a child CLI remains parseable.
   (let [pr (mkbuiltin DK_BUILTIN_OBJ c"Process")]
     (bdm pr (bt-fn1 c"run" (bt-param c"cmd" (bt-type c"String")) (bt-type c"String")))
     (bdm pr (bt-fn1 c"capture" (bt-param c"cmd" (bt-type c"String")) (bt-type c"String")))
-    (bdm pr (bt-fn1 c"exec" (bt-param c"cmd" (bt-type c"String")) (bt-type c"ProcessResult"))))
+    (bdm pr (bt-fn1 c"exec" (bt-param c"cmd" (bt-type c"String")) (bt-type c"ProcessResult")))
+    (bdm pr (let [f (mk-node NK_FN 0 0)]
+      (scn f c"runArgv")
+      (store! (field f b) (mk-node NK_PARAMS 0 0))
+      (add-kid! (load (field f b)) (bt-param c"executable" (bt-type c"String")))
+      (add-kid! (load (field f b)) (bt-param c"args" (bt-type1 c"List" (bt-type c"String"))))
+      (add-kid! (load (field f b)) (bt-param c"stdin" (bt-type c"String")))
+      (add-kid! (load (field f b)) (bt-param c"timeoutMs" (bt-type c"Int")))
+      (add-kid! (load (field f b)) (bt-param c"maxOutputBytes" (bt-type c"Int")))
+      (store! (field f c) (bt-type c"ProcessResult"))
+      f))
+    (bdm pr (let [f (mk-node NK_FN 0 0)]
+      (scn f c"spawnArgv")
+      (store! (field f b) (mk-node NK_PARAMS 0 0))
+      (add-kid! (load (field f b)) (bt-param c"executable" (bt-type c"String")))
+      (add-kid! (load (field f b)) (bt-param c"args" (bt-type1 c"List" (bt-type c"String"))))
+      (add-kid! (load (field f b)) (bt-param c"timeoutMs" (bt-type c"Int")))
+      (add-kid! (load (field f b)) (bt-param c"maxOutputBytes" (bt-type c"Int")))
+      (store! (field f c) (bt-type c"ChildProcess"))
+      f)))
   ; object File { read(path) -> Option<String> ; write/append(path, content) -> Bool ; exists(path) -> Bool }
   (let [fl (mkbuiltin DK_BUILTIN_OBJ c"File")]
     (bdm fl (bt-fn1 c"read" (bt-param c"path" (bt-type c"String")) (bt-type1 c"Option" (bt-type c"String"))))

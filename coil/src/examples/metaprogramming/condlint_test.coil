@@ -1,0 +1,27 @@
+(module app)
+; Target for the nested-if lint (src/examples/metaprogramming/condlint.coil). `classify` is a
+; three-test staircase and gets flagged; `sign2` is two-armed and does not.
+
+(defn classify [(x i64)] (-> i64)
+  (if (= x 1)
+      100
+      (if (= x 2)
+          200
+          (if (= x 3)
+              300
+              999))))
+
+; two tests only — `cond` would not be an improvement, so the lint stays quiet
+(defn sign2 [(x i64)] (-> i64)
+  (if (< x 0) -1 (if (> x 0) 1 0)))
+
+; a `cond` the author already wrote: it expands to nested ifs before the checker
+; ever sees it, so this must NOT be reported (that is what `code-macro?` is for)
+(defn already-cond [(x i64)] (-> i64)
+  (cond (= x 1) 10
+        (= x 2) 20
+        (= x 3) 30
+        99))
+
+(defn main [] (-> i64)
+  (+ (classify 3) (+ (sign2 -5) (already-cond 2))))

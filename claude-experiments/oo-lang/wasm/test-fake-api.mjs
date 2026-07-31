@@ -11,6 +11,10 @@ const scry = await ScryWasm.instantiate(await readFile(R + 'wasm/scry.wasm'), {
          "/std/json.scry":   await rd('std/json.scry') },
 });
 console.log("boot:", scry.boot("/assistant.scry"));
+// Configure through the same live methods as the viewer actions; provider policy is not env config.
+scry.eval('Orchestrator.instance(0).setApiBaseUrl("http://fake-api.in-page/v1")');
+scry.eval('Orchestrator.instance(0).setModel("fake-1 (in-page)")');
+scry.eval('Orchestrator.instance(0).useApi()');
 console.log("brain line:", out.split("\n").find(l => /brain:/.test(l)));
 const pump = (n=80) => { for (let i=0;i<n;i++) scry.tick(); };
 out=""; scry.feedLine("hello"); pump();

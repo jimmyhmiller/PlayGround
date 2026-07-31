@@ -2,14 +2,14 @@
 
 **Status: SHIPPED.** `(suggest NODE MSG REPLACEMENT)` (code op 44) and `coil lint
 [--fix|--diff]` are implemented; the first rule on top of them is the nested-`if`
-lint in `metaprog-poc/condlint.coil`. Builds on `METAPROGRAMS.md` (the checker hook,
+lint in `src/examples/metaprogramming/condlint.coil`. Builds on `METAPROGRAMS.md` (the checker hook,
 `warn`/`report`) and `SEMANTIC_METAPROGRAMS.md` (checkers run post-typecheck against
 the authoritative model). See **§12 — What shipped** at the end for where each piece
 lives and the three places reality differed from this design.
 
 ## Goal
 
-Today `metaprog-poc/lint.coil` says *"prefer a clean operator over `icmp-*`"* and
+Today `tests/metaprogramming/lint.coil` says *"prefer a clean operator over `icmp-*`"* and
 stops there. A human then edits the file. We want the rule that found the problem to
 also **repair the source**:
 
@@ -52,7 +52,7 @@ As with the semantic model, the work is not "compute new information" — it is
 | The source text to splice into | `LS.sources` → `sm-src-text` (`diag.coil`) |
 | A diagnostic carrying a span | `Diag {lo, hi, msg, source, ctxt}` (`ast.coil:199`) |
 | A collector that runs to completion | `warn-list` / `warn-push` (`comptime.coil:653`) |
-| A pretty-printer with a verbatim leaf | `fmt/doc.coil` — Wadler `Doc`, `DText` |
+| A pretty-printer with a verbatim leaf | `src/compiler/formatter/doc.coil` — Wadler `Doc`, `DText` |
 | Types, to know a fix is valid | `type-of`, `code-decl` (S1/S2, shipped) |
 
 So the additions are: one rule-author op, one side table, one printer, and one CLI
@@ -164,8 +164,8 @@ matter how large or how comment-laden. Only the four bytes that actually changed
 new. This is what `clippy`'s `snippet()` does by hand at every call site; here it is
 a property of the printer, because every node already knows where it came from.
 
-Implementation: a `Sexp → Doc` printer over `fmt/doc.coil`, where the spanned case is
-a single `DText` of the original slice and the fresh case reuses `fmt/rules.coil`'s
+Implementation: a `Sexp → Doc` printer over `src/compiler/formatter/doc.coil`, where the spanned case is
+a single `DText` of the original slice and the fresh case reuses `src/compiler/formatter/rules.coil`'s
 existing layout. The whole replacement is rendered inside a `DAlign` anchored at the
 target span's starting column, so a fix that has to break across lines indents to
 where the form actually sits. Then only that span is spliced; **the rest of the file
@@ -306,7 +306,7 @@ dump, so the oracle stays byte-exact throughout.
   rendered by a first-cut printer that pretty-prints everything. No `--fix`, no
   writes. Already useful: every existing checker can offer suggestions, and the
   filters get exercised before anything can damage a file.
-- **F1 — the verbatim printer.** `Sexp → Doc` over `fmt/doc.coil` with the
+- **F1 — the verbatim printer.** `Sexp → Doc` over `src/compiler/formatter/doc.coil` with the
   spanned-node `DText` rule (§4). Test: for every node in the corpus, rendering a
   replacement built as `` `~NODE `` must reproduce the original bytes exactly. That
   test is the whole design in one assertion, and it can run over the compiler's own
@@ -317,7 +317,7 @@ dump, so the oracle stays byte-exact throughout.
 - **F3 — a real rule set.** Port `lint.coil` to `suggest` with the `type-of` guard
   from §2, then the rules that pay for the machinery: unused import
   (`suggest-delete`), `(if c x 0)` → `(when c x)`, redundant `do`. The dogfood target
-  is `coil lint --fix` over `selfhost/src/*.coil` producing a diff a human would
+  is `coil lint --fix` over `src/compiler/*.coil` producing a diff a human would
   approve.
 
 **Tests, in the repo's style:** (a) the F1 round-trip identity above; (b)
@@ -408,7 +408,7 @@ Three things the design got wrong, found by running it:
      a span containing a comment forces broken layout up front.
    * fmt distinguishes a comment BETWEEN a clause test and its body — which forces the
      hang: two spaces, the comment, then the body alone on the next line
-     (`fmt/rules.coil` layout-clauses) — from one between clauses, which is its own
+     (`src/compiler/formatter/rules.coil` layout-clauses) — from one between clauses, which is its own
      row. The renderer reproduces both.
    * A comment after the last node the replacement reused still sits inside the span
      being replaced, and is written after the rendered form rather than going out with

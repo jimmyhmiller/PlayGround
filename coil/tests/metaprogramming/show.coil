@@ -10,8 +10,8 @@
 ;   (warn!   node "type " ty " has " (code-variant-count ty) " variants")
 ;
 ; Extend it to your own types by writing one `(impl Display YourType …)`.
-(import "lib/alloc.coil" :use *)
-(import "lib/str.coil" :use *)
+(import "src/stdlib/alloc.coil" :use *)
+(import "src/stdlib/str.coil" :use *)
 
 ; Anything that can render itself into a StrBuf.
 (deftrait Display [Self] (dfmt [(x Self) (sb (mut StrBuf))] (-> i64)))
