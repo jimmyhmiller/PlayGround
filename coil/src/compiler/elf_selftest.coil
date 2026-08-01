@@ -13,8 +13,9 @@
 ; STT_FUNC symbol the linker can find, a data section with a string in it, and
 ; two relocations — RIP-relative (lea of the string) and PLT32 (call to puts).
 (module elf_selftest)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -38,7 +39,7 @@
         (mut o) (eobj-new a)
         ; .text: executable code
         text (eobj-add-sect! (mut o) ".text" 16 (sht-progbits)
-                             (ior (shf-alloc) (shf-execinstr)))
+                             (primitive/ior (shf-alloc) (shf-execinstr)))
         ; .rodata: the string constant
         rodata (eobj-add-sect! (mut o) ".rodata" 8 (sht-progbits) (shf-alloc))
         _nx (eobj-mark-nonexec-stack! (mut o))
@@ -46,7 +47,7 @@
 
     ; ---- .rodata: "elf ok\0"
     (xb-bytes! (mut (eobj-sect-buf (mut o) rodata)) "elf ok")
-    (al-push! (mut (eobj-sect-buf (mut o) rodata)) (cast u8 0))
+    (al-push! (mut (eobj-sect-buf (mut o) rodata)) (primitive/cast u8 0))
 
     ; ---- symbols. `.Lstr` is local (the linker needs it only to resolve our
     ; own reloc); `main` is global so the C runtime can call it; `puts` is
@@ -63,7 +64,7 @@
       ; the displacement sits in the last 4 bytes just emitted. The addend is -4
       ; because the relocation is measured from the END of the instruction while
       ; the field itself starts 4 bytes earlier.
-      (eobj-add-reloc! (mut o) text (isub (x64-off (mut s)) 4) str-sym (r-x86-64-pc32) -4)
+      (eobj-add-reloc! (mut o) text (primitive/isub (x64-off (mut s)) 4) str-sym (r-x86-64-pc32) -4)
       ;   call puts                <- R_X86_64_PLT32
       (let [off (x64-call-rel32! (mut s))]
         (eobj-add-reloc! (mut o) text off puts-sym (r-x86-64-plt32) -4))
@@ -73,21 +74,21 @@
       (x64-ret! (mut s))
 
       ; copy the code into .text and declare `main` over it
-      (let [code (al-slice [u8] (load (field s buf)))]
+      (let [code (al-slice [u8] (primitive/load (primitive/field s buf)))]
         (xb-bytes! (mut (eobj-sect-buf (mut o) text)) code)
         (eobj-add-func-sym! (mut o) "main" text 0 true (slice-len code)))
 
       ; ---- serialize and write out
       ; libc fopen/fwrite directly, the same way driver.coil's d-write-file does.
       (let [bytes (elf-write (mut o))
-            content (al-slice [u8] (load bytes))
-            path (if (icmp-gt argc 1) (cstr->str (load (index argv 1))) "/tmp/elf_selftest.o")
+            content (al-slice [u8] (primitive/load bytes))
+            path (if (primitive/icmp-gt argc 1) (cstr->str (primitive/load (primitive/index argv 1))) "/tmp/elf_selftest.o")
             f (fopen (str->cstr a path) (str->cstr a "wb"))]
-        (if (icmp-eq (cast i64 f) 0)
+        (if (primitive/icmp-eq (primitive/cast i64 f) 0)
             (do (print-str (stderr) "elf_selftest: cannot write ") (print-str (stderr) path)
                 (print-str (stderr) "\n") 1)
             (do
-              (fwrite (cast (ptr i8) (slice-data [u8] content)) 1 (slice-len content) f)
+              (fwrite (primitive/cast (ptr i8) (slice-data [u8] content)) 1 (slice-len content) f)
               (fclose f)
               (print-str (stdout) "wrote ") (print-str (stdout) path) (print-str (stdout) "\n")
               0))))))

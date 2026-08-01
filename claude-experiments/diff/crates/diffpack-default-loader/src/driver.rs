@@ -140,7 +140,6 @@ pub struct ModuleState {
     uses_top_level_await: bool,
     /// The module references `import.meta` (valid in ESM output, a syntax error
     /// in CommonJS output). `false` for every synthesized module.
-    uses_import_meta: bool,
     /// The module freely references a CommonJS ambient (`exports`, `module`,
     /// ...), so it must render through the factory runtime in ESM output.
     uses_cjs_globals: bool,
@@ -174,7 +173,6 @@ struct LoadedModule {
     droppable: bool,
     liveness: ModuleLiveness,
     uses_top_level_await: bool,
-    uses_import_meta: bool,
     uses_cjs_globals: bool,
     uses_dirname: bool,
     /// The module's REAL source map over `code`; see [`ModuleState::map`].
@@ -470,6 +468,21 @@ struct ResolvedModule {
     provider_external: bool,
 }
 
+fn provider_messages(
+    id: &str,
+    messages: Vec<diffpack_core::ProviderMessage>,
+) -> Vec<diffpack_core::Diagnostic> {
+    messages
+        .into_iter()
+        .map(|message| diffpack_core::Diagnostic {
+            kind: diffpack_core::DiagnosticKind::Source {
+                fatal: message.fatal,
+            },
+            message: format!("provider diagnostic for {id}: {}", message.message),
+        })
+        .collect()
+}
+
 impl ResolutionCache {
     fn transform_external_source(
         &self,
@@ -483,6 +496,7 @@ impl ResolutionCache {
             diffpack_core::transform::SourceLanguage,
             Vec<diffpack_core::EmittedAsset>,
             Vec<PathBuf>,
+            Vec<diffpack_core::Diagnostic>,
         ),
         String,
     > {
@@ -516,6 +530,7 @@ impl ResolutionCache {
             language: provider_language,
             source_map: None,
             watch_files: Vec::new(),
+            diagnostics: Vec::new(),
         };
         let (source, assets) = self
             .providers
@@ -559,7 +574,8 @@ impl ResolutionCache {
         let code = String::from_utf8(source.code).map_err(|error| {
             format!("provider transform for {id:?} returned non-UTF-8: {error}")
         })?;
-        Ok((code, language, assets, source.watch_files))
+        let diagnostics = provider_messages(id, source.diagnostics);
+        Ok((code, language, assets, source.watch_files, diagnostics))
     }
 
     fn provider_source(
@@ -572,6 +588,7 @@ impl ResolutionCache {
             diffpack_core::transform::SourceLanguage,
             Vec<diffpack_core::EmittedAsset>,
             Vec<PathBuf>,
+            Vec<diffpack_core::Diagnostic>,
         )>,
         String,
     > {
@@ -634,7 +651,14 @@ impl ResolutionCache {
         let watch_files = source.watch_files;
         let code = String::from_utf8(source.code)
             .map_err(|error| format!("provider source for {id:?} is not UTF-8: {error}"))?;
-        Ok(Some((code, language, emitted_assets, watch_files)))
+        let diagnostics = provider_messages(id, source.diagnostics);
+        Ok(Some((
+            code,
+            language,
+            emitted_assets,
+            watch_files,
+            diagnostics,
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1154,7 +1178,7 @@ pub use diffpack_core::{VisualizationEdge, VisualizationGraph, VisualizationNode
 /// `live_modules` is ~12 ms and `chunk_plan` ~25 ms — and every byte a later HMR
 /// micro-chunk emits has to agree with it. Both facts point the same way: derive it
 /// once, in the emit that produced the bundle the browser and the dev server's Node
-/// processes are actually running, and reuse it verbatim. See [`Bundler::emit_plan`].
+/// processes are actually running, and reuse it verbatim. See `Bundler::emit_plan`.
 pub struct Bundler {
     #[doc(hidden)]
     pub graph: ModuleGraph<ModuleState>,
@@ -1358,6 +1382,58 @@ impl Bundler {
                 diagnostics,
             },
         ))
+    }
+
+    /// Add independently-emittable roots to this configured compiler session.
+    /// Modules already present in the graph are reused verbatim, so resolution,
+    /// parsing, and transformation happen once per environment rather than once
+    /// per entry. Each root can later be selected with [`Self::select_entry`].
+    pub fn discover_additional_entries(
+        &mut self,
+        entries: &[PathBuf],
+    ) -> Result<BuildUpdate, String> {
+        let mut roots = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let path = entry
+                .canonicalize()
+                .map_err(|error| format!("cannot open entry {}: {error}", entry.display()))?;
+            let id = module_id(&path);
+            let index = self.graph.intern(id.clone());
+            if self.graph.modules[index].is_none() {
+                roots.push(id);
+            }
+        }
+        let mut delta = GraphDelta::default();
+        let mut diagnostics = Vec::new();
+        let transformed_modules = self.discover_from(roots, &mut delta, &mut diagnostics, false)?;
+        Ok(BuildUpdate {
+            delta,
+            transformed_modules,
+            diagnostics,
+        })
+    }
+
+    /// Select one previously-discovered root as the entry for reachability,
+    /// linking, and emission. Selection is cheap and does not rediscover modules.
+    pub fn select_entry(&mut self, entry: &Path) -> Result<(), String> {
+        let path = entry
+            .canonicalize()
+            .map_err(|error| format!("cannot open entry {}: {error}", entry.display()))?;
+        let id = module_id(&path);
+        let Some(&index) = self.graph.indices.get(id.as_ref()) else {
+            return Err(format!(
+                "entry {} was not discovered in this compiler session",
+                entry.display()
+            ));
+        };
+        if self.graph.modules[index].is_none() {
+            return Err(format!(
+                "entry {} has no compiled module in this compiler session",
+                entry.display()
+            ));
+        }
+        self.graph.entry = index;
+        Ok(())
     }
 
     /// Whether `path` is already a loaded module in this environment's graph.
@@ -1726,7 +1802,7 @@ impl Bundler {
     /// of chunk rendering that a css edit does not need. That coupling is why a css
     /// edit used to wait for the deferred compaction pass: it was the next time
     /// anything wrote the sheet. This is the same stylesheet pipeline
-    /// ([`Self::emit_css`]: candidate scan, Tailwind compile, concatenation in
+    /// (`Self::emit_css`: candidate scan, Tailwind compile, concatenation in
     /// static execution order) with the chunk half left out, so the dev loop can run
     /// it on the edit itself.
     ///
@@ -2130,32 +2206,8 @@ impl Bundler {
             }
             bundle
         };
-        // Honest-format guards: refuse (naming the module and the way out)
-        // rather than emit output Node rejects at parse. `import.meta` is a
-        // syntax error anywhere in a CommonJS file, and a top-level `await` has
-        // no CommonJS spelling either — a CJS module body is synchronous, so
-        // there is nothing to lower it to. In ESM output (production AND dev/HMR)
-        // it is representable: the module renders as an `async` factory and the
-        // registry's `__pending` table makes every importer wait on it.
-        for &dense in &reachable_dense {
-            let Some(module) = self.graph.modules[dense].as_ref() else {
-                continue;
-            };
-            if module.uses_import_meta && !options.format.is_esm() {
-                return Err(format!(
-                    "`import.meta` in {} is a syntax error in CommonJS output; bundle with \
-                     `--format esm` (where it resolves against the emitted chunk)",
-                    self.graph.ids[dense]
-                ));
-            }
-            if module.uses_top_level_await && !options.format.is_esm() {
-                return Err(format!(
-                    "top-level await in {} cannot be represented in CommonJS output; \
-                     bundle with `--format esm`",
-                    self.graph.ids[dense]
-                ));
-            }
-        }
+        // Top-level await and import.meta both lower through the registry in
+        // CommonJS output. ESM output preserves their native syntax.
         // Which modules must render as `async` factories. Empty (and free) unless
         // some reachable module actually top-level-`await`s; when one does, the
         // property propagates up every static import edge, exactly as an ES
@@ -2339,7 +2391,7 @@ impl Bundler {
         )
     }
 
-    /// DETECTION-ONLY variant of [`Self::async_module_closure`]: which reachable
+    /// DETECTION-ONLY variant of `Self::async_module_closure`: which reachable
     /// modules evaluate asynchronously (top-level `await`, plus everything that
     /// statically imports one, transitively). Unlike the emit-time closure this
     /// never errors — non-propagating edge kinds (a bare `require`, a lazy
@@ -2800,7 +2852,7 @@ impl Bundler {
     /// developer is editing right now, so a hot update that lands in the browser
     /// with no map — which is what happened before — is the most user-visible way
     /// for a stack trace to become unreadable. `path` names the chunk file; the map
-    /// goes beside it under the shared [`Self::source_map_sidecar`] naming.
+    /// goes beside it under the shared `Self::source_map_sidecar` naming.
     ///
     /// `format` MUST be the format the graph's own emit used
     /// ([`ModuleFormat::BrowserEsm`] for the client, [`ModuleFormat::Esm`] for a Node
@@ -3674,7 +3726,6 @@ impl Bundler {
                     droppable: loaded.droppable,
                     liveness: loaded.liveness,
                     uses_top_level_await: loaded.uses_top_level_await,
-                    uses_import_meta: loaded.uses_import_meta,
                     uses_cjs_globals: loaded.uses_cjs_globals,
                     uses_dirname: loaded.uses_dirname,
                     workers: loaded.workers,
@@ -3729,7 +3780,6 @@ impl Bundler {
                 droppable: false,
                 liveness: ModuleLiveness::default(),
                 uses_top_level_await: false,
-                uses_import_meta: false,
                 uses_cjs_globals: false,
                 uses_dirname: false,
                 workers: Vec::new(),
@@ -3793,7 +3843,6 @@ impl Bundler {
                 droppable: false,
                 liveness: ModuleLiveness::default(),
                 uses_top_level_await: false,
-                uses_import_meta: false,
                 uses_cjs_globals: false,
                 uses_dirname: false,
                 workers,
@@ -3804,7 +3853,7 @@ impl Bundler {
         let provided = self.resolution_cache.provider_source(&id, self.target)?;
         let externally_loaded = provided.is_some();
         let source = match &provided {
-            Some((source, _, _, _)) => source.clone(),
+            Some((source, _, _, _, _)) => source.clone(),
             None => fs::read_to_string(path)
                 .map_err(|error| format!("cannot read {}: {error}", path.display()))?,
         };
@@ -3824,7 +3873,8 @@ impl Bundler {
         // source, so the component's imports become graph edges and its
         // TypeScript is stripped by the ordinary transform.
         let (component_code, language, mut component, mut provider_assets) =
-            if let Some((_, language, assets, watch_files)) = provided {
+            if let Some((_, language, assets, watch_files, provider_diagnostics)) = provided {
+                diagnostics.extend(provider_diagnostics);
                 let mut side_effects = ComponentSideEffects::default();
                 side_effects.css_source_files = watch_files;
                 (None, language, side_effects, assets)
@@ -3858,9 +3908,10 @@ impl Bundler {
             (source.into_owned(), language, false)
         } else {
             let before_provider = source.into_owned();
-            let (source, language, assets, watch_files) = self
+            let (source, language, assets, watch_files, provider_diagnostics) = self
                 .resolution_cache
                 .transform_external_source(&id, &before_provider, language, self.target)?;
+            diagnostics.extend(provider_diagnostics);
             let rewritten = source != before_provider;
             provider_assets.extend(assets);
             component.css_source_files.extend(watch_files);
@@ -3935,7 +3986,6 @@ impl Bundler {
             droppable,
             liveness: transformed.liveness,
             uses_top_level_await: transformed.uses_top_level_await,
-            uses_import_meta: transformed.uses_import_meta,
             uses_cjs_globals: transformed.uses_cjs_globals,
             uses_dirname: transformed.uses_dirname,
             workers: resolve_worker_entries(&self.resolver, path, &transformed.workers)?,
@@ -3967,6 +4017,13 @@ impl Bundler {
         // partition is closed enough for scope hoisting at all (see `chunk_plan`).
         if flat_allowed
             && !hmr
+            && !async_modules.any
+            && !(format == ModuleFormat::Cjs
+                && reachable.iter().any(|dense| {
+                    self.graph.modules[*dense]
+                        .as_ref()
+                        .is_some_and(|module| module.code.contains("import.meta"))
+                }))
             && let Some(flat) = self.render_flat(
                 reachable,
                 roots,
@@ -3981,7 +4038,7 @@ impl Bundler {
         // A top-level `await` that reaches the registry runtime is rendered as an
         // `async` factory (see `render_runtime`); `async_module_closure` has already
         // refused every import site that cannot carry the matching `await`.
-        Ok(self.render_runtime(
+        self.render_runtime(
             reachable,
             roots,
             chunk_names,
@@ -3994,7 +4051,7 @@ impl Bundler {
             format,
             hmr,
             cancel,
-        ))
+        )
     }
 
     fn render_flat(
@@ -4067,14 +4124,16 @@ impl Bundler {
         format: ModuleFormat,
         hmr: bool,
         cancel: EmitCancel<'_>,
-    ) -> Option<RenderedBundle> {
+    ) -> Result<Option<RenderedBundle>, String> {
         let modules = self
             .graph
             .modules
             .iter()
-            .map(|module| {
+            .enumerate()
+            .map(|(dense, module)| {
                 let module = module.as_ref()?;
                 Some(RuntimeRenderModule {
+                    id: &self.graph.ids[dense],
                     code: &module.code,
                     dependencies: &module.dependencies,
                     pruned_imports: &module.pruned_imports,
@@ -4083,7 +4142,7 @@ impl Bundler {
                 })
             })
             .collect::<Vec<_>>();
-        let fragments = self.frontend_pool.install(|| {
+        let Some(fragments) = self.frontend_pool.install(|| {
             render_runtime_fragments(
                 &modules,
                 reachable,
@@ -4095,7 +4154,9 @@ impl Bundler {
                 format,
                 &|| cancel.cancelled(),
             )
-        })?;
+        }) else {
+            return Ok(None);
+        };
         let policy_modules = reachable
             .iter()
             .filter_map(|&dense| {
@@ -4119,7 +4180,7 @@ impl Bundler {
             chunk_files,
             modules: &policy_modules,
             browser_process_shim: self.config.browser_process_shim,
-        });
+        })?;
         let node_host_prelude = (format == ModuleFormat::Esm)
             .then(|| diffpack_default_loader::runtime::node_esm_chunk_prelude(is_main));
         let mut preludes = Vec::new();
@@ -4127,10 +4188,10 @@ impl Bundler {
             preludes.push(prelude);
         }
         for prelude in &runtime_policy.entry_preludes {
-            preludes.push(prelude.as_str());
+            preludes.push(prelude.value.as_str());
         }
-        if let Some(prelude) = runtime_policy.compatibility_prelude.as_deref() {
-            preludes.push(prelude);
+        if let Some(prelude) = runtime_policy.compatibility_prelude.as_ref() {
+            preludes.push(prelude.value.as_str());
         }
         let header = render_runtime_header(format, prerequisites, &preludes);
         let prelude = header.prelude;
@@ -4152,14 +4213,18 @@ impl Bundler {
             }
             ModuleFormat::BrowserEsm => runtime_policy
                 .browser_require_native
-                .clone()
+                .as_ref()
+                .map(|capability| capability.value.clone())
                 .expect("browser runtime policy must provide requireNative"),
             ModuleFormat::Cjs => {
                 r#"const requireNative=typeof require==="function"?require:null;"#.to_string()
             }
         };
-        let hot_policy = runtime_policy.hot.as_ref().map(|policy| policy.borrowed());
-        Some(render_registry_runtime(
+        let hot_policy = runtime_policy
+            .hot
+            .as_ref()
+            .map(|policy| policy.value.borrowed());
+        Ok(Some(render_registry_runtime(
             self.graph.ids[self.graph.entry].as_ref(),
             self.graph.entry,
             roots,
@@ -4175,7 +4240,7 @@ impl Bundler {
             mappings,
             require_native,
             hot_policy,
-        ))
+        )))
     }
 
     /// The source map for a READABLE (un-minified) chunk.
@@ -4719,7 +4784,6 @@ fn load_uncached(
             droppable: false,
             liveness: ModuleLiveness::default(),
             uses_top_level_await: false,
-            uses_import_meta: false,
             uses_cjs_globals: false,
             uses_dirname: false,
             workers: Vec::new(),
@@ -4778,18 +4842,18 @@ fn load_uncached(
             droppable: false,
             liveness: ModuleLiveness::default(),
             uses_top_level_await: false,
-            uses_import_meta: false,
             uses_cjs_globals: false,
             uses_dirname: false,
             workers,
             map: None,
         });
     }
+    let mut diagnostics = Vec::new();
     let read_started = frontend_profile::start();
     let provided = resolution_cache.provider_source(&id, target)?;
     let externally_loaded = provided.is_some();
     let source = match &provided {
-        Some((source, _, _, _)) => source.clone(),
+        Some((source, _, _, _, _)) => source.clone(),
         None => fs::read_to_string(path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?,
     };
@@ -4799,7 +4863,8 @@ fn load_uncached(
     // compiler before anything below reads it as a module (see
     // [`precompile_component`]).
     let (component_code, language, mut component, mut provider_assets) =
-        if let Some((_, language, assets, watch_files)) = provided {
+        if let Some((_, language, assets, watch_files, provider_diagnostics)) = provided {
+            diagnostics.extend(provider_diagnostics);
             let mut side_effects = ComponentSideEffects::default();
             side_effects.css_source_files = watch_files;
             (None, language, side_effects, assets)
@@ -4831,8 +4896,9 @@ fn load_uncached(
         (source.into_owned(), language, false)
     } else {
         let before_provider = source.into_owned();
-        let (source, language, assets, watch_files) =
+        let (source, language, assets, watch_files, provider_diagnostics) =
             resolution_cache.transform_external_source(&id, &before_provider, language, target)?;
+        diagnostics.extend(provider_diagnostics);
         let rewritten = source != before_provider;
         provider_assets.extend(assets);
         component.css_source_files.extend(watch_files);
@@ -4862,7 +4928,7 @@ fn load_uncached(
         source_was_rewritten || provider_rewritten,
     );
     let code_hash = content_hash(transformed.code.as_bytes());
-    let mut diagnostics = source_diagnostics(path, &transformed.diagnostics);
+    diagnostics.extend(source_diagnostics(path, &transformed.diagnostics));
     let (dependency_specifiers, dependency_demands) = component.dependencies(&transformed);
     let dependencies = resolve_dependencies(
         resolver,
@@ -4894,7 +4960,6 @@ fn load_uncached(
         droppable,
         liveness: transformed.liveness,
         uses_top_level_await: transformed.uses_top_level_await,
-        uses_import_meta: transformed.uses_import_meta,
         uses_cjs_globals: transformed.uses_cjs_globals,
         uses_dirname: transformed.uses_dirname,
         workers: resolve_worker_entries(resolver, path, &transformed.workers)?,
@@ -5300,7 +5365,7 @@ fn resolve_special_dependencies(
     )
 }
 
-/// A per-chunk render cache, keyed by a stable [`Bundler::chunk_render_key`]: the
+/// A per-chunk render cache, keyed by a stable `Bundler::chunk_render_key`: the
 /// chunk's ordered dense-module ids, each member's transformed-content hash, and
 /// every render input that affects the emitted bytes (format, `is_entry`, and the
 /// `chunk_names`/`runtime_ids`/export-demand entries the chunk references). A hit

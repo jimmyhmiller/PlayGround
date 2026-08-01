@@ -2,16 +2,18 @@
 ; (itself a macro over loop/break/continue); the compiler knows nothing about it.
 ;   coil run src/examples/iter.coil; echo $?   => 60
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "src/stdlib/control.coil" :use *)
 
 (defn main [] (-> :i64)
-  (let [arr (alloc-stack (array i64 3))]
-    (store! (index arr 0) 10)
-    (store! (index arr 1) 20)
-    (store! (index arr 2) 30)
+  (let [arr (alloc/stack (array i64 3))]
+    (primitive/store! (primitive/index arr 0) 10)
+    (primitive/store! (primitive/index arr 1) 20)
+    (primitive/store! (primitive/index arr 2) 30)
     (let [(mut acc) 0]
       ; iterate a range...
-      (for-in [i (range 0 0)] (store! acc (iadd (load acc) i)))   ; empty range, no-op
+      (for-in [i (range 0 0)] (primitive/store! acc (primitive/iadd (primitive/load acc) i)))   ; empty range, no-op
       ; ...and a fixed array's elements: 10+20+30 = 60.
-      (for-in [x (over arr 3)] (store! acc (iadd (load acc) x)))
-      (load acc))))
+      (for-in [x (over arr 3)] (primitive/store! acc (primitive/iadd (primitive/load acc) x)))
+      (primitive/load acc))))

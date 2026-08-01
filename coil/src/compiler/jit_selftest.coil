@@ -12,8 +12,9 @@
 ;
 ;   coil build src/compiler/jit_selftest.coil -o /tmp/jit-selftest && /tmp/jit-selftest
 (module jit_selftest)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -42,7 +43,7 @@
     (let [gv (mobj-add-sym! (mut o) "_gv" dataord 0 false)
           fp (mobj-add-sym! (mut o) "_fp" dataord 8 false)
           tbuf (mobj-sect-buf (mut o) textord)
-          leafoff (al-len [u8] (load tbuf))]
+          leafoff (al-len [u8] (primitive/load tbuf))]
       
       ; ---- _leaf ----
       (b-u32! (mut tbuf) (a64-movz 0 7 0))  ; mov x0, #7
@@ -50,7 +51,7 @@
       
       (let [leaf (mobj-add-sym! (mut o) "_leaf" textord leafoff false)
             abs (mobj-add-sym! (mut o) "_abs" 0 0 true)
-            entryoff (al-len [u8] (load tbuf))]
+            entryoff (al-len [u8] (primitive/load tbuf))]
         ; the UNSIGNED fixup in __data that makes _fp point at _leaf
         (mobj-add-reloc! (mut o) dataord 8 leaf (reloc-unsigned) false 3)
         
@@ -61,22 +62,22 @@
         (b-u32! (mut tbuf) (a64-movz 19 0 0))  ; mov x19, #0
         
         ; acc += *gv     (PAGE21 + PAGEOFF12)
-        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) gv (reloc-page21) true 2)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (primitive/load tbuf)) gv (reloc-page21) true 2)
         (b-u32! (mut tbuf) (a64-adrp 1))
-        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) gv (reloc-pageoff12) false 2)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (primitive/load tbuf)) gv (reloc-pageoff12) false 2)
         (b-u32! (mut tbuf) (a64-add-imm 1 1 0))
         (b-u32! (mut tbuf) (a64-ldr-x 2 1 0))
         (b-u32! (mut tbuf) (a64-add-reg 19 19 2))
         
         ; acc += _leaf()   (BRANCH26, defined)
-        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) leaf (reloc-branch26) true 2)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (primitive/load tbuf)) leaf (reloc-branch26) true 2)
         (b-u32! (mut tbuf) (a64-bl-raw))
         (b-u32! (mut tbuf) (a64-add-reg 19 19 0))
         
         ; acc += (*fp)()   (the UNSIGNED-patched code pointer in __data)
-        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) fp (reloc-page21) true 2)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (primitive/load tbuf)) fp (reloc-page21) true 2)
         (b-u32! (mut tbuf) (a64-adrp 1))
-        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) fp (reloc-pageoff12) false 2)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (primitive/load tbuf)) fp (reloc-pageoff12) false 2)
         (b-u32! (mut tbuf) (a64-add-imm 1 1 0))
         (b-u32! (mut tbuf) (a64-ldr-x 1 1 0))
         (b-u32! (mut tbuf) (a64-blr 1))
@@ -84,7 +85,7 @@
         
         ; acc += abs(-5)   (BRANCH26 to an UNDEFINED symbol -> dlsym)
         (b-u32! (mut tbuf) (a64-movn 0 4 0))  ; mov x0, #-5
-        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) abs (reloc-branch26) true 2)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (primitive/load tbuf)) abs (reloc-branch26) true 2)
         (b-u32! (mut tbuf) (a64-bl-raw))
         (b-u32! (mut tbuf) (a64-add-reg 19 19 0))
         
@@ -100,17 +101,17 @@
           (Err [m]
                (do
                  (printf c"jit-selftest: load failed: %.*s\n"
-                         (cast i32 (slice-len m))
+                         (primitive/cast i32 (slice-len m))
                          (slice-data m))
                  1))
           (Ok [img0]
-              (let [img (alloc-stack JitImage)]
-                (store! img img0)
+              (let [img (alloc/stack JitImage)]
+                (primitive/store! img img0)
                 (let [fpv (jit-lookup img "entry")]
-                  (if (icmp-eq (cast i64 fpv) 0)
+                  (if (primitive/icmp-eq (primitive/cast i64 fpv) 0)
                       (do (printf c"jit-selftest: entry symbol not found\n") 1)
-                      (let [got (call-ptr (cast (fnptr c [] i64) fpv))]
+                      (let [got (primitive/call-ptr (primitive/cast (fnptr c [] i64) fpv))]
                         (printf c"jit-selftest: entry() = %ld (want 119)\n" got)
-                        (if (icmp-eq got 119)
+                        (if (primitive/icmp-eq got 119)
                             (do (printf c"jit-selftest: PASS\n") 0)
                             (do (printf c"jit-selftest: FAIL\n") 1))))))))))))

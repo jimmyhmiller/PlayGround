@@ -1,8 +1,9 @@
 ; a comment at top
 (module app)
+(import "../../stdlib/primitive.coil" :as primitive)
 
 (defn add [(a i64) (b i64)] (-> i64)
-  (iadd a b))   ; trailing comment
+  (primitive/iadd a b))   ; trailing comment
 
 (defn main [] (-> i64)
   (let [x 'sym  ; quoted

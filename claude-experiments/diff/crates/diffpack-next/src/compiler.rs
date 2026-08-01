@@ -10,11 +10,26 @@ use diffpack_default_loader::driver::Bundler;
 use diffpack_default_loader::driver_config::{BuildConfig, DriverPolicies};
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct NextCompiler;
+pub struct NextCompiler {
+    async_client_module_container: bool,
+}
+
+impl NextCompiler {
+    fn native_next() -> Self {
+        Self {
+            async_client_module_container: true,
+        }
+    }
+}
 
 impl ModuleCompiler for NextCompiler {
     fn compile(&self, request: CompileRequest<'_>) -> TransformResult {
-        let prepared = match prepare(request.path, request.source, request.target) {
+        let prepared = match prepare(
+            request.path,
+            request.source,
+            request.target,
+            self.async_client_module_container,
+        ) {
             Ok(prepared) => prepared,
             Err(error) => return failed(error),
         };
@@ -51,7 +66,12 @@ struct Prepared {
     origin: MapOrigin,
 }
 
-fn prepare(path: &Path, source: &str, target: Target) -> Result<Prepared, String> {
+fn prepare(
+    path: &Path,
+    source: &str,
+    target: Target,
+    async_client_module_container: bool,
+) -> Result<Prepared, String> {
     let mut code = source.to_string();
     let mut force_jsx = false;
     let mut origin = MapOrigin::File;
@@ -66,7 +86,12 @@ fn prepare(path: &Path, source: &str, target: Target) -> Result<Prepared, String
     if target == Target::IsolatedServer {
         let rewritten = match crate::rsc::detect_directive(path, &code) {
             Some(crate::rsc::RscDirective::Client) => {
-                crate::rsc::transform_use_client_server(path, &code)?
+                let mode = if async_client_module_container {
+                    crate::rsc::ClientReferenceMode::AsyncModuleContainer
+                } else {
+                    crate::rsc::ClientReferenceMode::Synchronous
+                };
+                crate::rsc::transform_use_client_server_with_mode(path, &code, mode)?
             }
             Some(crate::rsc::RscDirective::Server) => {
                 crate::rsc::transform_use_server_server(path, &code)?
@@ -131,13 +156,31 @@ fn failed(error: String) -> TransformResult {
 /// Discover a Next graph with Next source/module/runtime policy plus the shared
 /// browser development layer.
 pub fn discover(entry: &Path, config: &BuildConfig) -> Result<(Bundler, BuildUpdate), String> {
+    discover_with_compiler(entry, config, NextCompiler::default())
+}
+
+/// Discover a graph whose client-reference modules live in the native Next
+/// shared SSR container. This changes only Flight's module metadata; the graph,
+/// loader, and Next request lifecycle are otherwise identical.
+pub fn discover_native_next(
+    entry: &Path,
+    config: &BuildConfig,
+) -> Result<(Bundler, BuildUpdate), String> {
+    discover_with_compiler(entry, config, NextCompiler::native_next())
+}
+
+fn discover_with_compiler(
+    entry: &Path,
+    config: &BuildConfig,
+    compiler: NextCompiler,
+) -> Result<(Bundler, BuildUpdate), String> {
     Bundler::discover_with_driver_policies(
         entry,
         config,
         diffpack_core::ProviderPipeline::default(),
         DriverPolicies {
             compiler: std::sync::Arc::new(diffpack_web::compiler::WebCompiler::new(
-                std::sync::Arc::new(NextCompiler),
+                std::sync::Arc::new(compiler),
             )),
             special_modules: std::sync::Arc::new(
                 diffpack_default_loader::module_policy::SpecialModulePolicyChain::new(vec![

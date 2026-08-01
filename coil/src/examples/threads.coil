@@ -5,34 +5,36 @@
 ; demonstration — non-deterministic, so NOT an asserted test).
 ;   coil run src/examples/threads.coil; echo $?   => 0   (counter == 4 * 100000)
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "src/stdlib/atomic.coil" :use *)
 (import "src/stdlib/thread.coil" :use *)
 
 (defn worker [(arg (ptr i8))] (-> (ptr i8))
-  (let [counter (cast (ptr i64) arg) (mut i) 0]
+  (let [counter (primitive/cast (ptr i64) arg) (mut i) 0]
     (loop
-      (if (icmp-ge (load i) 100000)
+      (if (primitive/icmp-ge (primitive/load i) 100000)
           (break)
           (do (atomic-add counter 1)               ; the atomic fetch-add
-              (store! i (iadd (load i) 1))))))
-  (cast (ptr i8) 0))
+              (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
+  (primitive/cast (ptr i8) 0))
 
 (defn main [] (-> :i64)
-  (let [counter (alloc-stack i64)
-        threads (alloc-stack (array Thread 4))
+  (let [counter (alloc/stack i64)
+        threads (alloc/stack (array Thread 4))
         (mut i) 0]
-    (store! counter 0)
+    (primitive/store! counter 0)
     ; spawn 4 workers, all sharing `counter`
     (loop
-      (if (icmp-ge (load i) 4)
+      (if (primitive/icmp-ge (primitive/load i) 4)
           (break)
-          (do (thread-spawn (index threads (load i)) (fnptr-of worker) (cast (ptr i8) counter))
-              (store! i (iadd (load i) 1)))))
+          (do (thread-spawn (primitive/index threads (primitive/load i)) (primitive/fnptr-of worker) (primitive/cast (ptr i8) counter))
+              (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
     ; join them all
-    (store! i 0)
+    (primitive/store! i 0)
     (loop
-      (if (icmp-ge (load i) 4)
+      (if (primitive/icmp-ge (primitive/load i) 4)
           (break)
-          (do (thread-join (index threads (load i)))
-              (store! i (iadd (load i) 1)))))
-    (isub (load counter) 400000)))   ; 0 iff race-free (4 threads x 100k)
+          (do (thread-join (primitive/index threads (primitive/load i)))
+              (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/isub (primitive/load counter) 400000)))   ; 0 iff race-free (4 threads x 100k)

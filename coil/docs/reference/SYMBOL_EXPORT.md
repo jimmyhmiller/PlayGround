@@ -42,7 +42,7 @@ with *no* C representation at all (slice, `defsum`, SIMD vec, `Code`, generic `A
 ## Design: by-value aggregate parameters (the C-ABI thunk)
 
 **Problem.** A Coil function's body, under the reference model, accesses an aggregate
-parameter through a *pointer* (`(field p x)` needs `p : ptr`), and the checker erases
+parameter through a *pointer* (`(primitive/field p x)` needs `p : ptr`), and the checker erases
 the parameter to `(ptr T)` before codegen. So the defined LLVM function is
 `@f(ptr %p)`. A C caller passing the struct **by value** puts it in registers (small,
 AAPCS64/SysV "Direct") or in a caller-allocated copy passed by pointer (large,
@@ -188,7 +188,7 @@ Coil-module visibility — orthogonal to this, which controls the C ABI surface)
 (defstruct Point :c [(x :i64) (y :i64)])     ; :c layout — required for an exported sig
 
 (defn make-point [(x :i64) (y :i64)] (-> Point)
-  (let [p (alloc-stack Point)] (store! (field p x) x) (store! (field p y) y) (load p)))
+  (let [p (alloc/stack Point)] (primitive/store! (primitive/field p x) x) (primitive/store! (primitive/field p y) y) (primitive/load p)))
 
 (defn point-eq [(a Point) (b Point)] (-> bool) …)
 

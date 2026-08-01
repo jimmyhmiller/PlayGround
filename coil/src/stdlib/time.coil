@@ -1,0 +1,51 @@
+(module coil.time)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
+; Hosted clocks and duration helpers. Wall and monotonic time are deliberately separate:
+; wall time is for timestamps, while monotonic time is for elapsed time and deadlines.
+
+(defstruct Timespec [(sec i64) (nsec i64)])
+(defsum TimeError
+  (Syscall [(errno i64)]))
+
+(extern clock_gettime :cc c [i32 (ptr Timespec)] (-> i32))
+
+(defn gen-time-platform [] (-> Code)
+  (if (primitive/code-eq (primitive/target-os) `linux)
+      `(do
+         (extern __errno_location :cc c [] (-> (ptr i32)))
+         (defn time-errno [] (-> i64)
+           (primitive/cast i64 (primitive/load (__errno_location))))
+         (defn wall-clock-id [] (-> i32)
+           0)
+         (defn monotonic-clock-id [] (-> i32)
+           1))
+      `(do
+         (extern __error :cc c [] (-> (ptr i32)))
+         (defn time-errno [] (-> i64)
+           (primitive/cast i64 (primitive/load (__error))))
+         (defn wall-clock-id [] (-> i32)
+           0)
+         (defn monotonic-clock-id [] (-> i32)
+           6))))
+(meta (gen-time-platform))
+
+(defn timespec-ms [(ts (ptr Timespec))] (-> i64)
+  (+ (* (primitive/load (primitive/field ts sec)) 1000)
+     (/ (primitive/load (primitive/field ts nsec)) 1000000)))
+
+(defn clock-ms [(clock-id i32)] (-> (Result i64 TimeError))
+  (let [ts (alloc/stack Timespec)
+        rc (clock_gettime clock-id ts)]
+    (if (= rc 0)
+        (Ok (timespec-ms ts))
+        (Err (Syscall (time-errno))))))
+
+;; Milliseconds since the system's wall-clock epoch. Suitable for event timestamps, not
+;; elapsed-time calculations because administrators and time synchronization can adjust it.
+(defn wall-now-ms [] (-> (Result i64 TimeError))
+  (clock-ms (wall-clock-id)))
+
+;; Monotonic milliseconds for elapsed time and deadlines.
+(defn monotonic-now-ms [] (-> (Result i64 TimeError))
+  (clock-ms (monotonic-clock-id)))

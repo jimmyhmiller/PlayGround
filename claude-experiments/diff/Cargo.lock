@@ -231,10 +231,20 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_parser",
  "oxc_resolver",
+ "oxc_semantic",
  "oxc_sourcemap",
  "oxc_span",
  "rayon",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "diffpack-external-provider-example"
+version = "0.1.0"
+dependencies = [
+ "diffpack-core",
+ "diffpack-default-loader",
  "tempfile",
 ]
 
@@ -244,7 +254,6 @@ version = "0.1.0"
 dependencies = [
  "diffpack-core",
  "diffpack-default-loader",
- "diffpack-vite-compat",
  "diffpack-web",
  "image",
  "markdown",
@@ -261,6 +270,16 @@ dependencies = [
  "rayon",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "diffpack-next-bindings"
+version = "0.1.0"
+dependencies = [
+ "diffpack-next",
+ "notify",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -290,6 +309,7 @@ version = "0.1.0"
 dependencies = [
  "diffpack-core",
  "diffpack-default-loader",
+ "diffpack-web",
  "oxc_allocator",
  "oxc_ast",
  "oxc_ast_visit",
@@ -306,7 +326,6 @@ version = "0.1.0"
 dependencies = [
  "diffpack-core",
  "diffpack-default-loader",
- "diffpack-vite-compat",
  "flate2",
  "notify",
  "rayon",

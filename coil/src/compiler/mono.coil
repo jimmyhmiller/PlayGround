@@ -1,7 +1,8 @@
 ; src/compiler/mono.coil — self-host Coil compiler, mono module.
 (module mono)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -65,27 +66,27 @@
 
 ; ---- small constructors -----------------------------------------------------
 (defn mk-field [(name (slice u8)) (ty Type)] (-> Field)
-  (let [p (alloc-stack Field)] (store! (field p name) name) (store! (field p ty) ty) (load p)))
+  (let [p (alloc/stack Field)] (primitive/store! (primitive/field p name) name) (primitive/store! (primitive/field p ty) ty) (primitive/load p)))
 (defn mk-param [(name (slice u8)) (ty Type)] (-> Param)
-  (let [p (alloc-stack Param)] (store! (field p name) name) (store! (field p ty) ty) (load p)))
+  (let [p (alloc/stack Param)] (primitive/store! (primitive/field p name) name) (primitive/store! (primitive/field p ty) ty) (primitive/load p)))
 (defn mk-variant [(name (slice u8)) (fields (ptr (ArrayList Field)))] (-> Variant)
-  (let [p (alloc-stack Variant)] (store! (field p name) name) (store! (field p fields) fields) (load p)))
+  (let [p (alloc/stack Variant)] (primitive/store! (primitive/field p name) name) (primitive/store! (primitive/field p fields) fields) (primitive/load p)))
 (defn mk-arm [(variant (slice u8)) (binds (ptr (ArrayList (slice u8)))) (body Expr)] (-> Arm)
-  (let [p (alloc-stack Arm)]
-    (store! (field p variant) variant)
-    (store! (field p binds) binds)
-    (store! (field p body) body)
-    (load p)))
+  (let [p (alloc/stack Arm)]
+    (primitive/store! (primitive/field p variant) variant)
+    (primitive/store! (primitive/field p binds) binds)
+    (primitive/store! (primitive/field p body) body)
+    (primitive/load p)))
 (defn mk-pend [(a (ptr Allocator)) (name (slice u8)) (args (ptr (ArrayList Type)))] (-> PendInst)
-  (let [p (alloc-stack PendInst)] (store! (field p name) name) (store! (field p args) args) (load p)))
+  (let [p (alloc/stack PendInst)] (primitive/store! (primitive/field p name) name) (primitive/store! (primitive/field p args) args) (primitive/load p)))
 (defn t-app-args [(t (ptr Type))] (-> (ptr (ArrayList Type)))
   (t-fn-params t))
 
 ; ---- Subst -----------------------
 (defn mk-subst [(a (ptr Allocator)) (names (ptr (ArrayList (slice u8)))) (types (ptr (ArrayList Type)))] (-> (ptr Subst))
   (let [s (unwrap-ptr [Subst] (create [Subst] a))]
-    (store! (field s names) names)
-    (store! (field s types) types)
+    (primitive/store! (primitive/field s names) names)
+    (primitive/store! (primitive/field s types) types)
     s))
 (defn subst-empty [(a (ptr Allocator))] (-> (ptr Subst))
   (mk-subst a (box-al [(slice u8)] a (al-new [(slice u8)] a)) (box-items-type a)))
@@ -93,53 +94,53 @@
 (defn subst-map [(a (ptr Allocator)) (params (ptr (ArrayList (slice u8)))) (args (ptr (ArrayList Type)))] (-> (ptr Subst))
   (mk-subst a params args))
 (defn subst-lookup [(s (ptr Subst)) (name (slice u8))] (-> (Option Type))
-  (let [ns (load (field s names))
-        ts (load (field s types))
-        n (al-len [(slice u8)] (load ns))
+  (let [ns (primitive/load (primitive/field s names))
+        ts (primitive/load (primitive/field s types))
+        n (al-len [(slice u8)] (primitive/load ns))
         (mut i) 0
         (mut r) (None [Type])]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (when (str-eq (al-get [(slice u8)] (load ns) (load i)) name)
-                      (store! r (Some (al-get [Type] (load ts) (load i))))
+                (when (str-eq (al-get [(slice u8)] (primitive/load ns) (primitive/load i)) name)
+                      (primitive/store! r (Some (al-get [Type] (primitive/load ts) (primitive/load i))))
                       (break))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load r)))
 
 ; ---- type_key / mangle — mutually recursive -------------------
 (defn type-key [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
   (let [tg (type-tag t)]
-    (cond (icmp-eq tg 12) "never"
-          (icmp-eq tg 13) "code"
-          (icmp-eq tg 3) "void"
-          (icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
-          (icmp-eq tg 1) (sconcat a "f" (i64->str a (t-int-bits t)))
-          (icmp-eq tg 2) "bool"
-          (icmp-eq tg 4) (sconcat a "ptr_" (type-key a (t-inner t)))
-          (icmp-eq tg 5) (sconcat a "ref_" (type-key a (t-inner t)))
-          (icmp-eq tg 6) (type-struct-name t)
-          (icmp-eq tg 7)
+    (cond (primitive/icmp-eq tg 12) "never"
+          (primitive/icmp-eq tg 13) "code"
+          (primitive/icmp-eq tg 3) "void"
+          (primitive/icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
+          (primitive/icmp-eq tg 1) (sconcat a "f" (i64->str a (t-int-bits t)))
+          (primitive/icmp-eq tg 2) "bool"
+          (primitive/icmp-eq tg 4) (sconcat a "ptr_" (type-key a (t-inner t)))
+          (primitive/icmp-eq tg 5) (sconcat a "ref_" (type-key a (t-inner t)))
+          (primitive/icmp-eq tg 6) (type-struct-name t)
+          (primitive/icmp-eq tg 7)
             (sconcat a
                      (sconcat a "arr" (i64->str a (t-arrn t)))
                      (sconcat a "_" (type-key a (t-inner t))))
-          (icmp-eq tg 8) (sconcat a "slice_" (type-key a (t-inner t)))
-          (icmp-eq tg 9)
+          (primitive/icmp-eq tg 8) (sconcat a "slice_" (type-key a (t-inner t)))
+          (primitive/icmp-eq tg 9)
             (sconcat a
                      (sconcat a "vec" (i64->str a (t-arrn t)))
                      (sconcat a "_" (type-key a (t-inner t))))
-          (icmp-eq tg 10) "fn"
+          (primitive/icmp-eq tg 10) "fn"
           :else (mangle a (t-app-name t) (t-app-args t)))))
 (defn mangle [(a (ptr Allocator)) (name (slice u8)) (args (ptr (ArrayList Type)))] (-> (slice u8))
   (let [(mut s) name
-        n (al-len [Type] (load args))
+        n (al-len [Type] (primitive/load args))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (store! s (sconcat a (load s) (sconcat a "__" (type-key a (al-elem [Type] args (load i))))))
-                (store! i (iadd (load i) 1)))))
-    (load s)))
+                (primitive/store! s (sconcat a (primitive/load s) (sconcat a "__" (type-key a (al-elem [Type] args (primitive/load i))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load s)))
 
 ; ---- trait_method_fn / type_impl_name --------------------------
 ; Delegates to check's `tmfn` — the ONE definition. These were two hand-synced copies
@@ -154,30 +155,30 @@
 ; about pointers type-checked fine and then hit the `unimplemented` below at mono time.
 (defn mono-impl-name [(a (ptr Allocator)) (t (ptr Type))] (-> (Option (slice u8)))
   (let [n (impl-base-name a t)]
-    (if (icmp-eq (slice-len n) 0) (None [(slice u8)]) (Some n))))
+    (if (primitive/icmp-eq (slice-len n) 0) (None [(slice u8)]) (Some n))))
 
 ; ---- generic-impl resolution for deferred trait calls ----------
 (defn impl-lookup [(m (ptr MonoCtx)) (tr (slice u8)) (base (slice u8))] (-> (ptr ImplDef))
-  (let [bucket (impl-index-get (field m trait_impl_idx) (impl-index-key (load (field m a)) tr base))]
-    (if (icmp-eq (cast i64 bucket) 0)
-        (cast (ptr ImplDef) 0)
+  (let [bucket (impl-index-get (primitive/field m trait_impl_idx) (impl-index-key (primitive/load (primitive/field m a)) tr base))]
+    (if (primitive/icmp-eq (primitive/cast i64 bucket) 0)
+        (primitive/cast (ptr ImplDef) 0)
         (al-elem [ImplDef]
-                 (load (field m impls))
-                 (al-get [i64] (load (field bucket items)) 0)))))
+                 (primitive/load (primitive/field m impls))
+                 (al-get [i64] (primitive/load (primitive/field bucket items)) 0)))))
 ; Several impls can share a key, so "first one with this key" is not good enough here
 ; either: pick the most specific whose pattern accepts the receiver. That is exactly
 ; `check.coil::impl-select-indexed`, called with mono's own impl table and index — NOT a second copy of
 ; the rule. A parallel implementation here would be free to disagree with the one that
 ; type-checked the program, which is the whole failure mode this phase keeps hitting.
 (defn impl-lookup-sel [(a (ptr Allocator)) (m (ptr MonoCtx)) (tr (slice u8)) (recv (ptr Type))] (-> (ptr ImplDef))
-  (let [s (alloc-stack ImplSel)]
-    (store! s (impl-select-indexed a
-                                   (load (field m impls))
-                                   (impl-index-get (field m trait_impl_idx)
+  (let [s (alloc/stack ImplSel)]
+    (primitive/store! s (impl-select-indexed a
+                                   (primitive/load (primitive/field m impls))
+                                   (impl-index-get (primitive/field m trait_impl_idx)
                                                    (impl-index-key a tr (type-impl-name a recv)))
                                    tr
                                    recv))
-    (load (field s ip))))
+    (primitive/load (primitive/field s ip))))
 ; NOTE: the impl-pattern matcher lives in check.coil (`unify-trait-extras`) and mono
 ; uses it directly. There was a second one here (`match-impl-pattern`/`mip-list`),
 ; which is how a receiver could be accepted by the selector and then rejected by the
@@ -185,79 +186,79 @@
 
 ; ---- generic-template lookups (the gfuncs/gstructs/gsums HashMaps) -----------
 (defn find-struct-named [(lst (ptr (ArrayList StructDef))) (nm (slice u8))] (-> i64)
-  (let [n (al-len [StructDef] (load lst))
+  (let [n (al-len [StructDef] (primitive/load lst))
         (mut i) 0
         (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (when (str-eq (load (field (al-elem [StructDef] lst (load i)) name)) nm) (store! r (load i)) 0)
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+                (when (str-eq (primitive/load (primitive/field (al-elem [StructDef] lst (primitive/load i)) name)) nm) (primitive/store! r (primitive/load i)) 0)
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load r)))
 (defn find-sum-named [(lst (ptr (ArrayList SumDef))) (nm (slice u8))] (-> i64)
-  (let [n (al-len [SumDef] (load lst))
+  (let [n (al-len [SumDef] (primitive/load lst))
         (mut i) 0
         (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (when (str-eq (load (field (al-elem [SumDef] lst (load i)) name)) nm) (store! r (load i)) 0)
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+                (when (str-eq (primitive/load (primitive/field (al-elem [SumDef] lst (primitive/load i)) name)) nm) (primitive/store! r (primitive/load i)) 0)
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load r)))
 (defn find-func-named [(lst (ptr (ArrayList Func))) (nm (slice u8))] (-> i64)
-  (let [n (al-len [Func] (load lst))
+  (let [n (al-len [Func] (primitive/load lst))
         (mut i) 0
         (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (when (str-eq (load (field (al-elem [Func] lst (load i)) name)) nm) (store! r (load i)) 0)
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+                (when (str-eq (primitive/load (primitive/field (al-elem [Func] lst (primitive/load i)) name)) nm) (primitive/store! r (primitive/load i)) 0)
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load r)))
 (defn gstruct-has [(m (ptr MonoCtx)) (nm (slice u8))] (-> bool)
-  (icmp-ge (find-struct-named (load (field m gstructs)) nm) 0))
+  (primitive/icmp-ge (find-struct-named (primitive/load (primitive/field m gstructs)) nm) 0))
 (defn gsum-has [(m (ptr MonoCtx)) (nm (slice u8))] (-> bool)
-  (icmp-ge (find-sum-named (load (field m gsums)) nm) 0))
+  (primitive/icmp-ge (find-sum-named (primitive/load (primitive/field m gsums)) nm) 0))
 (defn gfunc-has [(m (ptr MonoCtx)) (nm (slice u8))] (-> bool)
-  (icmp-ge (find-func-named (load (field m gfuncs)) nm) 0))
+  (primitive/icmp-ge (find-func-named (primitive/load (primitive/field m gfuncs)) nm) 0))
 (defn gstruct-arity [(m (ptr MonoCtx)) (nm (slice u8))] (-> i64)
   (al-len [(slice u8)]
-          (load (field (al-elem [StructDef] (load (field m gstructs)) (find-struct-named (load (field m gstructs)) nm))
+          (primitive/load (primitive/field (al-elem [StructDef] (primitive/load (primitive/field m gstructs)) (find-struct-named (primitive/load (primitive/field m gstructs)) nm))
                        type_params))))
 (defn gsum-arity [(m (ptr MonoCtx)) (nm (slice u8))] (-> i64)
   (al-len [(slice u8)]
-          (load (field (al-elem [SumDef] (load (field m gsums)) (find-sum-named (load (field m gsums)) nm)) type_params))))
+          (primitive/load (primitive/field (al-elem [SumDef] (primitive/load (primitive/field m gsums)) (find-sum-named (primitive/load (primitive/field m gsums)) nm)) type_params))))
 (defn gfunc-arity [(m (ptr MonoCtx)) (nm (slice u8))] (-> i64)
   (al-len [(slice u8)]
-          (load (field (al-elem [Func] (load (field m gfuncs)) (find-func-named (load (field m gfuncs)) nm))
+          (primitive/load (primitive/field (al-elem [Func] (primitive/load (primitive/field m gfuncs)) (find-func-named (primitive/load (primitive/field m gfuncs)) nm))
                        type_params))))
 ; variant_to_sum lookup.
 (defn variant-sum [(m (ptr MonoCtx)) (func (slice u8))] (-> (Option (slice u8)))
-  (let [ns (load (field m vsum-names))
-        ss (load (field m vsum-sums))
+  (let [ns (primitive/load (primitive/field m vsum-names))
+        ss (primitive/load (primitive/field m vsum-sums))
         n (al-len [(slice u8)] ns)
         (mut i) 0
         (mut r) (None [(slice u8)])]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (when (str-eq (al-get [(slice u8)] ns (load i)) func)
-                      (store! r (Some (al-get [(slice u8)] ss (load i))))
+                (when (str-eq (al-get [(slice u8)] ns (primitive/load i)) func)
+                      (primitive/store! r (Some (al-get [(slice u8)] ss (primitive/load i))))
                       (break))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load r)))
 
 ; ---- queues — dedup via the queued set ----------------
 (defn io-record! [(m (ptr MonoCtx)) (mng (slice u8)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
-  (unless (hm-contains? [(slice u8) i64] (load (field m io-index)) mng)
+  (unless (hm-contains? [(slice u8) i64] (primitive/load (primitive/field m io-index)) mng)
           ; index the new record gets = current length (its slot after the push), so
           ; io-index maps mng -> its position in io-origin, exactly the old parallel index.
-          (let [idx (al-len [PendInst] (load (field m io-origin)))]
-            (al-push! (mut (field m io-origin)) (mk-pend (load (field m a)) nm args))
-            (hm-put! [(slice u8) i64] (mut (field m io-index)) mng idx)
+          (let [idx (al-len [PendInst] (primitive/load (primitive/field m io-origin)))]
+            (al-push! (mut (primitive/field m io-origin)) (mk-pend (primitive/load (primitive/field m a)) nm args))
+            (hm-put! [(slice u8) i64] (mut (primitive/field m io-index)) mng idx)
             0)))
 (defn io-find [(m (ptr MonoCtx)) (mng (slice u8))] (-> i64)
-  (match (hm-get [(slice u8) i64] (load (field m io-index)) mng)
+  (match (hm-get [(slice u8) i64] (primitive/load (primitive/field m io-index)) mng)
     (Some [i] i)
     (None [] -1)))
 ; ---- runaway instantiation guard --------------------------------------------
@@ -272,14 +273,14 @@
 ; to diverge over — so an unbounded run must grow the term. Real code never nests types
 ; anywhere near this deep, so the limit only ever fires on a genuine runaway.
 (defn ty-depth [(t (ptr Type))] (-> i64)
-  (match (load t)
-    (TPtr [i] (iadd 1 (ty-depth i)))
-    (TRef [mu i] (iadd 1 (ty-depth i)))
-    (TArray [e n] (iadd 1 (ty-depth e)))
-    (TSlice [e] (iadd 1 (ty-depth e)))
-    (TVec [e n] (iadd 1 (ty-depth e)))
-    (TApp [nm as2] (iadd 1 (ty-list-depth as2)))
-    (TFn [cc ps r] (iadd 1 (ty-depth r)))
+  (match (primitive/load t)
+    (TPtr [i] (primitive/iadd 1 (ty-depth i)))
+    (TRef [mu i] (primitive/iadd 1 (ty-depth i)))
+    (TArray [e n] (primitive/iadd 1 (ty-depth e)))
+    (TSlice [e] (primitive/iadd 1 (ty-depth e)))
+    (TVec [e n] (primitive/iadd 1 (ty-depth e)))
+    (TApp [nm as2] (primitive/iadd 1 (ty-list-depth as2)))
+    (TFn [cc ps r] (primitive/iadd 1 (ty-depth r)))
     (TInt [b s] 1)
     (TFloat [b] 1)
     (TBool [] 1)
@@ -290,16 +291,16 @@
     (TExternRef [] 1)))
 
 (defn ty-list-depth [(lst (ptr (ArrayList Type)))] (-> i64)
-  (let [n (al-len [Type] (load lst))
+  (let [n (al-len [Type] (primitive/load lst))
         (mut i) 0
         (mut mx) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [d (ty-depth (al-elem [Type] lst (load i)))]
-                  (when (icmp-gt d (load mx)) (store! mx d) 0))
-                (store! i (iadd (load i) 1)))))
-    (load mx)))
+                (let [d (ty-depth (al-elem [Type] lst (primitive/load i)))]
+                  (when (primitive/icmp-gt d (primitive/load mx)) (primitive/store! mx d) 0))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load mx)))
 
 (defn mono-depth-limit [] (-> i64)
   64)
@@ -317,15 +318,15 @@
 ;          (Box$i64 -> Box$Box$i64 -> …), so the term depth stays 1 while the term size
 ;          grows without bound. Measuring depth alone silently misses the real runaway.
 (defn mono-runaway? [(args (ptr (ArrayList Type))) (mng (slice u8))] (-> bool)
-  (or (icmp-gt (pend-depth args) (mono-depth-limit))
-      (icmp-gt (slice-len [u8] mng) (mono-name-limit))))
+  (or (primitive/icmp-gt (pend-depth args) (mono-depth-limit))
+      (primitive/icmp-gt (slice-len [u8] mng) (mono-name-limit))))
 
 ; Show the growth rather than just asserting it: the mangled name spells the nesting
 ; out (Box$Box$Box$…), which is the one thing that makes the mistake obvious. Truncated
 ; — at depth 64 it is thousands of characters.
 (defn mono-runaway-diag [(a (ptr Allocator)) (what (slice u8)) (nm (slice u8)) (mng (slice u8))] (-> Diag)
   (let [shown
-          (if (icmp-gt (slice-len [u8] mng) 100)
+          (if (primitive/icmp-gt (slice-len [u8] mng) 100)
               (sconcat a (subslice mng 0 100) " …")
               mng)]
     (derr (sconcat3 a
@@ -340,27 +341,27 @@
                     ""))))
 
 (defn queue-struct [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
-  (let [a (load (field m a))
+  (let [a (primitive/load (primitive/field m a))
         mng (mangle a nm args)]
     (io-record! m mng nm args)
-    (unless (hm-contains? [(slice u8) i64] (load (field m queued-structs)) mng)
-            (hm-put! [(slice u8) i64] (mut (field m queued-structs)) mng 0)
-            (al-push! (mut (field m pending-structs)) (mk-pend a nm args))
+    (unless (hm-contains? [(slice u8) i64] (primitive/load (primitive/field m queued-structs)) mng)
+            (hm-put! [(slice u8) i64] (mut (primitive/field m queued-structs)) mng 0)
+            (al-push! (mut (primitive/field m pending-structs)) (mk-pend a nm args))
             0)))
 (defn queue-sum [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
-  (let [a (load (field m a))
+  (let [a (primitive/load (primitive/field m a))
         mng (mangle a nm args)]
     (io-record! m mng nm args)
-    (unless (hm-contains? [(slice u8) i64] (load (field m queued-sums)) mng)
-            (hm-put! [(slice u8) i64] (mut (field m queued-sums)) mng 0)
-            (al-push! (mut (field m pending-sums)) (mk-pend a nm args))
+    (unless (hm-contains? [(slice u8) i64] (primitive/load (primitive/field m queued-sums)) mng)
+            (hm-put! [(slice u8) i64] (mut (primitive/field m queued-sums)) mng 0)
+            (al-push! (mut (primitive/field m pending-sums)) (mk-pend a nm args))
             0)))
 (defn queue-func [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
-  (let [a (load (field m a))
+  (let [a (primitive/load (primitive/field m a))
         mng (mangle a nm args)]
-    (unless (hm-contains? [(slice u8) i64] (load (field m queued-funcs)) mng)
-            (hm-put! [(slice u8) i64] (mut (field m queued-funcs)) mng 0)
-            (al-push! (mut (field m pending-funcs)) (mk-pend a nm args))
+    (unless (hm-contains? [(slice u8) i64] (primitive/load (primitive/field m queued-funcs)) mng)
+            (hm-put! [(slice u8) i64] (mut (primitive/field m queued-funcs)) mng 0)
+            (al-push! (mut (primitive/field m pending-funcs)) (mk-pend a nm args))
             0)))
 
 ; "<prefix> expects N type arguments, got M" — the shared arity-error shape.
@@ -372,77 +373,77 @@
 ; ---- resolve_ty — substitute params, mangle generic apps ------
 (defn resolve-ty-list [(m (ptr MonoCtx)) (lst (ptr (ArrayList Type))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Type))
                                                                                                      Diag))
-  (let [a (load (field m a))
-        n (al-len [Type] (load lst))
+  (let [a (primitive/load (primitive/field m a))
+        n (al-len [Type] (primitive/load lst))
         (mut out) (al-new [Type] a)
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (match (resolve-ty m (al-elem [Type] lst (load i)) map)
-                  (Err [d] (do (store! err d) (store! failed true) (break)))
+                (match (resolve-ty m (al-elem [Type] lst (primitive/load i)) map)
+                  (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
                   (Ok [t] (al-push! (mut out) t)))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [(ptr (ArrayList Type)) Diag] (load err)) (Ok (box-al [Type] a (load out))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [(ptr (ArrayList Type)) Diag] (primitive/load err)) (Ok (box-al [Type] a (primitive/load out))))))
 (defn resolve-ty-app [(m (ptr MonoCtx)) (t (ptr Type)) (map (ptr Subst))] (-> (Result Type Diag))
-  (let [a (load (field m a))
+  (let [a (primitive/load (primitive/field m a))
         nm (t-app-name t)]
     (match (resolve-ty-list m (t-app-args t) map)
       (Err [d] (Err [Type Diag] d))
       (Ok [rargs]
           (let [mng (mangle a nm rargs)
-                rlen (al-len [Type] (load rargs))]
+                rlen (al-len [Type] (primitive/load rargs))]
             (if (gstruct-has m nm)
                 (let [ar (gstruct-arity m nm)]
-                  (if (not (icmp-eq ar rlen))
+                  (if (not (primitive/icmp-eq ar rlen))
                       (Err [Type Diag] (derr (arity-err a (sconcat3 a "generic type '" nm "'") ar rlen)))
                       (do (queue-struct m nm rargs) (Ok (TStruct mng)))))
                 (if (gsum-has m nm)
                     (let [ar (gsum-arity m nm)]
-                      (if (not (icmp-eq ar rlen))
+                      (if (not (primitive/icmp-eq ar rlen))
                           (Err [Type Diag] (derr (arity-err a (sconcat3 a "generic type '" nm "'") ar rlen)))
                           (do (queue-sum m nm rargs) (Ok (TStruct mng)))))
                     (Err [Type Diag] (derr (sconcat3 a "unknown generic type '" nm "'"))))))))))
 (defn resolve-ty [(m (ptr MonoCtx)) (t (ptr Type)) (map (ptr Subst))] (-> (Result Type Diag))
-  (let [a (load (field m a))
+  (let [a (primitive/load (primitive/field m a))
         tg (type-tag t)]
-    (cond (icmp-eq tg 12) (Ok (TNever))
-          (icmp-eq tg 13) (Ok (TCode))
-          (icmp-eq tg 14) (Ok (TExternRef))
-          (icmp-eq tg 3) (Ok (TVoid))
-          (icmp-eq tg 0) (Ok (TInt (t-int-bits t) (t-int-signed t)))
-          (icmp-eq tg 1) (Ok (TFloat (t-int-bits t)))
-          (icmp-eq tg 2) (Ok (TBool))
-          (icmp-eq tg 4)
+    (cond (primitive/icmp-eq tg 12) (Ok (TNever))
+          (primitive/icmp-eq tg 13) (Ok (TCode))
+          (primitive/icmp-eq tg 14) (Ok (TExternRef))
+          (primitive/icmp-eq tg 3) (Ok (TVoid))
+          (primitive/icmp-eq tg 0) (Ok (TInt (t-int-bits t) (t-int-signed t)))
+          (primitive/icmp-eq tg 1) (Ok (TFloat (t-int-bits t)))
+          (primitive/icmp-eq tg 2) (Ok (TBool))
+          (primitive/icmp-eq tg 4)
             (match (resolve-ty m (t-inner t) map)
               (Err [d] (Err [Type Diag] d))
               (Ok [it] (Ok (TPtr (box-type a it)))))
-          (icmp-eq tg 5)
+          (primitive/icmp-eq tg 5)
             (match (resolve-ty m (t-inner t) map)
               (Err [d] (Err [Type Diag] d))
               (Ok [it] (Ok (TRef (t-ref-mut t) (box-type a it)))))
-          (icmp-eq tg 7)
+          (primitive/icmp-eq tg 7)
             (match (resolve-ty m (t-inner t) map)
               (Err [d] (Err [Type Diag] d))
               (Ok [it] (Ok (TArray (box-type a it) (t-arrn t)))))
-          (icmp-eq tg 8)
+          (primitive/icmp-eq tg 8)
             (match (resolve-ty m (t-inner t) map)
               (Err [d] (Err [Type Diag] d))
               (Ok [it] (Ok (TSlice (box-type a it)))))
-          (icmp-eq tg 9)
+          (primitive/icmp-eq tg 9)
             (match (resolve-ty m (t-inner t) map)
               (Err [d] (Err [Type Diag] d))
               (Ok [it] (Ok (TVec (box-type a it) (t-arrn t)))))
-          (icmp-eq tg 10)
+          (primitive/icmp-eq tg 10)
             (match (resolve-ty-list m (t-fn-params t) map)
               (Err [d] (Err [Type Diag] d))
               (Ok [ps]
                   (match (resolve-ty m (t-fn-ret t) map)
                     (Err [d] (Err [Type Diag] d))
                     (Ok [r] (Ok (TFn (t-fn-cc t) ps (box-type a r)))))))
-          (icmp-eq tg 6)
+          (primitive/icmp-eq tg 6)
             (match (subst-lookup map (type-struct-name t))
               (Some [ct] (Ok ct))
               (None [] (Ok (TStruct (type-struct-name t)))))
@@ -451,154 +452,154 @@
 ; ---- resolve a sum / its variants -----------------
 (defn resolve-fields [(m (ptr MonoCtx)) (fs (ptr (ArrayList Field))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Field))
                                                                                                     Diag))
-  (let [a (load (field m a))
-        n (al-len [Field] (load fs))
+  (let [a (primitive/load (primitive/field m a))
+        n (al-len [Field] (primitive/load fs))
         (mut out) (al-new [Field] a)
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [fp (al-elem [Field] fs (load i))]
-                  (match (resolve-ty m (field fp ty) map)
-                    (Err [d] (do (store! err d) (store! failed true) (break)))
-                    (Ok [t] (al-push! (mut out) (mk-field (load (field fp name)) t)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [(ptr (ArrayList Field)) Diag] (load err)) (Ok (box-al [Field] a (load out))))))
+                (let [fp (al-elem [Field] fs (primitive/load i))]
+                  (match (resolve-ty m (primitive/field fp ty) map)
+                    (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
+                    (Ok [t] (al-push! (mut out) (mk-field (primitive/load (primitive/field fp name)) t)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [(ptr (ArrayList Field)) Diag] (primitive/load err)) (Ok (box-al [Field] a (primitive/load out))))))
 (defn resolve-params [(m (ptr MonoCtx)) (ps (ptr (ArrayList Param))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Param))
                                                                                                     Diag))
-  (let [a (load (field m a))
-        n (al-len [Param] (load ps))
+  (let [a (primitive/load (primitive/field m a))
+        n (al-len [Param] (primitive/load ps))
         (mut out) (al-new [Param] a)
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [pp (al-elem [Param] ps (load i))]
-                  (match (resolve-ty m (field pp ty) map)
-                    (Err [d] (do (store! err d) (store! failed true) (break)))
-                    (Ok [t] (al-push! (mut out) (mk-param (load (field pp name)) t)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [(ptr (ArrayList Param)) Diag] (load err)) (Ok (box-al [Param] a (load out))))))
+                (let [pp (al-elem [Param] ps (primitive/load i))]
+                  (match (resolve-ty m (primitive/field pp ty) map)
+                    (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
+                    (Ok [t] (al-push! (mut out) (mk-param (primitive/load (primitive/field pp name)) t)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [(ptr (ArrayList Param)) Diag] (primitive/load err)) (Ok (box-al [Param] a (primitive/load out))))))
 (defn resolve-sum [(m (ptr MonoCtx)) (s (ptr SumDef)) (map (ptr Subst)) (name (slice u8))] (-> (Result SumDef Diag))
-  (let [a (load (field m a))
-        vs (load (field s variants))
+  (let [a (primitive/load (primitive/field m a))
+        vs (primitive/load (primitive/field s variants))
         n (al-len [Variant] vs)
         (mut out) (al-new [Variant] a)
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [vp (al-elem [Variant] vs (load i))]
-                  (match (resolve-fields m (load (field vp fields)) map)
-                    (Err [d] (do (store! err d) (store! failed true) (break)))
-                    (Ok [nfs] (al-push! (mut out) (mk-variant (load (field vp name)) nfs)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed)
-        (Err [SumDef Diag] (load err))
-        (let [ns (alloc-stack SumDef)]
-          (store! (field ns name) name)
-          (store! (field ns type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-          (store! (field ns bounds) (box-al [Bound] a (al-new [Bound] a)))
-          (store! (field ns variants) (box-al [Variant] a (load out)))
-          (Ok (load ns))))))
+                (let [vp (al-elem [Variant] vs (primitive/load i))]
+                  (match (resolve-fields m (primitive/load (primitive/field vp fields)) map)
+                    (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
+                    (Ok [nfs] (al-push! (mut out) (mk-variant (primitive/load (primitive/field vp name)) nfs)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed)
+        (Err [SumDef Diag] (primitive/load err))
+        (let [ns (alloc/stack SumDef)]
+          (primitive/store! (primitive/field ns name) name)
+          (primitive/store! (primitive/field ns type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+          (primitive/store! (primitive/field ns bounds) (box-al [Bound] a (al-new [Bound] a)))
+          (primitive/store! (primitive/field ns variants) (box-al [Variant] a (primitive/load out)))
+          (Ok (primitive/load ns))))))
 
 ; ---- resolve a function --------------------------
 (defn resolve-func [(m (ptr MonoCtx)) (f (ptr Func)) (map (ptr Subst)) (name (slice u8))] (-> (Result Func Diag))
-  (let [a (load (field m a))]
-    (match (resolve-params m (load (field f params)) map)
+  (let [a (primitive/load (primitive/field m a))]
+    (match (resolve-params m (primitive/load (primitive/field f params)) map)
       (Err [d] (Err [Func Diag] d))
       (Ok [params]
-          (match (resolve-ty m (field f ret) map)
+          (match (resolve-ty m (primitive/field f ret) map)
             (Err [d] (Err [Func Diag] d))
             (Ok [ret]
-                (match (resolve-expr-list m (load (field f body)) map)
+                (match (resolve-expr-list m (primitive/load (primitive/field f body)) map)
                   (Err [d] (Err [Func Diag] d))
                   (Ok [body]
-                      (let [nf (alloc-stack Func)]
-                        (store! (field nf name) name)
-                        (store! (field nf type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-                        (store! (field nf bounds) (box-al [Bound] a (al-new [Bound] a)))
-                        (store! (field nf cc) (load (field f cc)))
-                        (store! (field nf params) params)
-                        (store! (field nf ret) ret)
-                        (store! (field nf body) body)
-                        (store! (field nf macro_variadic) false)
-                        (store! (field nf lo) (load (field f lo)))
-                        (store! (field nf source) (load (field f source)))
-                        (store! (field nf ctxt) (load (field f ctxt)))
-                        (store! (field nf hi) (load (field f hi)))
-                        (Ok (load nf)))))))))))
+                      (let [nf (alloc/stack Func)]
+                        (primitive/store! (primitive/field nf name) name)
+                        (primitive/store! (primitive/field nf type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                        (primitive/store! (primitive/field nf bounds) (box-al [Bound] a (al-new [Bound] a)))
+                        (primitive/store! (primitive/field nf cc) (primitive/load (primitive/field f cc)))
+                        (primitive/store! (primitive/field nf params) params)
+                        (primitive/store! (primitive/field nf ret) ret)
+                        (primitive/store! (primitive/field nf body) body)
+                        (primitive/store! (primitive/field nf macro_variadic) false)
+                        (primitive/store! (primitive/field nf lo) (primitive/load (primitive/field f lo)))
+                        (primitive/store! (primitive/field nf source) (primitive/load (primitive/field f source)))
+                        (primitive/store! (primitive/field nf ctxt) (primitive/load (primitive/field f ctxt)))
+                        (primitive/store! (primitive/field nf hi) (primitive/load (primitive/field f hi)))
+                        (Ok (primitive/load nf)))))))))))
 
 ; ---- resolve expressions -------------------------
 (defn resolve-expr-list [(m (ptr MonoCtx)) (lst (ptr (ArrayList Expr))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Expr))
                                                                                                        Diag))
-  (let [a (load (field m a))
-        n (al-len [Expr] (load lst))
+  (let [a (primitive/load (primitive/field m a))
+        n (al-len [Expr] (primitive/load lst))
         (mut out) (al-new [Expr] a)
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (match (resolve-expr m (al-elem [Expr] lst (load i)) map)
-                  (Err [d] (do (store! err d) (store! failed true) (break)))
+                (match (resolve-expr m (al-elem [Expr] lst (primitive/load i)) map)
+                  (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
                   (Ok [e] (al-push! (mut out) e)))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [(ptr (ArrayList Expr)) Diag] (primitive/load err)) (Ok (box-al [Expr] a (primitive/load out))))))
 (defn resolve-bind-list [(m (ptr MonoCtx)) (binds (ptr (ArrayList Bind))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Bind))
                                                                                                          Diag))
-  (let [a (load (field m a))
-        n (al-len [Bind] (load binds))
+  (let [a (primitive/load (primitive/field m a))
+        n (al-len [Bind] (primitive/load binds))
         (mut out) (al-new [Bind] a)
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [bp (al-elem [Bind] binds (load i))]
-                  (match (resolve-expr m (field bp value) map)
-                    (Err [d] (do (store! err d) (store! failed true) (break)))
-                    (Ok [ne] (al-push! (mut out) (mk-bind (load (field bp name)) (load (field bp mutable)) ne)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [(ptr (ArrayList Bind)) Diag] (load err)) (Ok (box-al [Bind] a (load out))))))
+                (let [bp (al-elem [Bind] binds (primitive/load i))]
+                  (match (resolve-expr m (primitive/field bp value) map)
+                    (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
+                    (Ok [ne] (al-push! (mut out) (mk-bind (primitive/load (primitive/field bp name)) (primitive/load (primitive/field bp mutable)) ne)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [(ptr (ArrayList Bind)) Diag] (primitive/load err)) (Ok (box-al [Bind] a (primitive/load out))))))
 (defn resolve-arm-list [(m (ptr MonoCtx)) (arms (ptr (ArrayList Arm))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Arm))
                                                                                                       Diag))
-  (let [a (load (field m a))
-        n (al-len [Arm] (load arms))
+  (let [a (primitive/load (primitive/field m a))
+        n (al-len [Arm] (primitive/load arms))
         (mut out) (al-new [Arm] a)
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [ap (al-elem [Arm] arms (load i))]
-                  (match (resolve-expr m (field ap body) map)
-                    (Err [d] (do (store! err d) (store! failed true) (break)))
-                    (Ok [nb] (al-push! (mut out) (mk-arm (load (field ap variant)) (load (field ap binds)) nb)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [(ptr (ArrayList Arm)) Diag] (load err)) (Ok (box-al [Arm] a (load out))))))
+                (let [ap (al-elem [Arm] arms (primitive/load i))]
+                  (match (resolve-expr m (primitive/field ap body) map)
+                    (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
+                    (Ok [nb] (al-push! (mut out) (mk-arm (primitive/load (primitive/field ap variant)) (primitive/load (primitive/field ap binds)) nb)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [(ptr (ArrayList Arm)) Diag] (primitive/load err)) (Ok (box-al [Arm] a (primitive/load out))))))
 ; The ECall arm: variant construction / generic-fn call / plain call.
 (defn resolve-call-kind [(m (ptr MonoCtx))
                          (func (slice u8))
                          (type_args (ptr (ArrayList Type)))
                          (args (ptr (ArrayList Expr)))
                          (map (ptr Subst))] (-> (Result ExprKind Diag))
-  (let [a (load (field m a))]
+  (let [a (primitive/load (primitive/field m a))]
     (try (let [nargs (try! (resolve-expr-list m args map))]
            (match (variant-sum m func)
              (Some [sum-name]
                    (if (gsum-has m sum-name)
                        (do
-                         (when (icmp-eq (al-len [Type] (load type_args)) 0)
+                         (when (primitive/icmp-eq (al-len [Type] (primitive/load type_args)) 0)
                                (break :try
                                       (Err [ExprKind Diag]
                                            (derr (sconcat a
@@ -613,13 +614,13 @@
                                                                              func))
                                                           " [<types>] ...)")))))
                          (let [rtargs (try! (resolve-ty-list m type_args map))]
-                           (when (not (icmp-eq (al-len [Type] (load rtargs)) (gsum-arity m sum-name)))
+                           (when (not (primitive/icmp-eq (al-len [Type] (primitive/load rtargs)) (gsum-arity m sum-name)))
                                  (break :try
                                         (Err [ExprKind Diag]
                                              (derr (arity-err a
                                                               (sconcat3 a "sum '" sum-name "'")
                                                               (gsum-arity m sum-name)
-                                                              (al-len [Type] (load rtargs)))))))
+                                                              (al-len [Type] (primitive/load rtargs)))))))
                            (let [mng (mangle a sum-name rtargs)]
                              (queue-sum m sum-name rtargs)
                              (Ok (EConstruct mng func nargs)))))
@@ -627,7 +628,7 @@
              (None []
                    (if (gfunc-has m func)
                        (do
-                         (when (icmp-eq (al-len [Type] (load type_args)) 0)
+                         (when (primitive/icmp-eq (al-len [Type] (primitive/load type_args)) 0)
                                (break :try
                                       (Err [ExprKind Diag]
                                            (derr (sconcat a
@@ -637,27 +638,27 @@
                                                                     "' needs explicit type arguments: (")
                                                           (sconcat a func " [<types>] ...)"))))))
                          (let [rtargs (try! (resolve-ty-list m type_args map))]
-                           (when (not (icmp-eq (al-len [Type] (load rtargs)) (gfunc-arity m func)))
+                           (when (not (primitive/icmp-eq (al-len [Type] (primitive/load rtargs)) (gfunc-arity m func)))
                                  (break :try
                                         (Err [ExprKind Diag]
                                              (derr (arity-err a
                                                               (sconcat3 a "generic function '" func "'")
                                                               (gfunc-arity m func)
-                                                              (al-len [Type] (load rtargs)))))))
+                                                              (al-len [Type] (primitive/load rtargs)))))))
                            (let [mng (mangle a func rtargs)]
                              (queue-func m func rtargs)
                              (Ok (ECall mng (box-items-type a) nargs)))))
                        (Ok (ECall func (box-items-type a) nargs)))))))))
 (defn resolve-expr-kind [(m (ptr MonoCtx)) (e (ptr Expr)) (map (ptr Subst))] (-> (Result ExprKind Diag))
-  (let [a (load (field m a))]
-    (try (match (load (field e kind))
+  (let [a (primitive/load (primitive/field m a))]
+    (try (match (primitive/load (primitive/field e kind))
            (EInt [v] (Ok (EInt v)))
            (EStr [s] (Ok (EStr s)))
            (ECStr [s] (Ok (ECStr s)))
            (EVar [nm] (Ok (EVar nm)))
            (EFloat [b] (Ok (EFloat b)))
            (EBool [b] (Ok (EBool b)))
-           (EZeroed [t] (let [tp (alloc-stack Type)] (store! tp t) (Ok (EZeroed (try! (resolve-ty m tp map))))))
+           (EZeroed [t] (let [tp (alloc/stack Type)] (primitive/store! tp t) (Ok (EZeroed (try! (resolve-ty m tp map))))))
            (EBorrow [mu place] (Ok (EBorrow mu (box-expr a (try! (resolve-expr m place map))))))
            (ESpillRef [inner] (Ok (ESpillRef (box-expr a (try! (resolve-expr m inner map))))))
            (ELet [binds body] (Ok (ELet (try! (resolve-bind-list m binds map)) (try! (resolve-expr-list m body map)))))
@@ -673,7 +674,7 @@
            (EDo [body] (Ok (EDo (try! (resolve-expr-list m body map)))))
            (ECall [func type_args args] (resolve-call-kind m func type_args args map))
            (EAlloc [storage t]
-                   (let [tp (alloc-stack Type)] (store! tp t) (Ok (EAlloc storage (try! (resolve-ty m tp map))))))
+                   (let [tp (alloc/stack Type)] (primitive/store! tp t) (Ok (EAlloc storage (try! (resolve-ty m tp map))))))
            (EField [p fname] (Ok (EField (box-expr a (try! (resolve-expr m p map))) fname)))
            (ELoad [inner] (Ok (ELoad (box-expr a (try! (resolve-expr m inner map))))))
            (EStore [p val]
@@ -681,13 +682,13 @@
            (EIndex [p idx]
                    (Ok (EIndex (box-expr a (try! (resolve-expr m p map))) (box-expr a (try! (resolve-expr m idx map))))))
            (ECast [t inner]
-                  (let [tp (alloc-stack Type)]
-                    (store! tp t)
+                  (let [tp (alloc/stack Type)]
+                    (primitive/store! tp t)
                     (Ok (ECast (try! (resolve-ty m tp map)) (box-expr a (try! (resolve-expr m inner map)))))))
-           (ESizeOf [t] (let [tp (alloc-stack Type)] (store! tp t) (Ok (ESizeOf (try! (resolve-ty m tp map))))))
-           (EAlignOf [t] (let [tp (alloc-stack Type)] (store! tp t) (Ok (EAlignOf (try! (resolve-ty m tp map))))))
+           (ESizeOf [t] (let [tp (alloc/stack Type)] (primitive/store! tp t) (Ok (ESizeOf (try! (resolve-ty m tp map))))))
+           (EAlignOf [t] (let [tp (alloc/stack Type)] (primitive/store! tp t) (Ok (EAlignOf (try! (resolve-ty m tp map))))))
            (EOffsetOf [t fname]
-                      (let [tp (alloc-stack Type)] (store! tp t) (Ok (EOffsetOf (try! (resolve-ty m tp map)) fname))))
+                      (let [tp (alloc/stack Type)] (primitive/store! tp t) (Ok (EOffsetOf (try! (resolve-ty m tp map)) fname))))
            (EBitGet [p fname] (Ok (EBitGet (box-expr a (try! (resolve-expr m p map))) fname)))
            (EBitSet [p fname val]
                     (Ok (EBitSet (box-expr a (try! (resolve-expr m p map)))
@@ -715,15 +716,15 @@
                                  (None [] (None [(ptr Expr)]))))))
            (EContinue [label] (Ok (EContinue label)))
            (ELlvmIr [result args body]
-                    (let [tp (alloc-stack Type)]
-                      (store! tp result)
+                    (let [tp (alloc/stack Type)]
+                      (primitive/store! tp result)
                       (Ok (ELlvmIr (try! (resolve-ty m tp map)) (try! (resolve-expr-list m args map)) body))))
            (EConstruct [sum variant args] (Ok (EConstruct sum variant (try! (resolve-expr-list m args map)))))
            (EMakeDyn [dyn_struct vtable_struct methods inner]
                      (Ok (EMakeDyn dyn_struct vtable_struct methods (box-expr a (try! (resolve-expr m inner map))))))
            (EDynDispatch [dyn_struct vtable_struct method_index cc params ret recv args]
-                         (let [rp (alloc-stack Type)]
-                           (store! rp ret)
+                         (let [rp (alloc/stack Type)]
+                           (primitive/store! rp ret)
                            (Ok (EDynDispatch dyn_struct
                                              vtable_struct
                                              method_index
@@ -739,40 +740,40 @@
            ; feed the impl pattern; a GENERIC impl's lowered method is a generic
            ; function, instantiated by matching that pattern.
            (ETraitCall [trait_name method self_tp args]
-                       (let [tp (alloc-stack Type)]
-                         (store! tp (TStruct self_tp))
-                         (let [styp (alloc-stack Type)]
-                           (store! styp (try! (resolve-ty m tp map)))
+                       (let [tp (alloc/stack Type)]
+                         (primitive/store! tp (TStruct self_tp))
+                         (let [styp (alloc/stack Type)]
+                           (primitive/store! styp (try! (resolve-ty m tp map)))
                            (let [(mut base) ""
-                                 (mut mty) (load styp)]
-                             (if (icmp-eq (type-tag styp) 6)
+                                 (mut mty) (primitive/load styp)]
+                             (if (primitive/icmp-eq (type-tag styp) 6)
                                  (let [ioi (io-find m (type-struct-name styp))]
-                                   (if (icmp-ge ioi 0)
-                                       (let [orig (al-elem [PendInst] (field m io-origin) ioi)]
-                                         (store! base (load (field orig name)))
-                                         (store! mty (TApp (load (field orig name)) (load (field orig args))))
+                                   (if (primitive/icmp-ge ioi 0)
+                                       (let [orig (al-elem [PendInst] (primitive/field m io-origin) ioi)]
+                                         (primitive/store! base (primitive/load (primitive/field orig name)))
+                                         (primitive/store! mty (TApp (primitive/load (primitive/field orig name)) (primitive/load (primitive/field orig args))))
                                          0)
-                                       (do (store! base (type-struct-name styp)) 0)))
+                                       (do (primitive/store! base (type-struct-name styp)) 0)))
                                  (match (mono-impl-name a styp)
                                    (None []
                                          (do
                                            (unimplemented "mono/trait-call: Self resolved to a type with no impl name")
                                            0))
-                                   (Some [tn] (do (store! base tn) 0))))
-                             (let [rtyp (alloc-stack Type)]
-                               (store! rtyp (load mty))
+                                   (Some [tn] (do (primitive/store! base tn) 0))))
+                             (let [rtyp (alloc/stack Type)]
+                               (primitive/store! rtyp (primitive/load mty))
                                ; the most specific impl accepting this receiver; fall back to the
                                ; plain key lookup when nothing matches, which is the pre-specialization
                                ; behaviour (and a general impl's key IS the plain key)
                                (let [ipsel (impl-lookup-sel a m trait_name rtyp)
-                                     ip (if (icmp-eq (cast i64 ipsel) 0) (impl-lookup m trait_name (load base)) ipsel)
+                                     ip (if (primitive/icmp-eq (primitive/cast i64 ipsel) 0) (impl-lookup m trait_name (primitive/load base)) ipsel)
                                      mkey
-                                       (if (icmp-eq (cast i64 ipsel) 0)
-                                           (load base)
-                                           (impl-mangle-key a (field ipsel self_type) (load (field ipsel type_params))))
+                                       (if (primitive/icmp-eq (primitive/cast i64 ipsel) 0)
+                                           (primitive/load base)
+                                           (impl-mangle-key a (primitive/field ipsel self_type) (primitive/load (primitive/field ipsel type_params))))
                                      (mut targs) (box-items-type a)]
-                                 (when (if (icmp-ne (cast i64 ip) 0)
-                                           (icmp-gt (al-len [(slice u8)] (load (load (field ip type_params)))) 0)
+                                 (when (if (primitive/icmp-ne (primitive/cast i64 ip) 0)
+                                           (primitive/icmp-gt (al-len [(slice u8)] (primitive/load (primitive/load (primitive/field ip type_params)))) 0)
                                            false)
                                        ; Bind the impl's type params from the receiver with the SAME
                                        ; matcher that selected the impl (`unify-trait-extras`). Mono used
@@ -782,12 +783,12 @@
                                        ; `type-key`, which renders a TRef without its mutability flag and
                                        ; so equates `(mut T)` with `(ref T)`; unify-trait-extras checks it.)
                                        (let [binds (subst-new a)
-                                             mtyp (alloc-stack Type)]
-                                         (store! mtyp (load mty))
+                                             mtyp (alloc/stack Type)]
+                                         (primitive/store! mtyp (primitive/load mty))
                                          (when (not (unify-trait-extras a
-                                                                        (field ip self_type)
+                                                                        (primitive/field ip self_type)
                                                                         mtyp
-                                                                        (load (field ip type_params))
+                                                                        (primitive/load (primitive/field ip type_params))
                                                                         binds))
                                                (break :try
                                                       (Err [ExprKind Diag]
@@ -795,15 +796,15 @@
                                                                            "trait call '"
                                                                            method
                                                                            "': receiver doesn't match the impl's implementing type")))))
-                                         (let [ps (load (field ip type_params))
-                                               np (al-len [(slice u8)] (load ps))
+                                         (let [ps (primitive/load (primitive/field ip type_params))
+                                               np (al-len [(slice u8)] (primitive/load ps))
                                                (mut k) 0
                                                (mut ta) (al-new [Type] a)]
-                                           (loop (if (icmp-ge (load k) np)
+                                           (loop (if (primitive/icmp-ge (primitive/load k) np)
                                                      (break)
-                                                     (let [pn (al-get [(slice u8)] (load ps) (load k))
+                                                     (let [pn (al-get [(slice u8)] (primitive/load ps) (primitive/load k))
                                                            bp (subst-get binds pn)]
-                                                       (when (icmp-eq (cast i64 bp) 0)
+                                                       (when (primitive/icmp-eq (primitive/cast i64 bp) 0)
                                                              (break :try
                                                                     (Err [ExprKind Diag]
                                                                          (derr (sconcat a
@@ -814,15 +815,15 @@
                                                                                         (sconcat a
                                                                                                  pn
                                                                                                  "' not determined by the receiver"))))))
-                                                       (al-push! (mut ta) (load bp))
-                                                       (store! k (iadd (load k) 1)))))
-                                           (store! targs (box-al [Type] a (load ta)))
+                                                       (al-push! (mut ta) (primitive/load bp))
+                                                       (primitive/store! k (primitive/iadd (primitive/load k) 1)))))
+                                           (primitive/store! targs (box-al [Type] a (primitive/load ta)))
                                            0)))
                                  (let [basefn (trait-method-fn a trait_name mkey method)
                                        rargs (try! (resolve-expr-list m args map))]
-                                   (if (icmp-gt (al-len [Type] (load (load targs))) 0)
-                                       (let [mng (mangle a basefn (load targs))]
-                                         (queue-func m basefn (load targs))
+                                   (if (primitive/icmp-gt (al-len [Type] (primitive/load (primitive/load targs))) 0)
+                                       (let [mng (mangle a basefn (primitive/load targs))]
+                                         (queue-func m basefn (primitive/load targs))
                                          (Ok (ECall mng (box-items-type a) rargs)))
                                        (Ok (ECall basefn (box-items-type a) rargs))))))))))
            ; comptime-only / unresolved nodes: a compiler bug if they reach mono.
@@ -839,258 +840,258 @@
 (defn resolve-expr [(m (ptr MonoCtx)) (e (ptr Expr)) (map (ptr Subst))] (-> (Result Expr Diag))
   (match (resolve-expr-kind m e map)
     (Err [d] (Err [Expr Diag] d))
-    (Ok [k] (Ok (mk-expr k (load (field e lo)) (load (field e hi)) (load (field e source)) (load (field e ctxt)))))))
+    (Ok [k] (Ok (mk-expr k (primitive/load (primitive/field e lo)) (primitive/load (primitive/field e hi)) (primitive/load (primitive/field e source)) (primitive/load (primitive/field e ctxt)))))))
 
 ; ---- drain the worklist --------------------------------
 ; An append-only cursor sweep (same fixpoint, output order is
 ; unobserved by the oracle — every corpus file errors during seeding).
 (defn drain [(m (ptr MonoCtx))] (-> (Result i64 Diag))
-  (let [a (load (field m a))
+  (let [a (primitive/load (primitive/field m a))
         (mut sc) 0
         (mut uc) 0
         (mut fc) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false
         (mut done) false]
-    (loop (if (load done)
+    (loop (if (primitive/load done)
               (break)
               (do
-                (cond (icmp-lt (load sc) (al-len [PendInst] (load (field m pending-structs))))
+                (cond (primitive/icmp-lt (primitive/load sc) (al-len [PendInst] (primitive/load (primitive/field m pending-structs))))
                         (do
-                          (let [pi (al-elem [PendInst] (field m pending-structs) (load sc))
-                                nm (load (field pi name))
-                                args (load (field pi args))
+                          (let [pi (al-elem [PendInst] (primitive/field m pending-structs) (primitive/load sc))
+                                nm (primitive/load (primitive/field pi name))
+                                args (primitive/load (primitive/field pi args))
                                 gs
                                   (al-elem [StructDef]
-                                           (load (field m gstructs))
-                                           (find-struct-named (load (field m gstructs)) nm))
-                                smap (subst-map a (load (field gs type_params)) args)
+                                           (primitive/load (primitive/field m gstructs))
+                                           (find-struct-named (primitive/load (primitive/field m gstructs)) nm))
+                                smap (subst-map a (primitive/load (primitive/field gs type_params)) args)
                                 mng (mangle a nm args)]
                             (if (mono-runaway? args mng)
                                 (do
-                                  (store! err (mono-runaway-diag a "generic type" nm mng))
-                                  (store! failed true)
-                                  (store! done true)
+                                  (primitive/store! err (mono-runaway-diag a "generic type" nm mng))
+                                  (primitive/store! failed true)
+                                  (primitive/store! done true)
                                   0)
-                                (match (resolve-fields m (load (field gs fields)) smap)
-                                  (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
+                                (match (resolve-fields m (primitive/load (primitive/field gs fields)) smap)
+                                  (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (primitive/store! done true) 0))
                                   (Ok [nfs]
-                                      (let [nd (alloc-stack StructDef)]
-                                        (store! (field nd name) mng)
-                                        (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-                                        (store! (field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
-                                        (store! (field nd layout) (load (field gs layout)))
-                                        (store! (field nd fields) nfs)
-                                        (upsert-struct m (load nd)))))))
-                          (store! sc (iadd (load sc) 1)))
-                      (icmp-lt (load uc) (al-len [PendInst] (load (field m pending-sums))))
+                                      (let [nd (alloc/stack StructDef)]
+                                        (primitive/store! (primitive/field nd name) mng)
+                                        (primitive/store! (primitive/field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                                        (primitive/store! (primitive/field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
+                                        (primitive/store! (primitive/field nd layout) (primitive/load (primitive/field gs layout)))
+                                        (primitive/store! (primitive/field nd fields) nfs)
+                                        (upsert-struct m (primitive/load nd)))))))
+                          (primitive/store! sc (primitive/iadd (primitive/load sc) 1)))
+                      (primitive/icmp-lt (primitive/load uc) (al-len [PendInst] (primitive/load (primitive/field m pending-sums))))
                         (do
-                          (let [pi (al-elem [PendInst] (field m pending-sums) (load uc))
-                                nm (load (field pi name))
-                                args (load (field pi args))
-                                gs (al-elem [SumDef] (load (field m gsums)) (find-sum-named (load (field m gsums)) nm))
-                                smap (subst-map a (load (field gs type_params)) args)
+                          (let [pi (al-elem [PendInst] (primitive/field m pending-sums) (primitive/load uc))
+                                nm (primitive/load (primitive/field pi name))
+                                args (primitive/load (primitive/field pi args))
+                                gs (al-elem [SumDef] (primitive/load (primitive/field m gsums)) (find-sum-named (primitive/load (primitive/field m gsums)) nm))
+                                smap (subst-map a (primitive/load (primitive/field gs type_params)) args)
                                 mng (mangle a nm args)]
                             (if (mono-runaway? args mng)
                                 (do
-                                  (store! err (mono-runaway-diag a "generic sum" nm mng))
-                                  (store! failed true)
-                                  (store! done true)
+                                  (primitive/store! err (mono-runaway-diag a "generic sum" nm mng))
+                                  (primitive/store! failed true)
+                                  (primitive/store! done true)
                                   0)
                                 (match (resolve-sum m gs smap mng)
-                                  (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
+                                  (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (primitive/store! done true) 0))
                                   (Ok [ns] (upsert-sum m ns)))))
-                          (store! uc (iadd (load uc) 1)))
-                      (icmp-lt (load fc) (al-len [PendInst] (load (field m pending-funcs))))
+                          (primitive/store! uc (primitive/iadd (primitive/load uc) 1)))
+                      (primitive/icmp-lt (primitive/load fc) (al-len [PendInst] (primitive/load (primitive/field m pending-funcs))))
                         (do
-                          (let [pi (al-elem [PendInst] (field m pending-funcs) (load fc))
-                                nm (load (field pi name))
-                                args (load (field pi args))
+                          (let [pi (al-elem [PendInst] (primitive/field m pending-funcs) (primitive/load fc))
+                                nm (primitive/load (primitive/field pi name))
+                                args (primitive/load (primitive/field pi args))
                                 gf
                                   (al-elem [Func]
-                                           (load (field m gfuncs))
-                                           (find-func-named (load (field m gfuncs)) nm))
-                                smap (subst-map a (load (field gf type_params)) args)
+                                           (primitive/load (primitive/field m gfuncs))
+                                           (find-func-named (primitive/load (primitive/field m gfuncs)) nm))
+                                smap (subst-map a (primitive/load (primitive/field gf type_params)) args)
                                 mng (mangle a nm args)]
                             (if (mono-runaway? args mng)
                                 (do
-                                  (store! err (mono-runaway-diag a "generic function" nm mng))
-                                  (store! failed true)
-                                  (store! done true)
+                                  (primitive/store! err (mono-runaway-diag a "generic function" nm mng))
+                                  (primitive/store! failed true)
+                                  (primitive/store! done true)
                                   0)
                                 (match (resolve-func m gf smap mng)
-                                  (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
+                                  (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (primitive/store! done true) 0))
                                   (Ok [nf] (upsert-func m nf)))))
-                          (store! fc (iadd (load fc) 1)))
-                      :else (do (store! done true) 0)))))
-    (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
+                          (primitive/store! fc (primitive/iadd (primitive/load fc) 1)))
+                      :else (do (primitive/store! done true) 0)))))
+    (if (primitive/load failed) (Err [i64 Diag] (primitive/load err)) (Ok [i64 Diag] 0))))
 
 ; ---- orchestration ------------------------------
 (defn collect-generic-structs [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr (ArrayList StructDef)))
-  (let [fs (load (field p structs))
-        n (al-len [StructDef] (load fs))
+  (let [fs (primitive/load (primitive/field p structs))
+        n (al-len [StructDef] (primitive/load fs))
         (mut out) (al-new [StructDef] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [sp (al-elem [StructDef] fs (load i))]
-                  (when (icmp-gt (al-len [(slice u8)] (load (field sp type_params))) 0) (al-push! (mut out) (load sp))))
-                (store! i (iadd (load i) 1)))))
-    (box-al [StructDef] a (load out))))
+                (let [sp (al-elem [StructDef] fs (primitive/load i))]
+                  (when (primitive/icmp-gt (al-len [(slice u8)] (primitive/load (primitive/field sp type_params))) 0) (al-push! (mut out) (primitive/load sp))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (box-al [StructDef] a (primitive/load out))))
 (defn collect-generic-sums [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr (ArrayList SumDef)))
-  (let [ss (load (field p sums))
-        n (al-len [SumDef] (load ss))
+  (let [ss (primitive/load (primitive/field p sums))
+        n (al-len [SumDef] (primitive/load ss))
         (mut out) (al-new [SumDef] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [sp (al-elem [SumDef] ss (load i))]
-                  (when (icmp-gt (al-len [(slice u8)] (load (field sp type_params))) 0) (al-push! (mut out) (load sp))))
-                (store! i (iadd (load i) 1)))))
-    (box-al [SumDef] a (load out))))
+                (let [sp (al-elem [SumDef] ss (primitive/load i))]
+                  (when (primitive/icmp-gt (al-len [(slice u8)] (primitive/load (primitive/field sp type_params))) 0) (al-push! (mut out) (primitive/load sp))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (box-al [SumDef] a (primitive/load out))))
 (defn collect-generic-funcs [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr (ArrayList Func)))
-  (let [fs (load (field p funcs))
-        n (al-len [Func] (load fs))
+  (let [fs (primitive/load (primitive/field p funcs))
+        n (al-len [Func] (primitive/load fs))
         (mut out) (al-new [Func] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [fp (al-elem [Func] fs (load i))]
-                  (when (icmp-gt (al-len [(slice u8)] (load (field fp type_params))) 0) (al-push! (mut out) (load fp))))
-                (store! i (iadd (load i) 1)))))
-    (box-al [Func] a (load out))))
-; build variant_to_sum (error if a variant name is in two sums).
+                (let [fp (al-elem [Func] fs (primitive/load i))]
+                  (when (primitive/icmp-gt (al-len [(slice u8)] (primitive/load (primitive/field fp type_params))) 0) (al-push! (mut out) (primitive/load fp))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (box-al [Func] a (primitive/load out))))
+; build variant_to_sum (primitive/error if a variant name is in two sums).
 (defn build-vsum [(m (ptr MonoCtx)) (p (ptr Program))] (-> (Result i64 Diag))
-  (let [a (load (field m a))
-        ss (load (field p sums))
-        n (al-len [SumDef] (load ss))
+  (let [a (primitive/load (primitive/field m a))
+        ss (primitive/load (primitive/field p sums))
+        n (al-len [SumDef] (primitive/load ss))
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (or (load failed) (icmp-ge (load i) n))
+    (loop (if (or (primitive/load failed) (primitive/icmp-ge (primitive/load i) n))
               (break)
               (do
-                (let [sp (al-elem [SumDef] ss (load i))
-                      vs (load (field sp variants))
+                (let [sp (al-elem [SumDef] ss (primitive/load i))
+                      vs (primitive/load (primitive/field sp variants))
                       nv (al-len [Variant] vs)
                       (mut j) 0]
-                  (loop (if (or (load failed) (icmp-ge (load j) nv))
+                  (loop (if (or (primitive/load failed) (primitive/icmp-ge (primitive/load j) nv))
                             (break)
                             (do
-                              (let [vp (al-elem [Variant] vs (load j))
-                                    vn (load (field vp name))]
-                                (if (set-contains (field m vsum-names) vn)
+                              (let [vp (al-elem [Variant] vs (primitive/load j))
+                                    vn (primitive/load (primitive/field vp name))]
+                                (if (set-contains (primitive/field m vsum-names) vn)
                                     (do
-                                      (store! err (derr (sconcat3 a "variant '" vn "' is declared in two sum types")))
-                                      (store! failed true)
+                                      (primitive/store! err (derr (sconcat3 a "variant '" vn "' is declared in two sum types")))
+                                      (primitive/store! failed true)
                                       0)
                                     (do
-                                      (al-push! (mut (field m vsum-names)) vn)
-                                      (al-push! (mut (field m vsum-sums)) (load (field sp name))))))
-                              (store! j (iadd (load j) 1))))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
+                                      (al-push! (mut (primitive/field m vsum-names)) vn)
+                                      (al-push! (mut (primitive/field m vsum-sums)) (primitive/load (primitive/field sp name))))))
+                              (primitive/store! j (primitive/iadd (primitive/load j) 1))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [i64 Diag] (primitive/load err)) (Ok [i64 Diag] 0))))
 (defn seed-concrete-structs [(m (ptr MonoCtx)) (p (ptr Program)) (map (ptr Subst))] (-> (Result i64 Diag))
-  (let [a (load (field m a))
-        ss (load (field p structs))
-        n (al-len [StructDef] (load ss))
+  (let [a (primitive/load (primitive/field m a))
+        ss (primitive/load (primitive/field p structs))
+        n (al-len [StructDef] (primitive/load ss))
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [sp (al-elem [StructDef] ss (load i))]
-                  (when (icmp-eq (al-len [(slice u8)] (load (field sp type_params))) 0)
-                        (match (resolve-fields m (load (field sp fields)) map)
-                          (Err [d] (do (store! err d) (store! failed true) (break)))
+                (let [sp (al-elem [StructDef] ss (primitive/load i))]
+                  (when (primitive/icmp-eq (al-len [(slice u8)] (primitive/load (primitive/field sp type_params))) 0)
+                        (match (resolve-fields m (primitive/load (primitive/field sp fields)) map)
+                          (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
                           (Ok [nfs]
-                              (let [nd (alloc-stack StructDef)]
-                                (store! (field nd name) (load (field sp name)))
-                                (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-                                (store! (field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
-                                (store! (field nd layout) (load (field sp layout)))
-                                (store! (field nd fields) nfs)
-                                (upsert-struct m (load nd))
+                              (let [nd (alloc/stack StructDef)]
+                                (primitive/store! (primitive/field nd name) (primitive/load (primitive/field sp name)))
+                                (primitive/store! (primitive/field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                                (primitive/store! (primitive/field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
+                                (primitive/store! (primitive/field nd layout) (primitive/load (primitive/field sp layout)))
+                                (primitive/store! (primitive/field nd fields) nfs)
+                                (upsert-struct m (primitive/load nd))
                                 0)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [i64 Diag] (primitive/load err)) (Ok [i64 Diag] 0))))
 (defn seed-concrete-sums [(m (ptr MonoCtx)) (p (ptr Program)) (map (ptr Subst))] (-> (Result i64 Diag))
-  (let [a (load (field m a))
-        ss (load (field p sums))
-        n (al-len [SumDef] (load ss))
+  (let [a (primitive/load (primitive/field m a))
+        ss (primitive/load (primitive/field p sums))
+        n (al-len [SumDef] (primitive/load ss))
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [sp (al-elem [SumDef] ss (load i))]
-                  (when (icmp-eq (al-len [(slice u8)] (load (field sp type_params))) 0)
-                        (match (resolve-sum m sp map (load (field sp name)))
-                          (Err [d] (do (store! err d) (store! failed true) (break)))
+                (let [sp (al-elem [SumDef] ss (primitive/load i))]
+                  (when (primitive/icmp-eq (al-len [(slice u8)] (primitive/load (primitive/field sp type_params))) 0)
+                        (match (resolve-sum m sp map (primitive/load (primitive/field sp name)))
+                          (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
                           (Ok [ns] (upsert-sum m ns)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [i64 Diag] (primitive/load err)) (Ok [i64 Diag] 0))))
 (defn seed-concrete-funcs [(m (ptr MonoCtx)) (p (ptr Program)) (map (ptr Subst))] (-> (Result i64 Diag))
-  (let [a (load (field m a))
-        fs (load (field p funcs))
-        n (al-len [Func] (load fs))
+  (let [a (primitive/load (primitive/field m a))
+        fs (primitive/load (primitive/field p funcs))
+        n (al-len [Func] (primitive/load fs))
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [fp (al-elem [Func] fs (load i))]
-                  (when (icmp-eq (al-len [(slice u8)] (load (field fp type_params))) 0)
-                        (match (resolve-func m fp map (load (field fp name)))
-                          (Err [d] (do (store! err d) (store! failed true) (break)))
+                (let [fp (al-elem [Func] fs (primitive/load i))]
+                  (when (primitive/icmp-eq (al-len [(slice u8)] (primitive/load (primitive/field fp type_params))) 0)
+                        (match (resolve-func m fp map (primitive/load (primitive/field fp name)))
+                          (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
                           (Ok [nf] (upsert-func m nf)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [i64 Diag] (primitive/load err)) (Ok [i64 Diag] 0))))
 (defn mono-asserts [(m (ptr MonoCtx)) (p (ptr Program)) (map (ptr Subst))] (-> (Result (ptr (ArrayList StaticAssert))
                                                                                        Diag))
-  (let [a (load (field m a))
-        as (load (field p asserts))
-        n (al-len [StaticAssert] (load as))
+  (let [a (primitive/load (primitive/field m a))
+        as (primitive/load (primitive/field p asserts))
+        n (al-len [StaticAssert] (primitive/load as))
         (mut out) (al-new [StaticAssert] a)
         (mut i) 0
-        (mut err) (zeroed Diag)
+        (mut err) (primitive/zeroed Diag)
         (mut failed) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [ap (al-elem [StaticAssert] as (load i))]
-                  (match (resolve-expr m (field ap cnd) map)
-                    (Err [d] (do (store! err d) (store! failed true) (break)))
+                (let [ap (al-elem [StaticAssert] as (primitive/load i))]
+                  (match (resolve-expr m (primitive/field ap cnd) map)
+                    (Err [d] (do (primitive/store! err d) (primitive/store! failed true) (break)))
                     (Ok [ce]
-                        (let [na (alloc-stack StaticAssert)]
-                          (store! (field na cnd) ce)
-                          (store! (field na msg) (load (field ap msg)))
-                          (al-push! (mut out) (load na))
+                        (let [na (alloc/stack StaticAssert)]
+                          (primitive/store! (primitive/field na cnd) ce)
+                          (primitive/store! (primitive/field na msg) (primitive/load (primitive/field ap msg)))
+                          (al-push! (mut out) (primitive/load na))
                           0))))
-                (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err [(ptr (ArrayList StaticAssert)) Diag] (load err)) (Ok (box-al [StaticAssert] a (load out))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load failed) (Err [(ptr (ArrayList StaticAssert)) Diag] (primitive/load err)) (Ok (box-al [StaticAssert] a (primitive/load out))))))
 (defn build-mono-program [(a (ptr Allocator))
                           (m (ptr MonoCtx))
                           (p (ptr Program))
                           (asserts (ptr (ArrayList StaticAssert)))] (-> (Result (ptr Program) Diag))
   (let [out (unwrap-ptr [Program] (create [Program] a))]
-    (store! (field out conventions) (load (field p conventions)))
-    (store! (field out structs) (box-al [StructDef] a (load (field m out-structs))))
-    (store! (field out sums) (box-al [SumDef] a (load (field m out-sums))))
-    (store! (field out externs) (load (field p externs)))
-    (store! (field out funcs) (box-al [Func] a (load (field m out-funcs))))
-    (store! (field out asserts) asserts)
-    (store! (field out consts) (load (field p consts)))
-    (store! (field out traits) (box-al [TraitDef] a (al-new [TraitDef] a)))
-    (store! (field out impls) (box-al [ImplDef] a (al-new [ImplDef] a)))
-    (store! (field out metas) (box-al [Expr] a (al-new [Expr] a)))
-    (store! (field out exports) (load (field p exports)))
+    (primitive/store! (primitive/field out conventions) (primitive/load (primitive/field p conventions)))
+    (primitive/store! (primitive/field out structs) (box-al [StructDef] a (primitive/load (primitive/field m out-structs))))
+    (primitive/store! (primitive/field out sums) (box-al [SumDef] a (primitive/load (primitive/field m out-sums))))
+    (primitive/store! (primitive/field out externs) (primitive/load (primitive/field p externs)))
+    (primitive/store! (primitive/field out funcs) (box-al [Func] a (primitive/load (primitive/field m out-funcs))))
+    (primitive/store! (primitive/field out asserts) asserts)
+    (primitive/store! (primitive/field out consts) (primitive/load (primitive/field p consts)))
+    (primitive/store! (primitive/field out traits) (box-al [TraitDef] a (al-new [TraitDef] a)))
+    (primitive/store! (primitive/field out impls) (box-al [ImplDef] a (al-new [ImplDef] a)))
+    (primitive/store! (primitive/field out metas) (box-al [Expr] a (al-new [Expr] a)))
+    (primitive/store! (primitive/field out exports) (primitive/load (primitive/field p exports)))
     (Ok out)))
 ; keeps out_structs/out_sums/out_funcs in HashMaps keyed by name, so a
 ; second insert with the same name OVERWRITES (last-writer-wins) — duplicate-named
@@ -1102,69 +1103,69 @@
 ; recorded. The list never holds a duplicate name, so the index stays exact.
 (defn upsert-struct [(m (ptr MonoCtx)) (s StructDef)] (-> i64)
   (let [nm (sdef-name s)]
-    (match (hm-get [(slice u8) i64] (load (field m out-struct-idx)) nm)
-      (Some [i] (do (al-set! [StructDef] (mut (field m out-structs)) i s) 0))
+    (match (hm-get [(slice u8) i64] (primitive/load (primitive/field m out-struct-idx)) nm)
+      (Some [i] (do (al-set! [StructDef] (mut (primitive/field m out-structs)) i s) 0))
       (None []
-            (let [idx (al-len [StructDef] (load (field m out-structs)))]
-              (al-push! (mut (field m out-structs)) s)
-              (hm-put! [(slice u8) i64] (mut (field m out-struct-idx)) nm idx)
+            (let [idx (al-len [StructDef] (primitive/load (primitive/field m out-structs)))]
+              (al-push! (mut (primitive/field m out-structs)) s)
+              (hm-put! [(slice u8) i64] (mut (primitive/field m out-struct-idx)) nm idx)
               0)))))
 (defn upsert-sum [(m (ptr MonoCtx)) (s SumDef)] (-> i64)
   (let [nm (sumdef-name s)]
-    (match (hm-get [(slice u8) i64] (load (field m out-sum-idx)) nm)
-      (Some [i] (do (al-set! [SumDef] (mut (field m out-sums)) i s) 0))
+    (match (hm-get [(slice u8) i64] (primitive/load (primitive/field m out-sum-idx)) nm)
+      (Some [i] (do (al-set! [SumDef] (mut (primitive/field m out-sums)) i s) 0))
       (None []
-            (let [idx (al-len [SumDef] (load (field m out-sums)))]
-              (al-push! (mut (field m out-sums)) s)
-              (hm-put! [(slice u8) i64] (mut (field m out-sum-idx)) nm idx)
+            (let [idx (al-len [SumDef] (primitive/load (primitive/field m out-sums)))]
+              (al-push! (mut (primitive/field m out-sums)) s)
+              (hm-put! [(slice u8) i64] (mut (primitive/field m out-sum-idx)) nm idx)
               0)))))
 (defn upsert-func [(m (ptr MonoCtx)) (f Func)] (-> i64)
   (let [nm (func-name f)]
-    (match (hm-get [(slice u8) i64] (load (field m out-func-idx)) nm)
-      (Some [i] (do (al-set! [Func] (mut (field m out-funcs)) i f) 0))
+    (match (hm-get [(slice u8) i64] (primitive/load (primitive/field m out-func-idx)) nm)
+      (Some [i] (do (al-set! [Func] (mut (primitive/field m out-funcs)) i f) 0))
       (None []
-            (let [idx (al-len [Func] (load (field m out-funcs)))]
-              (al-push! (mut (field m out-funcs)) f)
-              (hm-put! [(slice u8) i64] (mut (field m out-func-idx)) nm idx)
+            (let [idx (al-len [Func] (primitive/load (primitive/field m out-funcs)))]
+              (al-push! (mut (primitive/field m out-funcs)) f)
+              (hm-put! [(slice u8) i64] (mut (primitive/field m out-func-idx)) nm idx)
               0)))))
 
 (defn monomorphize [(a (ptr Allocator)) (p (ptr Program))] (-> (Result (ptr Program) Diag))
   (let [m (unwrap-ptr [MonoCtx] (create [MonoCtx] a))]
-    (store! (field m a) a)
-    (store! (field m gfuncs) (collect-generic-funcs a p))
-    (store! (field m gstructs) (collect-generic-structs a p))
-    (store! (field m gsums) (collect-generic-sums a p))
-    (store! (field m vsum-names) (al-new [(slice u8)] a))
-    (store! (field m vsum-sums) (al-new [(slice u8)] a))
-    (store! (field m out-structs) (al-new [StructDef] a))
-    (store! (field m out-sums) (al-new [SumDef] a))
-    (store! (field m out-funcs) (al-new [Func] a))
-    (store! (field m pending-structs) (al-new [PendInst] a))
-    (store! (field m pending-sums) (al-new [PendInst] a))
-    (store! (field m pending-funcs) (al-new [PendInst] a))
-    (store! (field m out-struct-idx) (hm-new [(slice u8) i64] a (str-keyops)))
-    (store! (field m out-sum-idx) (hm-new [(slice u8) i64] a (str-keyops)))
-    (store! (field m out-func-idx) (hm-new [(slice u8) i64] a (str-keyops)))
-    (store! (field m queued-structs) (hm-new [(slice u8) i64] a (str-keyops)))
-    (store! (field m queued-sums) (hm-new [(slice u8) i64] a (str-keyops)))
-    (store! (field m queued-funcs) (hm-new [(slice u8) i64] a (str-keyops)))
-    (store! (field m impls) (load (field p impls)))
-    (store! (field m trait_impl_idx) (hm-new [(slice u8) (ptr ImplBucket)] a (str-keyops)))
-    (let [is (load (field m impls))
-          ni (al-len [ImplDef] (load is))
+    (primitive/store! (primitive/field m a) a)
+    (primitive/store! (primitive/field m gfuncs) (collect-generic-funcs a p))
+    (primitive/store! (primitive/field m gstructs) (collect-generic-structs a p))
+    (primitive/store! (primitive/field m gsums) (collect-generic-sums a p))
+    (primitive/store! (primitive/field m vsum-names) (al-new [(slice u8)] a))
+    (primitive/store! (primitive/field m vsum-sums) (al-new [(slice u8)] a))
+    (primitive/store! (primitive/field m out-structs) (al-new [StructDef] a))
+    (primitive/store! (primitive/field m out-sums) (al-new [SumDef] a))
+    (primitive/store! (primitive/field m out-funcs) (al-new [Func] a))
+    (primitive/store! (primitive/field m pending-structs) (al-new [PendInst] a))
+    (primitive/store! (primitive/field m pending-sums) (al-new [PendInst] a))
+    (primitive/store! (primitive/field m pending-funcs) (al-new [PendInst] a))
+    (primitive/store! (primitive/field m out-struct-idx) (hm-new [(slice u8) i64] a (str-keyops)))
+    (primitive/store! (primitive/field m out-sum-idx) (hm-new [(slice u8) i64] a (str-keyops)))
+    (primitive/store! (primitive/field m out-func-idx) (hm-new [(slice u8) i64] a (str-keyops)))
+    (primitive/store! (primitive/field m queued-structs) (hm-new [(slice u8) i64] a (str-keyops)))
+    (primitive/store! (primitive/field m queued-sums) (hm-new [(slice u8) i64] a (str-keyops)))
+    (primitive/store! (primitive/field m queued-funcs) (hm-new [(slice u8) i64] a (str-keyops)))
+    (primitive/store! (primitive/field m impls) (primitive/load (primitive/field p impls)))
+    (primitive/store! (primitive/field m trait_impl_idx) (hm-new [(slice u8) (ptr ImplBucket)] a (str-keyops)))
+    (let [is (primitive/load (primitive/field m impls))
+          ni (al-len [ImplDef] (primitive/load is))
           (mut ii) 0]
-      (loop (if (icmp-ge (load ii) ni)
+      (loop (if (primitive/icmp-ge (primitive/load ii) ni)
                 (break)
                 (do
-                  (let [ip (al-elem [ImplDef] is (load ii))]
+                  (let [ip (al-elem [ImplDef] is (primitive/load ii))]
                     (when (impl-is-trait ip)
                           (impl-index-add! a
-                                           (mut (field m trait_impl_idx))
-                                           (impl-index-key a (impl-trait-name ip) (load (field ip for_type)))
-                                           (load ii))))
-                  (store! ii (iadd (load ii) 1))))))
-    (store! (field m io-index) (hm-new [(slice u8) i64] a (str-keyops)))
-    (store! (field m io-origin) (al-new [PendInst] a))
+                                           (mut (primitive/field m trait_impl_idx))
+                                           (impl-index-key a (impl-trait-name ip) (primitive/load (primitive/field ip for_type)))
+                                           (primitive/load ii))))
+                  (primitive/store! ii (primitive/iadd (primitive/load ii) 1))))))
+    (primitive/store! (primitive/field m io-index) (hm-new [(slice u8) i64] a (str-keyops)))
+    (primitive/store! (primitive/field m io-origin) (al-new [PendInst] a))
     (let [empty (subst-empty a)]
       (match (build-vsum m p)
         (Err [d] (Err [(ptr Program) Diag] d))
@@ -1191,35 +1192,35 @@
 ; before mono. Without this the auto-loaded prelude's Code-returning macros reach
 ; mono and abort it. type-tag 13 == TCode.
 (defn func-has-code [(fp (ptr Func))] (-> bool)
-  (let [rt (alloc-stack Type)]
-    (store! rt (load (field fp ret)))
-    (if (icmp-eq (type-tag rt) 13)
+  (let [rt (alloc/stack Type)]
+    (primitive/store! rt (primitive/load (primitive/field fp ret)))
+    (if (primitive/icmp-eq (type-tag rt) 13)
         true
-        (let [ps (load (field fp params))
+        (let [ps (primitive/load (primitive/field fp params))
               n (al-len [Param] ps)
               (mut i) 0
               (mut found) false]
-          (loop (if (or (load found) (icmp-ge (load i) n))
+          (loop (if (or (primitive/load found) (primitive/icmp-ge (primitive/load i) n))
                     (break)
                     (do
-                      (let [pp (al-elem [Param] ps (load i))
-                            pt (alloc-stack Type)]
-                        (store! pt (load (field pp ty)))
-                        (when (icmp-eq (type-tag pt) 13) (store! found true) 0))
-                      (store! i (iadd (load i) 1)))))
-          (load found)))))
+                      (let [pp (al-elem [Param] ps (primitive/load i))
+                            pt (alloc/stack Type)]
+                        (primitive/store! pt (primitive/load (primitive/field pp ty)))
+                        (when (primitive/icmp-eq (type-tag pt) 13) (primitive/store! found true) 0))
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+          (primitive/load found)))))
 (defn drop-code-funcs [(a (ptr Allocator)) (p (ptr Program))] (-> i64)
-  (let [fs (load (field p funcs))
-        n (al-len [Func] (load fs))
+  (let [fs (primitive/load (primitive/field p funcs))
+        n (al-len [Func] (primitive/load fs))
         (mut out) (al-new [Func] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [fp (al-elem [Func] fs (load i))]
-                  (unless (func-has-code fp) (al-push! (mut out) (load fp))))
-                (store! i (iadd (load i) 1)))))
-    (store! (field p funcs) (box-al [Func] a (load out)))
+                (let [fp (al-elem [Func] fs (primitive/load i))]
+                  (unless (func-has-code fp) (al-push! (mut out) (primitive/load fp))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/store! (primitive/field p funcs) (box-al [Func] a (primitive/load out)))
     0))
 
 ; ---- canonicalize mono output order (name sorts) ----
@@ -1228,9 +1229,9 @@
 ; sections by name (mangled names are unique → total order) before dumping. This
 ; sort lives ONLY in the mono dump path; the shared dumper is untouched.
 (defn sdef-name [(s StructDef)] (-> (slice u8))
-  (let [p (alloc-stack StructDef)] (store! p s) (load (field p name))))
+  (let [p (alloc/stack StructDef)] (primitive/store! p s) (primitive/load (primitive/field p name))))
 (defn sumdef-name [(s SumDef)] (-> (slice u8))
-  (let [p (alloc-stack SumDef)] (store! p s) (load (field p name))))
+  (let [p (alloc/stack SumDef)] (primitive/store! p s) (primitive/load (primitive/field p name))))
 ; All three sorts run on EVERY build (run-pipeline calls sort-mono-program before
 ; codegen), over every mono'd definition in the program. They used to be selection
 ; sorts: O(n²) comparisons, and each comparison pulled two whole Func/StructDef/
@@ -1251,99 +1252,99 @@
         (mut i) 0
         (mut j) 0
         (mut k) 0]
-    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut cur) (load k)) (store! k (iadd (load k) 1)))))
-    (loop (if (icmp-ge (load w) n)
+    (loop (if (primitive/icmp-ge (primitive/load k) n) (break) (do (al-push! (mut cur) (primitive/load k)) (primitive/store! k (primitive/iadd (primitive/load k) 1)))))
+    (loop (if (primitive/icmp-ge (primitive/load w) n)
               (break)
               (do
-                (store! nxt (al-new [i64] a))
-                (store! lo 0)
-                (loop (if (icmp-ge (load lo) n)
+                (primitive/store! nxt (al-new [i64] a))
+                (primitive/store! lo 0)
+                (loop (if (primitive/icmp-ge (primitive/load lo) n)
                           (break)
                           (do
-                            (store! mid (if (icmp-lt (iadd (load lo) (load w)) n) (iadd (load lo) (load w)) n))
-                            (store! hi (if (icmp-lt (iadd (load mid) (load w)) n) (iadd (load mid) (load w)) n))
-                            (store! i (load lo))
-                            (store! j (load mid))
-                            (loop (if (and (icmp-ge (load i) (load mid)) (icmp-ge (load j) (load hi)))
+                            (primitive/store! mid (if (primitive/icmp-lt (primitive/iadd (primitive/load lo) (primitive/load w)) n) (primitive/iadd (primitive/load lo) (primitive/load w)) n))
+                            (primitive/store! hi (if (primitive/icmp-lt (primitive/iadd (primitive/load mid) (primitive/load w)) n) (primitive/iadd (primitive/load mid) (primitive/load w)) n))
+                            (primitive/store! i (primitive/load lo))
+                            (primitive/store! j (primitive/load mid))
+                            (loop (if (and (primitive/icmp-ge (primitive/load i) (primitive/load mid)) (primitive/icmp-ge (primitive/load j) (primitive/load hi)))
                                       (break)
                                       ; take from the left run unless it is exhausted or the right key
                                       ; is strictly smaller — ties keep the left element, so this is stable
-                                      (if (if (icmp-ge (load i) (load mid))
+                                      (if (if (primitive/icmp-ge (primitive/load i) (primitive/load mid))
                                               false
-                                              (if (icmp-ge (load j) (load hi))
+                                              (if (primitive/icmp-ge (primitive/load j) (primitive/load hi))
                                                   true
                                                   (not (str-lt (al-get [(slice u8)]
                                                                        keys
-                                                                       (al-get [i64] (load cur) (load j)))
+                                                                       (al-get [i64] (primitive/load cur) (primitive/load j)))
                                                                (al-get [(slice u8)]
                                                                        keys
-                                                                       (al-get [i64] (load cur) (load i)))))))
+                                                                       (al-get [i64] (primitive/load cur) (primitive/load i)))))))
                                           (do
-                                            (al-push! (mut nxt) (al-get [i64] (load cur) (load i)))
-                                            (store! i (iadd (load i) 1)))
+                                            (al-push! (mut nxt) (al-get [i64] (primitive/load cur) (primitive/load i)))
+                                            (primitive/store! i (primitive/iadd (primitive/load i) 1)))
                                           (do
-                                            (al-push! (mut nxt) (al-get [i64] (load cur) (load j)))
-                                            (store! j (iadd (load j) 1))))))
-                            (store! lo (load hi)))))
-                (store! cur (load nxt))
-                (store! w (imul (load w) 2)))))
-    (load cur)))
+                                            (al-push! (mut nxt) (al-get [i64] (primitive/load cur) (primitive/load j)))
+                                            (primitive/store! j (primitive/iadd (primitive/load j) 1))))))
+                            (primitive/store! lo (primitive/load hi)))))
+                (primitive/store! cur (primitive/load nxt))
+                (primitive/store! w (primitive/imul (primitive/load w) 2)))))
+    (primitive/load cur)))
 (defn sort-funcs [(a (ptr Allocator)) (src (ptr (ArrayList Func)))] (-> (ptr (ArrayList Func)))
-  (let [n (al-len [Func] (load src))
+  (let [n (al-len [Func] (primitive/load src))
         (mut keys) (al-new [(slice u8)] a)
         (mut out) (al-new [Func] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
-              (do (al-push! (mut keys) (load (field (al-elem [Func] src (load i)) name))) (store! i (iadd (load i) 1)))))
-    (let [ord (sort-index-by-name a (load keys))
+              (do (al-push! (mut keys) (primitive/load (primitive/field (al-elem [Func] src (primitive/load i)) name))) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (let [ord (sort-index-by-name a (primitive/load keys))
           (mut c) 0]
-      (loop (if (icmp-ge (load c) n)
+      (loop (if (primitive/icmp-ge (primitive/load c) n)
                 (break)
                 (do
-                  (al-push! (mut out) (al-get [Func] (load src) (al-get [i64] ord (load c))))
-                  (store! c (iadd (load c) 1))))))
-    (box-al [Func] a (load out))))
+                  (al-push! (mut out) (al-get [Func] (primitive/load src) (al-get [i64] ord (primitive/load c))))
+                  (primitive/store! c (primitive/iadd (primitive/load c) 1))))))
+    (box-al [Func] a (primitive/load out))))
 (defn sort-structs [(a (ptr Allocator)) (src (ptr (ArrayList StructDef)))] (-> (ptr (ArrayList StructDef)))
-  (let [n (al-len [StructDef] (load src))
+  (let [n (al-len [StructDef] (primitive/load src))
         (mut keys) (al-new [(slice u8)] a)
         (mut out) (al-new [StructDef] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (al-push! (mut keys) (load (field (al-elem [StructDef] src (load i)) name)))
-                (store! i (iadd (load i) 1)))))
-    (let [ord (sort-index-by-name a (load keys))
+                (al-push! (mut keys) (primitive/load (primitive/field (al-elem [StructDef] src (primitive/load i)) name)))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (let [ord (sort-index-by-name a (primitive/load keys))
           (mut c) 0]
-      (loop (if (icmp-ge (load c) n)
+      (loop (if (primitive/icmp-ge (primitive/load c) n)
                 (break)
                 (do
-                  (al-push! (mut out) (al-get [StructDef] (load src) (al-get [i64] ord (load c))))
-                  (store! c (iadd (load c) 1))))))
-    (box-al [StructDef] a (load out))))
+                  (al-push! (mut out) (al-get [StructDef] (primitive/load src) (al-get [i64] ord (primitive/load c))))
+                  (primitive/store! c (primitive/iadd (primitive/load c) 1))))))
+    (box-al [StructDef] a (primitive/load out))))
 (defn sort-sums [(a (ptr Allocator)) (src (ptr (ArrayList SumDef)))] (-> (ptr (ArrayList SumDef)))
-  (let [n (al-len [SumDef] (load src))
+  (let [n (al-len [SumDef] (primitive/load src))
         (mut keys) (al-new [(slice u8)] a)
         (mut out) (al-new [SumDef] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (al-push! (mut keys) (load (field (al-elem [SumDef] src (load i)) name)))
-                (store! i (iadd (load i) 1)))))
-    (let [ord (sort-index-by-name a (load keys))
+                (al-push! (mut keys) (primitive/load (primitive/field (al-elem [SumDef] src (primitive/load i)) name)))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (let [ord (sort-index-by-name a (primitive/load keys))
           (mut c) 0]
-      (loop (if (icmp-ge (load c) n)
+      (loop (if (primitive/icmp-ge (primitive/load c) n)
                 (break)
                 (do
-                  (al-push! (mut out) (al-get [SumDef] (load src) (al-get [i64] ord (load c))))
-                  (store! c (iadd (load c) 1))))))
-    (box-al [SumDef] a (load out))))
+                  (al-push! (mut out) (al-get [SumDef] (primitive/load src) (al-get [i64] ord (primitive/load c))))
+                  (primitive/store! c (primitive/iadd (primitive/load c) 1))))))
+    (box-al [SumDef] a (primitive/load out))))
 (defn sort-mono-program [(a (ptr Allocator)) (p (ptr Program))] (-> i64)
-  (store! (field p funcs) (sort-funcs a (load (field p funcs))))
-  (store! (field p structs) (sort-structs a (load (field p structs))))
-  (store! (field p sums) (sort-sums a (load (field p sums))))
+  (primitive/store! (primitive/field p funcs) (sort-funcs a (primitive/load (primitive/field p funcs))))
+  (primitive/store! (primitive/field p structs) (sort-structs a (primitive/load (primitive/field p structs))))
+  (primitive/store! (primitive/field p sums) (sort-sums a (primitive/load (primitive/field p sums))))
   0)
 
 ; ============================ entry ========================================

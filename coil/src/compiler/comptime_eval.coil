@@ -17,8 +17,9 @@
 ; regression: aggregate comptime still folds on the interpreter). The LLVM-free seed,
 ; which never registers the hook, is byte-identical.
 (module comptime_eval)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -44,23 +45,23 @@
 
 ; box a (Result Expr Diag) on the heap so the hook can hand it back through (ptr i8).
 (defn cte-box [(a (ptr Allocator)) (r (Result Expr Diag))] (-> (ptr i8))
-  (let [p (unwrap-ptr [(Result Expr Diag)] (create [(Result Expr Diag)] a))] (store! p r) (cast (ptr i8) p)))
+  (let [p (unwrap-ptr [(Result Expr Diag)] (create [(Result Expr Diag)] a))] (primitive/store! p r) (primitive/cast (ptr i8) p)))
 
 ; classify the comptime result type: 1=int, 2=bool, 3=f64, 0=not-readable (decline).
 (defn cte-kind [(t (ptr Type))] (-> i64)
-  (match-else (load t)
+  (match-else (primitive/load t)
               (TInt [b s] 1)
               (TBool [] 2)
-              (TFloat [b] (if (icmp-eq b 64) 3 (when (icmp-eq b 32) 4)))
+              (TFloat [b] (if (primitive/icmp-eq b 64) 3 (when (primitive/icmp-eq b 32) 4)))
               (_ 0)))
 
 ; the checked static type of the comptime inner expression: the type map by nid, with a
 ; structural fallback for the intrinsic-typed leaves (sizeof/alignof/offsetof are i64).
 (defn cte-node-type [(e (ptr Expr))] (-> (Option Type))
-  (match (type-map-lookup (load (field e nid)))
+  (match (type-map-lookup (primitive/load (primitive/field e nid)))
     (Some [t] (Some t))
     (None []
-          (match-else (load (field e kind))
+          (match-else (primitive/load (primitive/field e kind))
                       (EInt [v] (Some (TInt 64 true)))
                       (EBool [b] (Some (TBool)))
                       (EFloat [bits] (Some (TFloat 64)))
@@ -73,24 +74,24 @@
 ; that itself has a comptime), reusing the interp/hook fold. On failure the whole
 ; compiled fold declines so the interpreter's original error stands.
 (defn cte-fold-closure [(sub (ptr Program)) (cx (ptr CtCtx))] (-> (Result i64 Diag))
-  (let [fs (load (field sub funcs))
-        n (al-len [Func] (load fs))
+  (let [fs (primitive/load (primitive/field sub funcs))
+        n (al-len [Func] (primitive/load fs))
         (mut i) 0
         (mut err) (None [Diag])]
-    (loop (if (or (diag-some? (load err)) (icmp-ge (load i) n))
+    (loop (if (or (diag-some? (primitive/load err)) (primitive/icmp-ge (primitive/load i) n))
               (break)
               (do
-                (match (fold-expr-list (load (field (al-elem [Func] fs (load i)) body)) cx)
-                  (Err [d] (store! err (Some d)))
+                (match (fold-expr-list (primitive/load (primitive/field (al-elem [Func] fs (primitive/load i)) body)) cx)
+                  (Err [d] (primitive/store! err (Some d)))
                   (Ok [_] 0))
-                (store! i (iadd (load i) 1)))))
-    (match (load err) (Some [d] (Err [i64 Diag] d)) (None [] (Ok [i64 Diag] 0)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (match (primitive/load err) (Some [d] (Err [i64 Diag] d)) (None [] (Ok [i64 Diag] 0)))))
 
 ; ======================= integer div/rem by zero in the COMPILED fold ==============
 ; The interpreter (comptime.coil::ct-bin-int) REFUSES a zero divisor. The compiled fold
 ; used to inherit the HARDWARE's answer instead: arm64 `sdiv` by zero yields 0 and does
-; not trap, so `(comptime (idiv (sizeof i64) 0))` folded silently to 0 — a wrong answer
-; with no diagnostic, and only because `(sizeof i64)` pushed the site onto this engine.
+; not trap, so `(comptime (primitive/idiv (primitive/sizeof i64) 0))` folded silently to 0 — a wrong answer
+; with no diagnostic, and only because `(primitive/sizeof i64)` pushed the site onto this engine.
 ;
 ; The fix INSTRUMENTS the sub-program rather than pre-evaluating anything (this engine
 ; exists precisely because the expression is beyond the interpreter, so there is nothing
@@ -111,24 +112,24 @@
   (match (cte-node-type e)
     (None [] 2)
     (Some [t]
-          (let [tp (alloc-stack Type)]
-            (store! tp t)
-            (match-else (load tp) (TInt [b s] 1) (TFloat [b] 0) (_ 2))))))
+          (let [tp (alloc/stack Type)]
+            (primitive/store! tp t)
+            (match-else (primitive/load tp) (TInt [b s] 1) (TFloat [b] 0) (_ 2))))))
 
 ; classify a div/rem NODE from its operands: 0 = float (leave it completely alone),
 ; 1 = integer (guard the divisor), 2 = indeterminate (neither operand has a recoverable
 ; type). Float is decided FIRST so that a half-known float node is never guarded.
 (defn cte-div-class [(l (ptr Expr)) (r (ptr Expr))] (-> i64)
-  (unless (or (icmp-eq (cte-operand-class r) 0) (icmp-eq (cte-operand-class l) 0))
-          (if (or (icmp-eq (cte-operand-class r) 1) (icmp-eq (cte-operand-class l) 1)) 1 2)))
+  (unless (or (primitive/icmp-eq (cte-operand-class r) 0) (primitive/icmp-eq (cte-operand-class l) 0))
+          (if (or (primitive/icmp-eq (cte-operand-class r) 1) (primitive/icmp-eq (cte-operand-class l) 1)) 1 2)))
 
 ; the integer type the guarded divisor is cast back to: the divisor's own type when it
 ; has one, else the dividend's — a CHECKED div/rem has matching operand types, and this
 ; is only reached when cte-div-class already said "integer", so one of the two resolves.
 (defn cte-div-int-ty [(l (ptr Expr)) (r (ptr Expr))] (-> (Option Type))
-  (if (icmp-eq (cte-operand-class r) 1)
+  (if (primitive/icmp-eq (cte-operand-class r) 1)
       (cte-node-type r)
-      (if (icmp-eq (cte-operand-class l) 1) (cte-node-type l) (None [Type]))))
+      (if (primitive/icmp-eq (cte-operand-class l) 1) (cte-node-type l) (None [Type]))))
 
 ; ⚠ The sub-program does NOT own its function bodies. closure-subprogram copies each
 ; Func by VALUE, but `body` is a `(ptr (ArrayList Expr))` still SHARED with the real
@@ -139,39 +140,39 @@
 ; (this also matters when the fold declines, since the site's own expression survives).
 (defstruct CtSaved [(slot (ptr Expr)) (orig Expr)])
 (defn mk-ct-saved [(slot (ptr Expr)) (orig Expr)] (-> CtSaved)
-  (let [p (alloc-stack CtSaved)] (store! (field p slot) slot) (store! (field p orig) orig) (load p)))
+  (let [p (alloc/stack CtSaved)] (primitive/store! (primitive/field p slot) slot) (primitive/store! (primitive/field p orig) orig) (primitive/load p)))
 (defn cte-restore! [(saved (ptr (ArrayList CtSaved)))] (-> i64)
-  (let [n (al-len [CtSaved] (load saved))
+  (let [n (al-len [CtSaved] (primitive/load saved))
         (mut i) n]
     ; reverse order, so a divisor that itself contained a guarded division unwinds cleanly
-    (loop (if (icmp-le (load i) 0)
+    (loop (if (primitive/icmp-le (primitive/load i) 0)
               (break)
               (do
-                (store! i (isub (load i) 1))
-                (let [sv (al-elem [CtSaved] saved (load i))]
-                  (store! (load (field sv slot)) (load (field sv orig))))))))
+                (primitive/store! i (primitive/isub (primitive/load i) 1))
+                (let [sv (al-elem [CtSaved] saved (primitive/load i))]
+                  (primitive/store! (primitive/load (primitive/field sv slot)) (primitive/load (primitive/field sv orig))))))))
   0)
 
 ; wrap ONLY the divisor, in place:
-;   (idiv lhs rhs) → (idiv lhs (cast T (coil.ct.nz (cast i64 rhs) CODE)))
+;   (primitive/idiv lhs rhs) → (primitive/idiv lhs (primitive/cast T (coil.ct.nz (primitive/cast i64 rhs) CODE)))
 ; The original rhs is MOVED into the call, so it is still evaluated EXACTLY ONCE and no
 ; side effect is duplicated — which is why there is no ELet and no copy of the rhs here.
 (defn cte-wrap-divisor! [(a (ptr Allocator)) (r (ptr Expr)) (dty Type) (code i64) (saved (ptr (ArrayList CtSaved)))] (-> i64)
-  (al-push! [CtSaved] saved (mk-ct-saved r (load r)))
-  (let [lo (load (field r lo))
-        hi (load (field r hi))
-        src (load (field r source))
-        ctxt (load (field r ctxt))
-        orig (box-expr a (load r))
+  (al-push! [CtSaved] saved (mk-ct-saved r (primitive/load r)))
+  (let [lo (primitive/load (primitive/field r lo))
+        hi (primitive/load (primitive/field r hi))
+        src (primitive/load (primitive/field r source))
+        ctxt (primitive/load (primitive/field r ctxt))
+        orig (box-expr a (primitive/load r))
         (mut args) (al-new [Expr] a)]
     (al-push! (mut args) (mk-expr (ECast (TInt 64 true) orig) lo hi src ctxt))
     (al-push! (mut args) (mk-expr (EInt code) lo hi src ctxt))
-    (store! r
+    (primitive/store! r
             (mk-expr (ECast dty
                             (box-expr a
                                       (mk-expr (ECall "coil.ct.nz"
                                                       (box-al [Type] a (al-new [Type] a))
-                                                      (box-al [Expr] a (load args)))
+                                                      (box-al [Expr] a (primitive/load args)))
                                                lo
                                                hi
                                                src
@@ -189,11 +190,11 @@
                        (es (ptr (ArrayList Expr)))
                        (bad (ptr i64))
                        (saved (ptr (ArrayList CtSaved)))] (-> i64)
-  (let [n (al-len [Expr] (load es))
+  (let [n (al-len [Expr] (primitive/load es))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
-              (do (cte-guard-expr! a (al-elem [Expr] es (load i)) bad saved) (store! i (iadd (load i) 1))))))
+              (do (cte-guard-expr! a (al-elem [Expr] es (primitive/load i)) bad saved) (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 (defn cte-guard-opt! [(a (ptr Allocator)) (o (Option (ptr Expr))) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
   (match o (Some [e] (cte-guard-expr! a e bad saved)) (None [] 0)))
@@ -201,18 +202,18 @@
                         (bs (ptr (ArrayList Bind)))
                         (bad (ptr i64))
                         (saved (ptr (ArrayList CtSaved)))] (-> i64)
-  (let [n (al-len [Bind] (load bs))
+  (let [n (al-len [Bind] (primitive/load bs))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
-              (do (cte-guard-expr! a (field (al-elem [Bind] bs (load i)) value) bad saved) (store! i (iadd (load i) 1))))))
+              (do (cte-guard-expr! a (primitive/field (al-elem [Bind] bs (primitive/load i)) value) bad saved) (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 (defn cte-guard-arms! [(a (ptr Allocator)) (as (ptr (ArrayList Arm))) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
-  (let [n (al-len [Arm] (load as))
+  (let [n (al-len [Arm] (primitive/load as))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
-              (do (cte-guard-expr! a (field (al-elem [Arm] as (load i)) body) bad saved) (store! i (iadd (load i) 1))))))
+              (do (cte-guard-expr! a (primitive/field (al-elem [Arm] as (primitive/load i)) body) bad saved) (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 ; A div/rem tagged 3/4/5/6. Children are rewritten FIRST, so the divisor this wraps has
 ; already been walked and the freshly built wrapper is never re-entered.
@@ -223,20 +224,20 @@
                       (bad (ptr i64))
                       (saved (ptr (ArrayList CtSaved)))] (-> i64)
   (let [cls (cte-div-class l r)]
-    (unless (icmp-eq cls 0)
-            (if (icmp-eq cls 2)
-                (do (store! bad 1) 0)
+    (unless (primitive/icmp-eq cls 0)
+            (if (primitive/icmp-eq cls 2)
+                (do (primitive/store! bad 1) 0)
                 (match (cte-div-int-ty l r)
-                  (None [] (do (store! bad 1) 0))
+                  (None [] (do (primitive/store! bad 1) 0))
                   ; code 1 = division by zero (idiv/udiv), 2 = remainder by zero (irem/urem).
-                  (Some [dty] (cte-wrap-divisor! a r dty (if (or (icmp-eq op 4) (icmp-eq op 6)) 2 1) saved)))))))
+                  (Some [dty] (cte-wrap-divisor! a r dty (if (or (primitive/icmp-eq op 4) (primitive/icmp-eq op 6)) 2 1) saved)))))))
 (defn cte-guard-expr! [(a (ptr Allocator)) (e (ptr Expr)) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
-  (match-else (load (field e kind))
+  (match-else (primitive/load (primitive/field e kind))
               (EBin [op l r]
                     (do
                       (cte-guard-expr! a l bad saved)
                       (cte-guard-expr! a r bad saved)
-                      (when (or (icmp-eq op 3) (or (icmp-eq op 4) (or (icmp-eq op 5) (icmp-eq op 6))))
+                      (when (or (primitive/icmp-eq op 3) (or (primitive/icmp-eq op 4) (or (primitive/icmp-eq op 5) (primitive/icmp-eq op 6))))
                             (cte-guard-bin! a op l r bad saved))))
               (ECall [func ta args] (cte-guard-list! a args bad saved))
               (EBorrow [m place] (cte-guard-expr! a place bad saved))
@@ -286,39 +287,39 @@
                    (ret Type)
                    (ps (ArrayList Param))
                    (body (ArrayList Expr))] (-> i64)
-  (let [f (alloc-stack Func)]
-    (store! (field f name) name)
-    (store! (field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-    (store! (field f bounds) (box-al [Bound] a (al-new [Bound] a)))
-    (store! (field f cc) cc)
-    (store! (field f params) (box-al [Param] a ps))
-    (store! (field f ret) ret)
-    (store! (field f body) (box-al [Expr] a body))
-    (store! (field f macro_variadic) false)
-    (store! (field f lo) -1)
-    (store! (field f hi) -1)
-    (store! (field f source) -1)
-    (store! (field f ctxt) 0)
-    (al-push! [Func] (load (field sub funcs)) (load f)))
+  (let [f (alloc/stack Func)]
+    (primitive/store! (primitive/field f name) name)
+    (primitive/store! (primitive/field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+    (primitive/store! (primitive/field f bounds) (box-al [Bound] a (al-new [Bound] a)))
+    (primitive/store! (primitive/field f cc) cc)
+    (primitive/store! (primitive/field f params) (box-al [Param] a ps))
+    (primitive/store! (primitive/field f ret) ret)
+    (primitive/store! (primitive/field f body) (box-al [Expr] a body))
+    (primitive/store! (primitive/field f macro_variadic) false)
+    (primitive/store! (primitive/field f lo) -1)
+    (primitive/store! (primitive/field f hi) -1)
+    (primitive/store! (primitive/field f source) -1)
+    (primitive/store! (primitive/field f ctxt) 0)
+    (al-push! [Func] (primitive/load (primitive/field sub funcs)) (primitive/load f)))
   0)
 (defn cte-add-guard-fns! [(a (ptr Allocator)) (sub (ptr Program))] (-> i64)
-  ; (defn coil.ct.nzcell [] (-> (ptr i64)) (alloc-static i64))
+  ; (defn coil.ct.nzcell [] (-> (ptr i64)) (alloc/static i64))
   (let [(mut body) (al-new [Expr] a)]
     (al-push! (mut body) (mk-expr (EAlloc 1 (TInt 64 true)) -1 -1 -1 0))
-    (cte-add-fn! a sub "coil.ct.nzcell" "coil" (TPtr (box-type a (TInt 64 true))) (al-new [Param] a) (load body)))
+    (cte-add-fn! a sub "coil.ct.nzcell" "coil" (TPtr (box-type a (TInt 64 true))) (al-new [Param] a) (primitive/load body)))
   ; (defn coil.ct.nz [(x i64) (code i64)] (-> i64)
-  ;   (if (icmp-eq x 0) (do (store! (coil.ct.nzcell) code) 1) x))
+  ;   (if (primitive/icmp-eq x 0) (do (primitive/store! (coil.ct.nzcell) code) 1) x))
   (let [(mut ps) (al-new [Param] a)
-        p1 (alloc-stack Param)
-        p2 (alloc-stack Param)
+        p1 (alloc/stack Param)
+        p2 (alloc/stack Param)
         (mut body) (al-new [Expr] a)
         (mut thn) (al-new [Expr] a)]
-    (store! (field p1 name) "x")
-    (store! (field p1 ty) (TInt 64 true))
-    (al-push! (mut ps) (load p1))
-    (store! (field p2 name) "code")
-    (store! (field p2 ty) (TInt 64 true))
-    (al-push! (mut ps) (load p2))
+    (primitive/store! (primitive/field p1 name) "x")
+    (primitive/store! (primitive/field p1 ty) (TInt 64 true))
+    (al-push! (mut ps) (primitive/load p1))
+    (primitive/store! (primitive/field p2 name) "code")
+    (primitive/store! (primitive/field p2 ty) (TInt 64 true))
+    (al-push! (mut ps) (primitive/load p2))
     (al-push! (mut thn)
               (mk-expr (EStore (box-expr a (cte-nzcell-call a)) (box-expr a (mk-expr (EVar "code") -1 -1 -1 0)))
                        -1
@@ -335,16 +336,16 @@
                                                -1
                                                -1
                                                0))
-                            (box-expr a (mk-expr (EDo (box-al [Expr] a (load thn))) -1 -1 -1 0))
+                            (box-expr a (mk-expr (EDo (box-al [Expr] a (primitive/load thn))) -1 -1 -1 0))
                             (box-expr a (mk-expr (EVar "x") -1 -1 -1 0)))
                        -1
                        -1
                        -1
                        0))
-    (cte-add-fn! a sub "coil.ct.nz" "coil" (TInt 64 true) (load ps) (load body)))
+    (cte-add-fn! a sub "coil.ct.nz" "coil" (TInt 64 true) (primitive/load ps) (primitive/load body)))
   ; (defn coil.ct.status [] (-> i64)
-  ;   (if (icmp-eq (load (coil.ct.nzcell)) 1) (do (store! (coil.ct.nzcell) 0) 1)
-  ;   (if (icmp-eq (load (coil.ct.nzcell)) 2) (do (store! (coil.ct.nzcell) 0) 2) 0)))
+  ;   (if (primitive/icmp-eq (primitive/load (coil.ct.nzcell)) 1) (do (primitive/store! (coil.ct.nzcell) 0) 1)
+  ;   (if (primitive/icmp-eq (primitive/load (coil.ct.nzcell)) 2) (do (primitive/store! (coil.ct.nzcell) 0) 2) 0)))
   (let [(mut body) (al-new [Expr] a)
         (mut t1) (al-new [Expr] a)
         (mut t2) (al-new [Expr] a)]
@@ -368,7 +369,7 @@
                                                -1
                                                -1
                                                0))
-                            (box-expr a (mk-expr (EDo (box-al [Expr] a (load t1))) -1 -1 -1 0))
+                            (box-expr a (mk-expr (EDo (box-al [Expr] a (primitive/load t1))) -1 -1 -1 0))
                             (box-expr a
                                       (mk-expr (EIf (box-expr a
                                                               (mk-expr (ECmp 4
@@ -384,7 +385,7 @@
                                                                        -1
                                                                        -1
                                                                        0))
-                                                    (box-expr a (mk-expr (EDo (box-al [Expr] a (load t2))) -1 -1 -1 0))
+                                                    (box-expr a (mk-expr (EDo (box-al [Expr] a (primitive/load t2))) -1 -1 -1 0))
                                                     (box-expr a (mk-expr (EInt 0) -1 -1 -1 0)))
                                                -1
                                                -1
@@ -394,76 +395,76 @@
                        -1
                        -1
                        0))
-    (cte-add-fn! a sub "coil.ct.status" "c" (TInt 64 true) (al-new [Param] a) (load body)))
-  (let [e (alloc-stack ExportC)]
-    (store! (field e name) "coil.ct.status")
-    (store! (field e symbol) (Some "coil_ct_status"))
-    (store! (field e params) (box-al [Type] a (al-new [Type] a)))
-    (store! (field e lo) -1)
-    (store! (field e hi) -1)
-    (store! (field e source) -1)
-    (store! (field e ctxt) 0)
-    (al-push! [ExportC] (load (field sub exports)) (load e)))
+    (cte-add-fn! a sub "coil.ct.status" "c" (TInt 64 true) (al-new [Param] a) (primitive/load body)))
+  (let [e (alloc/stack ExportC)]
+    (primitive/store! (primitive/field e name) "coil.ct.status")
+    (primitive/store! (primitive/field e symbol) (Some "coil_ct_status"))
+    (primitive/store! (primitive/field e params) (box-al [Type] a (al-new [Type] a)))
+    (primitive/store! (primitive/field e lo) -1)
+    (primitive/store! (primitive/field e hi) -1)
+    (primitive/store! (primitive/field e source) -1)
+    (primitive/store! (primitive/field e ctxt) 0)
+    (al-push! [ExportC] (primitive/load (primitive/field sub exports)) (primitive/load e)))
   0)
 
 ; instrument the WHOLE sub-program: a division inside a callee is just as fatal as one in
 ; the thunk, and the engine runs the entire call graph. Returns 0 on success, 1 when some
 ; div/rem was indeterminate and the caller must decline.
 (defn cte-guard-divzero! [(a (ptr Allocator)) (sub (ptr Program)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
-  (let [bad (alloc-stack i64)]
-    (store! bad 0)
-    (let [fs (load (field sub funcs))
-          n (al-len [Func] (load fs))
+  (let [bad (alloc/stack i64)]
+    (primitive/store! bad 0)
+    (let [fs (primitive/load (primitive/field sub funcs))
+          n (al-len [Func] (primitive/load fs))
           (mut i) 0]
-      (loop (if (icmp-ge (load i) n)
+      (loop (if (primitive/icmp-ge (primitive/load i) n)
                 (break)
                 (do
-                  (cte-guard-list! a (load (field (al-elem [Func] fs (load i)) body)) bad saved)
-                  (store! i (iadd (load i) 1))))))
-    (if (icmp-eq (load bad) 0) (do (cte-add-guard-fns! a sub) 0) 1)))
+                  (cte-guard-list! a (primitive/load (primitive/field (al-elem [Func] fs (primitive/load i)) body)) bad saved)
+                  (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
+    (if (primitive/icmp-eq (primitive/load bad) 0) (do (cte-add-guard-fns! a sub) 0) 1)))
 
 ; append (defn coil.ct.thunk [] (-> T) E) to the sub-program's funcs and export it as
 ; the C symbol `coil_ct_thunk` (a zero-param scalar return needs no C-ABI thunk).
 (defn cte-add-entry [(a (ptr Allocator)) (sub (ptr Program)) (inner (ptr Expr)) (rty Type)] (-> i64)
-  (let [f (alloc-stack Func)
+  (let [f (alloc/stack Func)
         (mut body) (al-new [Expr] a)]
-    (al-push! (mut body) (load inner))
-    (store! (field f name) "coil.ct.thunk")
-    (store! (field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-    (store! (field f bounds) (box-al [Bound] a (al-new [Bound] a)))
-    (store! (field f cc) "c")
-    (store! (field f params) (box-al [Param] a (al-new [Param] a)))
-    (store! (field f ret) rty)
-    (store! (field f body) (box-al [Expr] a (load body)))
-    (store! (field f macro_variadic) false)
-    (store! (field f lo) -1)
-    (store! (field f hi) -1)
-    (store! (field f source) -1)
-    (store! (field f ctxt) 0)
-    (al-push! [Func] (load (field sub funcs)) (load f)))
-  (let [e (alloc-stack ExportC)]
-    (store! (field e name) "coil.ct.thunk")
-    (store! (field e symbol) (Some "coil_ct_thunk"))
-    (store! (field e params) (box-al [Type] a (al-new [Type] a)))
-    (store! (field e lo) -1)
-    (store! (field e hi) -1)
-    (store! (field e source) -1)
-    (store! (field e ctxt) 0)
-    (al-push! [ExportC] (load (field sub exports)) (load e)))
+    (al-push! (mut body) (primitive/load inner))
+    (primitive/store! (primitive/field f name) "coil.ct.thunk")
+    (primitive/store! (primitive/field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+    (primitive/store! (primitive/field f bounds) (box-al [Bound] a (al-new [Bound] a)))
+    (primitive/store! (primitive/field f cc) "c")
+    (primitive/store! (primitive/field f params) (box-al [Param] a (al-new [Param] a)))
+    (primitive/store! (primitive/field f ret) rty)
+    (primitive/store! (primitive/field f body) (box-al [Expr] a (primitive/load body)))
+    (primitive/store! (primitive/field f macro_variadic) false)
+    (primitive/store! (primitive/field f lo) -1)
+    (primitive/store! (primitive/field f hi) -1)
+    (primitive/store! (primitive/field f source) -1)
+    (primitive/store! (primitive/field f ctxt) 0)
+    (al-push! [Func] (primitive/load (primitive/field sub funcs)) (primitive/load f)))
+  (let [e (alloc/stack ExportC)]
+    (primitive/store! (primitive/field e name) "coil.ct.thunk")
+    (primitive/store! (primitive/field e symbol) (Some "coil_ct_thunk"))
+    (primitive/store! (primitive/field e params) (box-al [Type] a (al-new [Type] a)))
+    (primitive/store! (primitive/field e lo) -1)
+    (primitive/store! (primitive/field e hi) -1)
+    (primitive/store! (primitive/field e source) -1)
+    (primitive/store! (primitive/field e ctxt) 0)
+    (al-push! [ExportC] (primitive/load (primitive/field sub exports)) (primitive/load e)))
   0)
 
 ; run the compiled entry and read the scalar out of the return register.
 (defn cte-invoke [(fp (ptr i8)) (kind i64) (tp (ptr Type))] (-> CtVal)
-  (if (icmp-eq kind 4)
+  (if (primitive/icmp-eq kind 4)
       ; f32 comes back in the low half of the FP return register. Widening to f64 is
       ; exact, and the literal is re-typed f32 by the site's own checked type.
-      (CFloat (cast f64 (call-ptr (cast (fnptr c [] f32) fp))))
-      (if (icmp-eq kind 3)
-          (CFloat (call-ptr (cast (fnptr c [] f64) fp)))
-          (let [n (call-ptr (cast (fnptr c [] i64) fp))]
-            (if (icmp-eq kind 2)
-                (CBool (icmp-ne n 0))
-                (match-else (load tp)
+      (CFloat (primitive/cast f64 (primitive/call-ptr (primitive/cast (fnptr c [] f32) fp))))
+      (if (primitive/icmp-eq kind 3)
+          (CFloat (primitive/call-ptr (primitive/cast (fnptr c [] f64) fp)))
+          (let [n (primitive/call-ptr (primitive/cast (fnptr c [] i64) fp))]
+            (if (primitive/icmp-eq kind 2)
+                (CBool (primitive/icmp-ne n 0))
+                (match-else (primitive/load tp)
                             (TInt [b s] (CInt (trunc n b s)))
                             (_ (CInt n))))))))
 
@@ -473,7 +474,7 @@
 (defn cte-build-dylib [(a (ptr Allocator)) (sub (ptr Program))] (-> (Result (ptr i8) Diag))
   (try (do
          (let [bb (meta-build-box)]
-           (when (icmp-eq (load (field bb isset)) 0)
+           (when (primitive/icmp-eq (primitive/load (primitive/field bb isset)) 0)
                  (break :try
                         (Err [(ptr i8) Diag]
                              (derr "comptime: this compiler build has no backend object builder to compile comptime expressions"))))
@@ -482,19 +483,19 @@
              (let [id (me-unique a)
                    obj-s (sconcat3 a "/tmp/coil-ct-" id ".o")
                    tmp-s (sconcat3 a "/tmp/coil-ct-" id (me-dylib-ext))]
-               (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
+               (primitive/call-ptr (primitive/load (primitive/field bb fp)) a mp (slice->cstr a obj-s))
                (let [cmd
                        (sconcat a
                                 (sconcat a
                                          (sconcat3 a (me-dylib-link-cmd) obj-s " -o ")
                                          (sconcat a tmp-s (me-dylib-undef-flag)))
                                 (me-link-flags-str a))]
-                 (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
+                 (if (primitive/icmp-ne (primitive/cast i64 (system (slice->cstr a cmd))) 0)
                      (Err [(ptr i8) Diag] (derr "comptime: linking the compiled comptime dylib failed"))
                      (do
                        (unlink (slice->cstr a obj-s))
                        (let [h (dlopen (slice->cstr a tmp-s) 2)]
-                         (if (icmp-eq (cast i64 h) 0)
+                         (if (primitive/icmp-eq (primitive/cast i64 h) 0)
                              (Err [(ptr i8) Diag] (derr "comptime: dlopen of the compiled comptime dylib failed"))
                              ; the image stays mapped for the life of the process, so the file
                              ; itself is dead weight — drop it rather than litter /tmp with one
@@ -519,21 +520,21 @@
 ; status reader the guard pass exported alongside it.
 (defstruct CtEntry [(thunk (ptr i8)) (status (ptr i8))])
 (defn mk-ct-entry [(t (ptr i8)) (s (ptr i8))] (-> CtEntry)
-  (let [p (alloc-stack CtEntry)] (store! (field p thunk) t) (store! (field p status) s) (load p)))
+  (let [p (alloc/stack CtEntry)] (primitive/store! (primitive/field p thunk) t) (primitive/store! (primitive/field p status) s) (primitive/load p)))
 
 (defn cte-entry [(a (ptr Allocator)) (sub (ptr Program))] (-> (Result CtEntry Diag))
   (if (meta-mobj-available?)
       (try (do
              (let [mp (try! (monomorphize a sub))]
                (sort-mono-program a mp)
-               (let [(mut o) (call-ptr (load (field (meta-mobj-box) fp)) a mp)]
+               (let [(mut o) (primitive/call-ptr (primitive/load (primitive/field (meta-mobj-box) fp)) a mp)]
                  (match (jit-load a (mut o))
                    (Err [m] (Err [CtEntry Diag] (derr m)))
                    (Ok [img0]
-                       (let [img (alloc-stack JitImage)]
-                         (store! img img0)
+                       (let [img (alloc/stack JitImage)]
+                         (primitive/store! img img0)
                          (let [fp (jit-lookup img "coil_ct_thunk")]
-                           (if (icmp-eq (cast i64 fp) 0)
+                           (if (primitive/icmp-eq (primitive/cast i64 fp) 0)
                                (Err [CtEntry Diag]
                                     (derr "comptime: compiled entry missing from the in-memory image (compiler bug)"))
                                (Ok [CtEntry Diag] (mk-ct-entry fp (jit-lookup img "coil_ct_status"))))))))))))
@@ -541,7 +542,7 @@
         (Err [d] (Err [CtEntry Diag] d))
         (Ok [h]
             (let [fp (dlsym h (slice->cstr a "coil_ct_thunk"))]
-              (if (icmp-eq (cast i64 fp) 0)
+              (if (primitive/icmp-eq (primitive/cast i64 fp) 0)
                   (Err [CtEntry Diag]
                        (derr "comptime: compiled entry missing from the metaprogram dylib (compiler bug)"))
                   (Ok [CtEntry Diag] (mk-ct-entry fp (dlsym h (slice->cstr a "coil_ct_status"))))))))))
@@ -550,8 +551,8 @@
 ; remainder by zero. A missing symbol means the guard pass declined to instrument this
 ; sub-program, which only happens when it contains no integer div/rem at all.
 (defn cte-status-of [(en (ptr CtEntry))] (-> i64)
-  (let [sp (load (field en status))]
-    (unless (icmp-eq (cast i64 sp) 0) (call-ptr (cast (fnptr c [] i64) sp)))))
+  (let [sp (primitive/load (primitive/field en status))]
+    (unless (primitive/icmp-eq (primitive/cast i64 sp) 0) (primitive/call-ptr (primitive/cast (fnptr c [] i64) sp)))))
 
 ; ============================ WASM comptime fold path ============================
 ; When the compiler is hosted in wasm it cannot mmap-JIT or dlopen the fold thunk.
@@ -561,14 +562,14 @@
 ; coil_ct_thunk. The host writes the scalar result bits into `cell` and returns the
 ; div-by-zero status; we rebuild the CtVal from the cell exactly as cte-invoke would.
 (defn cte-cell->ctval [(cell (ptr i8)) (kind i64) (tp (ptr Type))] (-> CtVal)
-  (if (or (icmp-eq kind 4)
+  (if (or (primitive/icmp-eq kind 4)
           ; f32 widened to f64 by the host
-          (icmp-eq kind 3))
-      (CFloat (load (cast (ptr f64) cell)))
-      (let [n (load (cast (ptr i64) cell))]
-        (if (icmp-eq kind 2)
-            (CBool (icmp-ne n 0))
-            (match-else (load tp)
+          (primitive/icmp-eq kind 3))
+      (CFloat (primitive/load (primitive/cast (ptr f64) cell)))
+      (let [n (primitive/load (primitive/cast (ptr i64) cell))]
+        (if (primitive/icmp-eq kind 2)
+            (CBool (primitive/icmp-ne n 0))
+            (match-else (primitive/load tp)
                         (TInt [b s] (CInt (trunc n b s)))
                         (_ (CInt n)))))))
 
@@ -583,23 +584,23 @@
     (Ok [mp]
         (do
           (sort-mono-program a mp)
-          (let [bytes (call-ptr (load (field (meta-wasm-box) build)) a mp)
-                cell (alloc-stack (array i8 8))
+          (let [bytes (primitive/call-ptr (primitive/load (primitive/field (meta-wasm-box) build)) a mp)
+                cell (alloc/stack (array i8 8))
                 st
-                  (call-ptr (load (field (meta-wasm-box) run-ct))
+                  (primitive/call-ptr (primitive/load (primitive/field (meta-wasm-box) run-ct))
                             (slice-data bytes)
                             (slice-len bytes)
                             (slice->cstr a "coil_ct_thunk")
                             (slice->cstr a "coil_ct_status")
                             kind
-                            (cast (ptr i8) cell))]
-            (if (icmp-ne st 0)
-                (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
-                (let [cv (cte-cell->ctval (cast (ptr i8) cell) kind tp)
-                      lo (load (field inner lo))
-                      hi (load (field inner hi))
-                      src (load (field inner source))
-                      ctxt (load (field inner ctxt))]
+                            (primitive/cast (ptr i8) cell))]
+            (if (primitive/icmp-ne st 0)
+                (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (primitive/icmp-eq st 2)))))
+                (let [cv (cte-cell->ctval (primitive/cast (ptr i8) cell) kind tp)
+                      lo (primitive/load (primitive/field inner lo))
+                      hi (primitive/load (primitive/field inner hi))
+                      src (primitive/load (primitive/field inner source))
+                      ctxt (primitive/load (primitive/field inner ctxt))]
                   (match (build-value a (new-cell cv) lo hi src ctxt cx)
                     (Err [d] (cte-box a (Err [Expr Diag] d)))
                     (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
@@ -610,31 +611,31 @@
     (Ok [mp]
         (do
           (sort-mono-program a mp)
-          (let [tp (alloc-stack Type)]
-            (store! tp t0)
-            (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
+          (let [tp (alloc/stack Type)]
+            (primitive/store! tp t0)
+            (match (raw-alloc a (primitive/iadd (cte-ty-size cx tp) 64) 16)
               (None []
                     (cte-box a
                              (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
               (Some [buf]
-                    (let [bytes (call-ptr (load (field (meta-wasm-box) build)) a mp)
+                    (let [bytes (primitive/call-ptr (primitive/load (primitive/field (meta-wasm-box) build)) a mp)
                           st
-                            (call-ptr (load (field (meta-wasm-box) run-ct))
+                            (primitive/call-ptr (primitive/load (primitive/field (meta-wasm-box) run-ct))
                                       (slice-data bytes)
                                       (slice-len bytes)
                                       (slice->cstr a "coil_ct_thunk")
                                       (slice->cstr a "coil_ct_status")
                                       0
                                       buf)]
-                      (if (icmp-ne st 0)
-                          (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+                      (if (primitive/icmp-ne st 0)
+                          (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (primitive/icmp-eq st 2)))))
                           (match (cte-read cx tp buf 0 a)
-                            (None [] (cast (ptr i8) 0))
+                            (None [] (primitive/cast (ptr i8) 0))
                             (Some [cv]
-                                  (let [lo (load (field inner lo))
-                                        hi (load (field inner hi))
-                                        src (load (field inner source))
-                                        ctxt (load (field inner ctxt))]
+                                  (let [lo (primitive/load (primitive/field inner lo))
+                                        hi (primitive/load (primitive/field inner hi))
+                                        src (primitive/load (primitive/field inner source))
+                                        ctxt (primitive/load (primitive/field inner ctxt))]
                                     (match (build-value a (new-cell cv) lo hi src ctxt cx)
                                       (Err [d] (cte-box a (Err [Expr Diag] d)))
                                       (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))
@@ -656,16 +657,16 @@
     (Ok [mp]
         (do
           (sort-mono-program a mp)
-          (let [icx (call-ptr (load (field (meta-interp-box) build)) a mp)
-                cell (alloc-stack (array i8 8))
-                st (call-ptr (load (field (meta-interp-box) run-ct)) icx kind (cast (ptr i8) cell))]
-            (if (icmp-ne st 0)
-                (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
-                (let [cv (cte-cell->ctval (cast (ptr i8) cell) kind tp)
-                      lo (load (field inner lo))
-                      hi (load (field inner hi))
-                      src (load (field inner source))
-                      ctxt (load (field inner ctxt))]
+          (let [icx (primitive/call-ptr (primitive/load (primitive/field (meta-interp-box) build)) a mp)
+                cell (alloc/stack (array i8 8))
+                st (primitive/call-ptr (primitive/load (primitive/field (meta-interp-box) run-ct)) icx kind (primitive/cast (ptr i8) cell))]
+            (if (primitive/icmp-ne st 0)
+                (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (primitive/icmp-eq st 2)))))
+                (let [cv (cte-cell->ctval (primitive/cast (ptr i8) cell) kind tp)
+                      lo (primitive/load (primitive/field inner lo))
+                      hi (primitive/load (primitive/field inner hi))
+                      src (primitive/load (primitive/field inner source))
+                      ctxt (primitive/load (primitive/field inner ctxt))]
                   (match (build-value a (new-cell cv) lo hi src ctxt cx)
                     (Err [d] (cte-box a (Err [Expr Diag] d)))
                     (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
@@ -676,24 +677,24 @@
     (Ok [mp]
         (do
           (sort-mono-program a mp)
-          (let [tp (alloc-stack Type)]
-            (store! tp t0)
-            (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
+          (let [tp (alloc/stack Type)]
+            (primitive/store! tp t0)
+            (match (raw-alloc a (primitive/iadd (cte-ty-size cx tp) 64) 16)
               (None []
                     (cte-box a
                              (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
               (Some [buf]
-                    (let [icx (call-ptr (load (field (meta-interp-box) build)) a mp)
-                          st (call-ptr (load (field (meta-interp-box) run-ct)) icx 0 buf)]
-                      (if (icmp-ne st 0)
-                          (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+                    (let [icx (primitive/call-ptr (primitive/load (primitive/field (meta-interp-box) build)) a mp)
+                          st (primitive/call-ptr (primitive/load (primitive/field (meta-interp-box) run-ct)) icx 0 buf)]
+                      (if (primitive/icmp-ne st 0)
+                          (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (primitive/icmp-eq st 2)))))
                           (match (cte-read cx tp buf 0 a)
-                            (None [] (cast (ptr i8) 0))
+                            (None [] (primitive/cast (ptr i8) 0))
                             (Some [cv]
-                                  (let [lo (load (field inner lo))
-                                        hi (load (field inner hi))
-                                        src (load (field inner source))
-                                        ctxt (load (field inner ctxt))]
+                                  (let [lo (primitive/load (primitive/field inner lo))
+                                        hi (primitive/load (primitive/field inner hi))
+                                        src (primitive/load (primitive/field inner source))
+                                        ctxt (primitive/load (primitive/field inner ctxt))]
                                     (match (build-value a (new-cell cv) lo hi src ctxt cx)
                                       (Err [d] (cte-box a (Err [Expr Diag] d)))
                                       (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))
@@ -707,18 +708,18 @@
           (match (cte-entry a sub)
             (Err [d] (cte-box a (Err [Expr Diag] d)))
             (Ok [en0]
-                (let [en (alloc-stack CtEntry)]
-                  (store! en en0)
-                  (let [lo (load (field inner lo))
-                        hi (load (field inner hi))
-                        src (load (field inner source))
-                        ctxt (load (field inner ctxt))
-                        cv (cte-invoke (load (field en thunk)) kind tp)
+                (let [en (alloc/stack CtEntry)]
+                  (primitive/store! en en0)
+                  (let [lo (primitive/load (primitive/field inner lo))
+                        hi (primitive/load (primitive/field inner hi))
+                        src (primitive/load (primitive/field inner source))
+                        ctxt (primitive/load (primitive/field inner ctxt))
+                        cv (cte-invoke (primitive/load (primitive/field en thunk)) kind tp)
                         st (cte-status-of en)]
                     ; a zero divisor makes the computed value meaningless — DISCARD it and answer
                     ; with exactly the interpreter's wording (comptime.coil::ct-divzero-msg).
-                    (if (icmp-ne st 0)
-                        (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+                    (if (primitive/icmp-ne st 0)
+                        (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (primitive/icmp-eq st 2)))))
                         (match (build-value a (new-cell cv) lo hi src ctxt cx)
                           (Err [d] (cte-box a (Err [Expr Diag] d)))
                           (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))
@@ -737,7 +738,7 @@
 ; "isn't supported yet" error stands, so nothing that folds today regresses).
 
 (defn cte-align8 [(x i64)] (-> i64)
-  (imul (idiv (iadd x 7) 8) 8))
+  (primitive/imul (primitive/idiv (primitive/iadd x 7) 8) 8))
 
 ; CONSERVATIVE payload sizing, mirroring codegen.coil::type-bytes and
 ; codegen_a64.coil::g-type-bytes exactly. This is deliberately NOT cte-ty-size.
@@ -745,67 +746,67 @@
 ; accumulation, while the offsets of the fields INSIDE that payload are natural.
 ; The two disagree the moment a variant carries a struct, so the reader needs both.
 (defn cte-tb [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
-  (match-else (load t)
-              (TInt [b s] (idiv (iadd b 7) 8))
-              (TFloat [b] (idiv b 8))
+  (match-else (primitive/load t)
+              (TInt [b s] (primitive/idiv (primitive/iadd b 7) 8))
+              (TFloat [b] (primitive/idiv b 8))
               (TBool [] 1)
               (TPtr [i] 8)
               (TRef [m i] 8)
               (TFn [c p r] 8)
               (TSlice [el] 16)
-              (TArray [el n] (imul (cte-tb cx el) n))
+              (TArray [el n] (primitive/imul (cte-tb cx el) n))
               (TStruct [nm]
                        (let [sd (ct-struct-find cx nm)]
-                         (if (icmp-ne (cast i64 sd) 0)
-                             (let [fs (load (field sd fields))
-                                   n (al-len [Field] (load fs))
+                         (if (primitive/icmp-ne (primitive/cast i64 sd) 0)
+                             (let [fs (primitive/load (primitive/field sd fields))
+                                   n (al-len [Field] (primitive/load fs))
                                    (mut i) 0
                                    (mut tot) 0]
-                               (loop (if (icmp-ge (load i) n)
+                               (loop (if (primitive/icmp-ge (primitive/load i) n)
                                          (break)
                                          (do
-                                           (store! tot
-                                                   (iadd (load tot)
+                                           (primitive/store! tot
+                                                   (primitive/iadd (primitive/load tot)
                                                          (cte-align8 (cte-tb cx
-                                                                             (field (al-elem [Field] fs (load i)) ty)))))
-                                           (store! i (iadd (load i) 1)))))
-                               (load tot))
+                                                                             (primitive/field (al-elem [Field] fs (primitive/load i)) ty)))))
+                                           (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+                               (primitive/load tot))
                              (let [ud (ct-sum-find cx nm)]
-                               (if (icmp-eq (cast i64 ud) 0)
+                               (if (primitive/icmp-eq (primitive/cast i64 ud) 0)
                                    8
-                                   (iadd 8 (imul 8 (cte-sum-words cx ud))))))))
+                                   (primitive/iadd 8 (primitive/imul 8 (cte-sum-words cx ud))))))))
               (_ 8)))
 ; payload words: max over variants of the conservative per-field accumulation.
 (defn cte-sum-words [(cx (ptr CtCtx)) (ud (ptr SumDef))] (-> i64)
-  (let [vs (load (field ud variants))
-        nv (al-len [Variant] (load vs))
+  (let [vs (primitive/load (primitive/field ud variants))
+        nv (al-len [Variant] (primitive/load vs))
         (mut i) 0
         (mut maxb) 0]
-    (loop (if (icmp-ge (load i) nv)
+    (loop (if (primitive/icmp-ge (primitive/load i) nv)
               (break)
               (do
-                (let [vp (al-elem [Variant] vs (load i))
-                      fs (load (field vp fields))
-                      nf (al-len [Field] (load fs))
+                (let [vp (al-elem [Variant] vs (primitive/load i))
+                      fs (primitive/load (primitive/field vp fields))
+                      nf (al-len [Field] (primitive/load fs))
                       (mut j) 0
                       (mut acc) 0]
-                  (loop (if (icmp-ge (load j) nf)
+                  (loop (if (primitive/icmp-ge (primitive/load j) nf)
                             (break)
                             (do
-                              (store! acc
-                                      (iadd (load acc)
-                                            (cte-align8 (cte-tb cx (field (al-elem [Field] fs (load j)) ty)))))
-                              (store! j (iadd (load j) 1)))))
-                  (when (icmp-gt (load acc) (load maxb)) (store! maxb (load acc))))
-                (store! i (iadd (load i) 1)))))
-    (idiv (load maxb) 8)))
+                              (primitive/store! acc
+                                      (primitive/iadd (primitive/load acc)
+                                            (cte-align8 (cte-tb cx (primitive/field (al-elem [Field] fs (primitive/load j)) ty)))))
+                              (primitive/store! j (primitive/iadd (primitive/load j) 1)))))
+                  (when (primitive/icmp-gt (primitive/load acc) (primitive/load maxb)) (primitive/store! maxb (primitive/load acc))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/idiv (primitive/load maxb) 8)))
 
 ; natural alignment of `t` (the C ABI: TInt 1/2/4/8, everything pointer-shaped 8, a
 ; struct = its widest field). Only ever reached for a cte-readable? type.
 (defn cte-ty-align [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
-  (match-else (load t)
-              (TInt [b s] (cond (icmp-le b 8) 1 (icmp-le b 16) 2 (icmp-le b 32) 4 :else 8))
-              (TFloat [b] (idiv b 8))
+  (match-else (primitive/load t)
+              (TInt [b s] (cond (primitive/icmp-le b 8) 1 (primitive/icmp-le b 16) 2 (primitive/icmp-le b 32) 4 :else 8))
+              (TFloat [b] (primitive/idiv b 8))
               (TBool [] 1)
               (TPtr [i] 8)
               (TRef [m i] 8)
@@ -814,201 +815,201 @@
               (TSlice [el] 8)
               (TStruct [nm]
                        (let [sd (ct-struct-find cx nm)]
-                         (if (icmp-eq (cast i64 sd) 0)
+                         (if (primitive/icmp-eq (primitive/cast i64 sd) 0)
                              8  ; a sum (or unknown) is 8-aligned
-                             (let [fs (load (field sd fields))
-                                   n (al-len [Field] (load fs))
+                             (let [fs (primitive/load (primitive/field sd fields))
+                                   n (al-len [Field] (primitive/load fs))
                                    (mut i) 0
                                    (mut mx) 1]
-                               (loop (if (icmp-ge (load i) n)
+                               (loop (if (primitive/icmp-ge (primitive/load i) n)
                                          (break)
                                          (do
-                                           (let [al (cte-ty-align cx (field (al-elem [Field] fs (load i)) ty))]
-                                             (when (icmp-gt al (load mx)) (store! mx al)))
-                                           (store! i (iadd (load i) 1)))))
-                               (load mx)))))
+                                           (let [al (cte-ty-align cx (primitive/field (al-elem [Field] fs (primitive/load i)) ty))]
+                                             (when (primitive/icmp-gt al (primitive/load mx)) (primitive/store! mx al)))
+                                           (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+                               (primitive/load mx)))))
               (_ 8)))
 ; natural byte size of `t`, and the struct-size rounding (align8-of-widest). Mirrors
 ; g-natural-layout! / ty-size exactly.
 (defn cte-struct-size [(cx (ptr CtCtx)) (sd (ptr StructDef))] (-> i64)
-  (let [fs (load (field sd fields))
-        n (al-len [Field] (load fs))
+  (let [fs (primitive/load (primitive/field sd fields))
+        n (al-len [Field] (primitive/load fs))
         (mut off) 0
         (mut maxal) 1
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [fty (field (al-elem [Field] fs (load i)) ty)
+                (let [fty (primitive/field (al-elem [Field] fs (primitive/load i)) ty)
                       al (cte-ty-align cx fty)]
-                  (when (icmp-gt al (load maxal)) (store! maxal al))
-                  (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
-                  (store! off (iadd (load off) (cte-ty-size cx fty))))
-                (store! i (iadd (load i) 1)))))
-    (imul (idiv (iadd (load off) (isub (load maxal) 1)) (load maxal)) (load maxal))))
+                  (when (primitive/icmp-gt al (primitive/load maxal)) (primitive/store! maxal al))
+                  (primitive/store! off (primitive/imul (primitive/idiv (primitive/iadd (primitive/load off) (primitive/isub al 1)) al) al))
+                  (primitive/store! off (primitive/iadd (primitive/load off) (cte-ty-size cx fty))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/imul (primitive/idiv (primitive/iadd (primitive/load off) (primitive/isub (primitive/load maxal) 1)) (primitive/load maxal)) (primitive/load maxal))))
 (defn cte-ty-size [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
-  (match-else (load t)
-              (TInt [b s] (cond (icmp-le b 8) 1 (icmp-le b 16) 2 (icmp-le b 32) 4 :else 8))
-              (TFloat [b] (idiv b 8))
+  (match-else (primitive/load t)
+              (TInt [b s] (cond (primitive/icmp-le b 8) 1 (primitive/icmp-le b 16) 2 (primitive/icmp-le b 32) 4 :else 8))
+              (TFloat [b] (primitive/idiv b 8))
               (TBool [] 1)
               (TPtr [i] 8)
               (TRef [m i] 8)
               (TFn [c p r] 8)
-              (TArray [el n] (imul (cte-ty-size cx el) n))
+              (TArray [el n] (primitive/imul (cte-ty-size cx el) n))
               (TSlice [el] 16)
               (TStruct [nm]
                        (let [sd (ct-struct-find cx nm)]
-                         (if (icmp-ne (cast i64 sd) 0)
+                         (if (primitive/icmp-ne (primitive/cast i64 sd) 0)
                              (cte-struct-size cx sd)
                              (let [ud (ct-sum-find cx nm)]
                                ; {tag, [words x i64]} — the tag occupies a whole 8-byte slot
-                               (if (icmp-eq (cast i64 ud) 0) 8 (iadd 8 (imul 8 (cte-sum-words cx ud))))))))
+                               (if (primitive/icmp-eq (primitive/cast i64 ud) 0) 8 (primitive/iadd 8 (primitive/imul 8 (cte-sum-words cx ud))))))))
               (_ 8)))
 ; byte offset of field `fi` within struct `sd`, honouring the declared layout.
 ; LC/LAligned mirror g-natural-off; LPacked is the same walk with the alignment
 ; step removed; LExplicit reads the offsets it was given.
 (defn cte-field-off [(cx (ptr CtCtx)) (sd (ptr StructDef)) (fi i64)] (-> i64)
-  (match-else (load (field sd layout))
-              (LExplicit [offs size align] (al-get [i64] (load offs) fi))
+  (match-else (primitive/load (primitive/field sd layout))
+              (LExplicit [offs size align] (al-get [i64] (primitive/load offs) fi))
               (LPacked []
-                       (let [fs (load (field sd fields))
+                       (let [fs (primitive/load (primitive/field sd fields))
                              (mut off) 0
                              (mut i) 0
                              (mut res) 0]
-                         (loop (if (icmp-gt (load i) fi)
+                         (loop (if (primitive/icmp-gt (primitive/load i) fi)
                                    (break)
                                    (do
-                                     (when (icmp-eq (load i) fi) (store! res (load off)))
-                                     (store! off
-                                             (iadd (load off) (cte-ty-size cx (field (al-elem [Field] fs (load i)) ty))))
-                                     (store! i (iadd (load i) 1)))))
-                         (load res)))
-              (_ (let [fs (load (field sd fields))
+                                     (when (primitive/icmp-eq (primitive/load i) fi) (primitive/store! res (primitive/load off)))
+                                     (primitive/store! off
+                                             (primitive/iadd (primitive/load off) (cte-ty-size cx (primitive/field (al-elem [Field] fs (primitive/load i)) ty))))
+                                     (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+                         (primitive/load res)))
+              (_ (let [fs (primitive/load (primitive/field sd fields))
                        (mut off) 0
                        (mut i) 0
                        (mut res) 0]
-                   (loop (if (icmp-gt (load i) fi)
+                   (loop (if (primitive/icmp-gt (primitive/load i) fi)
                              (break)
                              (do
-                               (let [fty (field (al-elem [Field] fs (load i)) ty)
+                               (let [fty (primitive/field (al-elem [Field] fs (primitive/load i)) ty)
                                      al (cte-ty-align cx fty)]
-                                 (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
-                                 (when (icmp-eq (load i) fi) (store! res (load off)))
-                                 (store! off (iadd (load off) (cte-ty-size cx fty))))
-                               (store! i (iadd (load i) 1)))))
-                   (load res)))))
+                                 (primitive/store! off (primitive/imul (primitive/idiv (primitive/iadd (primitive/load off) (primitive/isub al 1)) al) al))
+                                 (when (primitive/icmp-eq (primitive/load i) fi) (primitive/store! res (primitive/load off)))
+                                 (primitive/store! off (primitive/iadd (primitive/load off) (cte-ty-size cx fty))))
+                               (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+                   (primitive/load res)))))
 ; Can this struct's fields be located by BYTE offset? Everything except LBits can:
 ; LC and LAligned lay fields out naturally, LPacked drops the padding, LExplicit
 ; states the offsets outright. LBits packs fields into a backing integer at BIT
 ; positions, so there is no byte offset to read from — that one stays declined.
 (defn cte-walkable-layout? [(sd (ptr StructDef))] (-> bool)
-  (match-else (load (field sd layout)) (LBits [b o] false) (_ true)))
+  (match-else (primitive/load (primitive/field sd layout)) (LBits [b o] false) (_ true)))
 ; can a value of `t` be read back into a CtVal? (int/bool/f64/array-of/string/LC-struct-of).
 (defn cte-struct-readable? [(cx (ptr CtCtx)) (sd (ptr StructDef))] (-> bool)
-  (let [fs (load (field sd fields))
-        n (al-len [Field] (load fs))
+  (let [fs (primitive/load (primitive/field sd fields))
+        n (al-len [Field] (primitive/load fs))
         (mut i) 0
         (mut ok) true]
-    (loop (if (or (not (load ok)) (icmp-ge (load i) n))
+    (loop (if (or (not (primitive/load ok)) (primitive/icmp-ge (primitive/load i) n))
               (break)
               (do
-                (when (not (cte-readable? cx (field (al-elem [Field] fs (load i)) ty))) (store! ok false))
-                (store! i (iadd (load i) 1)))))
-    (load ok)))
+                (when (not (cte-readable? cx (primitive/field (al-elem [Field] fs (primitive/load i)) ty))) (primitive/store! ok false))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load ok)))
 (defn cte-readable? [(cx (ptr CtCtx)) (t (ptr Type))] (-> bool)
-  (match-else (load t)
+  (match-else (primitive/load t)
               (TInt [b s] true)
               (TBool [] true)
-              (TFloat [b] (or (icmp-eq b 64) (icmp-eq b 32)))
+              (TFloat [b] (or (primitive/icmp-eq b 64) (primitive/icmp-eq b 32)))
               (TArray [el n] (cte-readable? cx el))
-              (TSlice [el] (match-else (load el) (TInt [b s] (icmp-eq b 8)) (_ false)))
+              (TSlice [el] (match-else (primitive/load el) (TInt [b s] (primitive/icmp-eq b 8)) (_ false)))
               (TStruct [nm]
                        (let [sd (ct-struct-find cx nm)]
-                         (if (icmp-ne (cast i64 sd) 0)
+                         (if (primitive/icmp-ne (primitive/cast i64 sd) 0)
                              (if (not (cte-walkable-layout? sd)) false (cte-struct-readable? cx sd))
                              (let [ud (ct-sum-find cx nm)]
-                               (if (icmp-eq (cast i64 ud) 0) false (cte-sum-readable? cx ud))))))
+                               (if (primitive/icmp-eq (primitive/cast i64 ud) 0) false (cte-sum-readable? cx ud))))))
               (_ false)))
 
 ; every field of every variant must be readable — the tag selects one at run time,
 ; so a sum is only foldable if the reader could handle whichever came back.
 (defn cte-sum-readable? [(cx (ptr CtCtx)) (ud (ptr SumDef))] (-> bool)
-  (let [vs (load (field ud variants))
-        nv (al-len [Variant] (load vs))
+  (let [vs (primitive/load (primitive/field ud variants))
+        nv (al-len [Variant] (primitive/load vs))
         (mut i) 0
         (mut ok) true]
-    (loop (if (or (not (load ok)) (icmp-ge (load i) nv))
+    (loop (if (or (not (primitive/load ok)) (primitive/icmp-ge (primitive/load i) nv))
               (break)
               (do
-                (let [fs (load (field (al-elem [Variant] vs (load i)) fields))
-                      nf (al-len [Field] (load fs))
+                (let [fs (primitive/load (primitive/field (al-elem [Variant] vs (primitive/load i)) fields))
+                      nf (al-len [Field] (primitive/load fs))
                       (mut j) 0]
-                  (loop (if (icmp-ge (load j) nf)
+                  (loop (if (primitive/icmp-ge (primitive/load j) nf)
                             (break)
                             (do
-                              (when (not (cte-readable? cx (field (al-elem [Field] fs (load j)) ty))) (store! ok false))
-                              (store! j (iadd (load j) 1))))))
-                (store! i (iadd (load i) 1)))))
-    (load ok)))
+                              (when (not (cte-readable? cx (primitive/field (al-elem [Field] fs (primitive/load j)) ty))) (primitive/store! ok false))
+                              (primitive/store! j (primitive/iadd (primitive/load j) 1))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load ok)))
 
 ; ---- native-memory readers -------------------------------------------------------
 ; assemble `nbytes` little-endian bytes at buf+off into a zero-extended i64.
 (defn cte-load-raw [(buf (ptr i8)) (off i64) (nbytes i64)] (-> i64)
   (let [(mut i) 0
         (mut acc) 0]
-    (loop (if (icmp-ge (load i) nbytes)
+    (loop (if (primitive/icmp-ge (primitive/load i) nbytes)
               (break)
               (do
-                (let [byte (iand (cast i64 (load (cast (ptr i8) (iadd (cast i64 buf) (iadd off (load i)))))) 255)]
-                  (store! acc (ior (load acc) (ishl byte (imul (load i) 8)))))
-                (store! i (iadd (load i) 1)))))
-    (load acc)))
+                (let [byte (primitive/iand (primitive/cast i64 (primitive/load (primitive/cast (ptr i8) (primitive/iadd (primitive/cast i64 buf) (primitive/iadd off (primitive/load i)))))) 255)]
+                  (primitive/store! acc (primitive/ior (primitive/load acc) (primitive/ishl byte (primitive/imul (primitive/load i) 8)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load acc)))
 (defn cte-load-f64 [(buf (ptr i8)) (off i64)] (-> f64)
-  (load (cast (ptr f64) (iadd (cast i64 buf) off))))
+  (primitive/load (primitive/cast (ptr f64) (primitive/iadd (primitive/cast i64 buf) off))))
 (defn cte-load-f32 [(buf (ptr i8)) (off i64)] (-> f64)
-  (cast f64 (load (cast (ptr f32) (iadd (cast i64 buf) off)))))
+  (primitive/cast f64 (primitive/load (primitive/cast (ptr f32) (primitive/iadd (primitive/cast i64 buf) off)))))
 (defn cte-copy-bytes [(dst (ptr i8)) (src (ptr i8)) (n i64)] (-> i64)
   (let [(mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (store! (cast (ptr i8) (iadd (cast i64 dst) (load i)))
-                        (load (cast (ptr i8) (iadd (cast i64 src) (load i)))))
-                (store! i (iadd (load i) 1))))))
+                (primitive/store! (primitive/cast (ptr i8) (primitive/iadd (primitive/cast i64 dst) (primitive/load i)))
+                        (primitive/load (primitive/cast (ptr i8) (primitive/iadd (primitive/cast i64 src) (primitive/load i)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 ; read a (slice u8) {ptr@off, len@off+8}: copy len bytes out of the still-mapped dylib.
 (defn cte-read-str [(buf (ptr i8)) (off i64) (a (ptr Allocator))] (-> (Option CtVal))
-  (let [p (cast (ptr i8) (cte-load-raw buf off 8))
-        len (cte-load-raw buf (iadd off 8) 8)]
-    (if (or (icmp-eq (cast i64 p) 0) (icmp-le len 0))
-        (Some (CStr (slice-new [u8] (cast (ptr u8) 0) 0)))
+  (let [p (primitive/cast (ptr i8) (cte-load-raw buf off 8))
+        len (cte-load-raw buf (primitive/iadd off 8) 8)]
+    (if (or (primitive/icmp-eq (primitive/cast i64 p) 0) (primitive/icmp-le len 0))
+        (Some (CStr (slice-new [u8] (primitive/cast (ptr u8) 0) 0)))
         (match (raw-alloc a len 1)
           (None [] (None [CtVal]))
           (Some [dst]
                 (do
                   (cte-copy-bytes dst p len)
-                  (Some (CStr (slice-new [u8] (cast (ptr u8) dst) len)))))))))
+                  (Some (CStr (slice-new [u8] (primitive/cast (ptr u8) dst) len)))))))))
 (defn cte-read-struct [(cx (ptr CtCtx))
                        (sd (ptr StructDef))
                        (nm (slice u8))
                        (buf (ptr i8))
                        (off i64)
                        (a (ptr Allocator))] (-> (Option CtVal))
-  (let [fs (load (field sd fields))
-        n (al-len [Field] (load fs))
+  (let [fs (primitive/load (primitive/field sd fields))
+        n (al-len [Field] (primitive/load fs))
         (mut cells) (al-new [(ptr CtVal)] a)
         (mut i) 0
         (mut bad) false]
-    (loop (if (or (load bad) (icmp-ge (load i) n))
+    (loop (if (or (primitive/load bad) (primitive/icmp-ge (primitive/load i) n))
               (break)
               (do
-                (let [foff (iadd off (cte-field-off cx sd (load i)))
-                      fty (field (al-elem [Field] fs (load i)) ty)]
+                (let [foff (primitive/iadd off (cte-field-off cx sd (primitive/load i)))
+                      fty (primitive/field (al-elem [Field] fs (primitive/load i)) ty)]
                   (match (cte-read cx fty buf foff a)
-                    (None [] (store! bad true))
+                    (None [] (primitive/store! bad true))
                     (Some [cv] (al-push! (mut cells) (new-cell cv)))))
-                (store! i (iadd (load i) 1)))))
-    (if (load bad) (None [CtVal]) (Some (CStruct nm (box-al [(ptr CtVal)] a (load cells)))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/load bad) (None [CtVal]) (Some (CStruct nm (box-al [(ptr CtVal)] a (primitive/load cells)))))))
 ; Read a sum at buf+off.
 ;
 ; Layout, verified against BOTH backends by dumping the bytes of a live value:
@@ -1020,113 +1021,113 @@
 ;                      the g-natural-off walk, independent of the conservative
 ;                      per-field align8 that decides how many words the payload has
 (defn cte-read-sum [(cx (ptr CtCtx)) (ud (ptr SumDef)) (buf (ptr i8)) (off i64) (a (ptr Allocator))] (-> (Option CtVal))
-  (let [vs (load (field ud variants))
-        nv (al-len [Variant] (load vs))
+  (let [vs (primitive/load (primitive/field ud variants))
+        nv (al-len [Variant] (primitive/load vs))
         tag (cte-load-raw buf off 4)]
-    (if (or (icmp-lt tag 0) (icmp-ge tag nv))
+    (if (or (primitive/icmp-lt tag 0) (primitive/icmp-ge tag nv))
         (None [CtVal])
         (let [vp (al-elem [Variant] vs tag)
-              fs (load (field vp fields))
-              nf (al-len [Field] (load fs))
+              fs (primitive/load (primitive/field vp fields))
+              nf (al-len [Field] (primitive/load fs))
               (mut cells) (al-new [(ptr CtVal)] a)
               (mut i) 0
               (mut foff) 0
               (mut bad) false]
-          (loop (if (or (load bad) (icmp-ge (load i) nf))
+          (loop (if (or (primitive/load bad) (primitive/icmp-ge (primitive/load i) nf))
                     (break)
                     (do
-                      (let [fty (field (al-elem [Field] fs (load i)) ty)
+                      (let [fty (primitive/field (al-elem [Field] fs (primitive/load i)) ty)
                             al (cte-ty-align cx fty)]
-                        (store! foff (imul (idiv (iadd (load foff) (isub al 1)) al) al))
-                        (match (cte-read cx fty buf (iadd (iadd off 8) (load foff)) a)
-                          (None [] (store! bad true))
+                        (primitive/store! foff (primitive/imul (primitive/idiv (primitive/iadd (primitive/load foff) (primitive/isub al 1)) al) al))
+                        (match (cte-read cx fty buf (primitive/iadd (primitive/iadd off 8) (primitive/load foff)) a)
+                          (None [] (primitive/store! bad true))
                           (Some [cv] (al-push! (mut cells) (new-cell cv))))
-                        (store! foff (iadd (load foff) (cte-ty-size cx fty))))
-                      (store! i (iadd (load i) 1)))))
-          (if (load bad)
+                        (primitive/store! foff (primitive/iadd (primitive/load foff) (cte-ty-size cx fty))))
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+          (if (primitive/load bad)
               (None [CtVal])
-              (Some (CSum (load (field vp name)) (box-al [(ptr CtVal)] a (load cells)))))))))
+              (Some (CSum (primitive/load (primitive/field vp name)) (box-al [(ptr CtVal)] a (primitive/load cells)))))))))
 
 ; read a value of type `t` at buf+off. None = a leaf this reader declines (no regression).
 (defn cte-read [(cx (ptr CtCtx)) (t (ptr Type)) (buf (ptr i8)) (off i64) (a (ptr Allocator))] (-> (Option CtVal))
-  (match-else (load t)
+  (match-else (primitive/load t)
               (TInt [b s] (Some (CInt (trunc (cte-load-raw buf off (cte-ty-size cx t)) b s))))
-              (TBool [] (Some (CBool (icmp-ne (cte-load-raw buf off 1) 0))))
+              (TBool [] (Some (CBool (primitive/icmp-ne (cte-load-raw buf off 1) 0))))
               (TFloat [b]
-                      (if (icmp-eq b 64)
+                      (if (primitive/icmp-eq b 64)
                           (Some (CFloat (cte-load-f64 buf off)))
-                          (if (icmp-eq b 32) (Some (CFloat (cte-load-f32 buf off))) (None [CtVal]))))
+                          (if (primitive/icmp-eq b 32) (Some (CFloat (cte-load-f32 buf off))) (None [CtVal]))))
               (TArray [el n]
                       (let [es (cte-ty-size cx el)
                             (mut cells) (al-new [(ptr CtVal)] a)
                             (mut i) 0
                             (mut bad) false]
-                        (loop (if (or (load bad) (icmp-ge (load i) n))
+                        (loop (if (or (primitive/load bad) (primitive/icmp-ge (primitive/load i) n))
                                   (break)
                                   (do
-                                    (match (cte-read cx el buf (iadd off (imul (load i) es)) a)
-                                      (None [] (store! bad true))
+                                    (match (cte-read cx el buf (primitive/iadd off (primitive/imul (primitive/load i) es)) a)
+                                      (None [] (primitive/store! bad true))
                                       (Some [cv] (al-push! (mut cells) (new-cell cv))))
-                                    (store! i (iadd (load i) 1)))))
-                        (if (load bad) (None [CtVal]) (Some (CArray (load el) (box-al [(ptr CtVal)] a (load cells)))))))
+                                    (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+                        (if (primitive/load bad) (None [CtVal]) (Some (CArray (primitive/load el) (box-al [(ptr CtVal)] a (primitive/load cells)))))))
               (TSlice [el]
-                      (match-else (load el)
-                                  (TInt [b s] (if (icmp-eq b 8) (cte-read-str buf off a) (None [CtVal])))
+                      (match-else (primitive/load el)
+                                  (TInt [b s] (if (primitive/icmp-eq b 8) (cte-read-str buf off a) (None [CtVal])))
                                   (_ (None [CtVal]))))
               (TStruct [nm]
                        (let [sd (ct-struct-find cx nm)]
-                         (if (icmp-ne (cast i64 sd) 0)
+                         (if (primitive/icmp-ne (primitive/cast i64 sd) 0)
                              (if (not (cte-walkable-layout? sd)) (None [CtVal]) (cte-read-struct cx sd nm buf off a))
                              ; the nominal may name a SUM rather than a struct
                              (let [ud (ct-sum-find cx nm)]
-                               (if (icmp-eq (cast i64 ud) 0) (None [CtVal]) (cte-read-sum cx ud buf off a))))))
+                               (if (primitive/icmp-eq (primitive/cast i64 ud) 0) (None [CtVal]) (cte-read-sum cx ud buf off a))))))
               (_ (None [CtVal]))))
 
-; append (defn coil.ct.thunk [($ct$out (ptr T))] (-> i64) (do (store! $ct$out E) 0)) —
+; append (defn coil.ct.thunk [($ct$out (ptr T))] (-> i64) (do (primitive/store! $ct$out E) 0)) —
 ; a write-through entry (a pointer param needs no C-ABI thunk on either backend).
 (defn cte-add-entry-agg [(a (ptr Allocator)) (sub (ptr Program)) (inner (ptr Expr)) (rty Type)] (-> i64)
-  (let [f (alloc-stack Func)
+  (let [f (alloc/stack Func)
         (mut params) (al-new [Param] a)
-        pp (alloc-stack Param)]
-    (store! (field pp name) "$ct$out")
-    (store! (field pp ty) (TPtr (box-type a rty)))
-    (al-push! (mut params) (load pp))
-    (let [lo (load (field inner lo))
-          hi (load (field inner hi))
-          src (load (field inner source))
-          ctxt (load (field inner ctxt))
+        pp (alloc/stack Param)]
+    (primitive/store! (primitive/field pp name) "$ct$out")
+    (primitive/store! (primitive/field pp ty) (TPtr (box-type a rty)))
+    (al-push! (mut params) (primitive/load pp))
+    (let [lo (primitive/load (primitive/field inner lo))
+          hi (primitive/load (primitive/field inner hi))
+          src (primitive/load (primitive/field inner source))
+          ctxt (primitive/load (primitive/field inner ctxt))
           (mut body) (al-new [Expr] a)]
       (al-push! (mut body)
-                (mk-expr (EStore (box-expr a (mk-expr (EVar "$ct$out") lo hi src ctxt)) (box-expr a (load inner)))
+                (mk-expr (EStore (box-expr a (mk-expr (EVar "$ct$out") lo hi src ctxt)) (box-expr a (primitive/load inner)))
                          lo
                          hi
                          src
                          ctxt))
       (al-push! (mut body) (mk-expr (EInt 0) lo hi src ctxt))
-      (store! (field f name) "coil.ct.thunk")
-      (store! (field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-      (store! (field f bounds) (box-al [Bound] a (al-new [Bound] a)))
-      (store! (field f cc) "c")
-      (store! (field f params) (box-al [Param] a (load params)))
-      (store! (field f ret) (TInt 64 true))
-      (store! (field f body) (box-al [Expr] a (load body)))
-      (store! (field f macro_variadic) false)
-      (store! (field f lo) -1)
-      (store! (field f hi) -1)
-      (store! (field f source) -1)
-      (store! (field f ctxt) 0)
-      (al-push! [Func] (load (field sub funcs)) (load f))))
-  (let [e (alloc-stack ExportC)
+      (primitive/store! (primitive/field f name) "coil.ct.thunk")
+      (primitive/store! (primitive/field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+      (primitive/store! (primitive/field f bounds) (box-al [Bound] a (al-new [Bound] a)))
+      (primitive/store! (primitive/field f cc) "c")
+      (primitive/store! (primitive/field f params) (box-al [Param] a (primitive/load params)))
+      (primitive/store! (primitive/field f ret) (TInt 64 true))
+      (primitive/store! (primitive/field f body) (box-al [Expr] a (primitive/load body)))
+      (primitive/store! (primitive/field f macro_variadic) false)
+      (primitive/store! (primitive/field f lo) -1)
+      (primitive/store! (primitive/field f hi) -1)
+      (primitive/store! (primitive/field f source) -1)
+      (primitive/store! (primitive/field f ctxt) 0)
+      (al-push! [Func] (primitive/load (primitive/field sub funcs)) (primitive/load f))))
+  (let [e (alloc/stack ExportC)
         (mut eparams) (al-new [Type] a)]
     (al-push! (mut eparams) (TPtr (box-type a rty)))
-    (store! (field e name) "coil.ct.thunk")
-    (store! (field e symbol) (Some "coil_ct_thunk"))
-    (store! (field e params) (box-al [Type] a (load eparams)))
-    (store! (field e lo) -1)
-    (store! (field e hi) -1)
-    (store! (field e source) -1)
-    (store! (field e ctxt) 0)
-    (al-push! [ExportC] (load (field sub exports)) (load e)))
+    (primitive/store! (primitive/field e name) "coil.ct.thunk")
+    (primitive/store! (primitive/field e symbol) (Some "coil_ct_thunk"))
+    (primitive/store! (primitive/field e params) (box-al [Type] a (primitive/load eparams)))
+    (primitive/store! (primitive/field e lo) -1)
+    (primitive/store! (primitive/field e hi) -1)
+    (primitive/store! (primitive/field e source) -1)
+    (primitive/store! (primitive/field e ctxt) 0)
+    (al-push! [ExportC] (primitive/load (primitive/field sub exports)) (primitive/load e)))
   0)
 ; run the entry write-through into a heap buffer, then read the aggregate back.
 (defn cte-run-agg [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (t0 Type)] (-> (ptr i8))
@@ -1137,56 +1138,56 @@
           (match (cte-entry a sub)
             (Err [d] (cte-box a (Err [Expr Diag] d)))
             (Ok [en0]
-                (let [tp (alloc-stack Type)]
-                  (store! tp t0)
-                  (let [en (alloc-stack CtEntry)]
-                    (store! en en0)
-                    (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
+                (let [tp (alloc/stack Type)]
+                  (primitive/store! tp t0)
+                  (let [en (alloc/stack CtEntry)]
+                    (primitive/store! en en0)
+                    (match (raw-alloc a (primitive/iadd (cte-ty-size cx tp) 64) 16)
                       (None []
                             (cte-box a
                                      (Err [Expr Diag]
                                           (derr "comptime: out of memory allocating the comptime readback buffer"))))
                       (Some [buf]
                             (do
-                              (call-ptr (cast (fnptr c [(ptr i8)] i64) (load (field en thunk))) buf)
+                              (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8)] i64) (primitive/load (primitive/field en thunk))) buf)
                               (let [st (cte-status-of en)]
-                                (if (icmp-ne st 0)
-                                    (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+                                (if (primitive/icmp-ne st 0)
+                                    (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (primitive/icmp-eq st 2)))))
                                     (match (cte-read cx tp buf 0 a)
-                                      (None [] (cast (ptr i8) 0))
+                                      (None [] (primitive/cast (ptr i8) 0))
                                       (Some [cv]
-                                            (let [lo (load (field inner lo))
-                                                  hi (load (field inner hi))
-                                                  src (load (field inner source))
-                                                  ctxt (load (field inner ctxt))]
+                                            (let [lo (primitive/load (primitive/field inner lo))
+                                                  hi (primitive/load (primitive/field inner hi))
+                                                  src (primitive/load (primitive/field inner source))
+                                                  ctxt (primitive/load (primitive/field inner ctxt))]
                                               (match (build-value a (new-cell cv) lo hi src ctxt cx)
                                                 (Err [d] (cte-box a (Err [Expr Diag] d)))
                                                 (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))))))))))
 
 ; the registered hook (comptime.coil::ct-fold-hook). null = declined.
 (defn comptime-fold-one [(a (ptr Allocator)) (inner (ptr Expr)) (cx (ptr CtCtx))] (-> (ptr i8))
-  (let [prog (load (field cx prog))]
-    (if (icmp-eq (cast i64 prog) 0)
-        (cast (ptr i8) 0)
+  (let [prog (primitive/load (primitive/field cx prog))]
+    (if (primitive/icmp-eq (primitive/cast i64 prog) 0)
+        (primitive/cast (ptr i8) 0)
         (match (cte-node-type inner)
-          (None [] (cast (ptr i8) 0))
+          (None [] (primitive/cast (ptr i8) 0))
           (Some [t0]
-                (let [tp (alloc-stack Type)]
-                  (store! tp t0)
+                (let [tp (alloc/stack Type)]
+                  (primitive/store! tp t0)
                   (let [kind (cte-kind tp)]
                     ; scalar (kind 1/2/3) → return-register path; else a readable aggregate
                     ; → write-through path; anything else declines (interp error stands).
-                    (if (and (icmp-eq kind 0) (not (cte-readable? cx tp)))
+                    (if (and (primitive/icmp-eq kind 0) (not (cte-readable? cx tp)))
                         ; a Code result keeps its precise wording (the interpreter's exact
                         ; error, now produced here since the engine is primary); every other
                         ; unreadable shape declines — under the compiled-primary fold that
                         ; surfaces as the located "cannot be materialized" error.
-                        (match-else (load tp)
+                        (match-else (primitive/load tp)
                                     (TCode []
                                            (cte-box a
                                                     (Err [Expr Diag]
                                                          (derr "comptime: a Code value can't be used as a runtime value (it's only meaningful at compile time)"))))
-                                    (_ (cast (ptr i8) 0)))
+                                    (_ (primitive/cast (ptr i8) 0)))
                         ; clear any nested comptime in E itself first (via the same fold).
                         ; A nested fold error must SURFACE — declining here would mask a
                         ; real diagnostic (e.g. a nested division by zero) behind the
@@ -1196,15 +1197,15 @@
                           (Ok [_]
                               (let [names (prog-fn-names prog a)
                                     stackb (unwrap-ptr [SBox] (create [SBox] a))]
-                                (store! (field stackb items) (al-new [(slice u8)] a))
+                                (primitive/store! (primitive/field stackb items) (al-new [(slice u8)] a))
                                 (collect-calls inner names stackb)
-                                (let [wanted (closure-funcs prog (field stackb items) a)
+                                (let [wanted (closure-funcs prog (primitive/field stackb items) a)
                                       sub (closure-subprogram prog wanted a)]
                                   (match (cte-fold-closure sub cx)
-                                    (Err [_] (cast (ptr i8) 0))
+                                    (Err [_] (primitive/cast (ptr i8) 0))
                                     (Ok [_]
                                         (do
-                                          (if (icmp-eq kind 0)
+                                          (if (primitive/icmp-eq kind 0)
                                               (cte-add-entry-agg a sub inner t0)
                                               (cte-add-entry a sub inner t0))
                                           (drop-code-funcs a sub)
@@ -1216,9 +1217,9 @@
                                           (let [saved (box-al [CtSaved] a (al-new [CtSaved] a))
                                                 bad (cte-guard-divzero! a sub saved)
                                                 res
-                                                  (if (icmp-ne bad 0)
-                                                      (cast (ptr i8) 0)
-                                                      (if (icmp-eq kind 0)
+                                                  (if (primitive/icmp-ne bad 0)
+                                                      (primitive/cast (ptr i8) 0)
+                                                      (if (primitive/icmp-eq kind 0)
                                                           (cte-run-agg a sub cx inner t0)
                                                           (cte-run a sub cx inner kind tp)))]
                                             (do (cte-restore! saved) res)))))))))))))))))
@@ -1226,4 +1227,4 @@
 ; wire the hook into the fold pass (called by main / main_a64 at startup). The
 ; compiled engine is the ONLY comptime evaluator (decision 7).
 (defn register-comptime-fold! [] (-> i64)
-  (set-comptime-fold-hook! (fnptr-of comptime-fold-one)))
+  (set-comptime-fold-hook! (primitive/fnptr-of comptime-fold-one)))

@@ -5,7 +5,7 @@
 //! app's OWN `postcss` and its configured plugins (autoprefixer, nesting, ...)
 //! over every stylesheet — exactly as Vite does — before the native CSS
 //! pipeline extracts `@import`s, rebases `url(...)`s, and scopes CSS Modules.
-//! The compile is shelled to `node` (like [`crate::vite_config`] and the Sass
+//! The compile is shelled to `node` (like Vite config evaluation and the Sass
 //! preprocessors), so the app's exact plugin toolchain and versions are used;
 //! no PostCSS is reimplemented in Rust.
 //!

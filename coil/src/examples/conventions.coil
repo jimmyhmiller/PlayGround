@@ -1,3 +1,5 @@
+(module example.conventions)
+(import "primitive.coil" :as primitive)
 ; A user-defined convention that lowers to LLVM `fastcc`.
 ; The register intent (rax/rdx/...) is recorded but, on the `:native` path,
 ; LLVM's own fastcc placement is used. `add` becomes a `fastcc` function and is
@@ -12,7 +14,7 @@
   :native fast)
 
 (defn add :cc fast2 [(a :i64) (b :i64)] (-> :i64)
-  (iadd a b))
+  (primitive/iadd a b))
 
 (defn main [] (-> :i64)
   (add 20 22))

@@ -1,4 +1,5 @@
 (module own_ok)
+(import "primitive.coil" :as primitive)
 ; A well-behaved program under the ownership dialect: every acquired resource is
 ; released exactly once, and a SHADOWED name reuses the identifier legally.
 (import "tests/metaprogramming/compile-and-run/ownership.coil" :use *)
@@ -25,4 +26,4 @@
       0)))
 
 (defn main [] (-> :i64)
-  (iadd (one-resource) (shadowing-is-fine)))
+  (primitive/iadd (one-resource) (shadowing-is-fine)))

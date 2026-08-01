@@ -11,7 +11,8 @@
 ; breaks. A hardline (or a forced group) has "infinite" flat width, so it forces
 ; every enclosing group to break — the standard break-propagation trick.
 (module doc)
-(import "alloc.coil"     :use *)
+(import "../../stdlib/primitive.coil" :as primitive)
+(import "../../stdlib/alloc.coil"     :use *)
 (import "slice.coil"     :use *)
 (import "str.coil"       :use *)
 (import "arraylist.coil" :use *)
@@ -31,7 +32,7 @@
 (defn doc-inf [] (-> i64) 1000000000)
 
 (defn box-doc [(a (ptr Allocator)) (k Doc)] (-> (ptr Doc))
-  (let [p (unwrap-ptr [Doc] (create [Doc] a))] (store! p k) p))
+  (let [p (unwrap-ptr [Doc] (create [Doc] a))] (primitive/store! p k) p))
 
 ; ---- constructors ----------------------------------------------------------
 (defn d-nil      [(a (ptr Allocator))] (-> (ptr Doc)) (box-doc a (DNil)))
@@ -48,7 +49,7 @@
 ; A growable list of child docs; `dl-done` seals it into a DConcat.
 (defn dl-new [(a (ptr Allocator))] (-> (ptr (ArrayList (ptr Doc))))
   (let [p (unwrap-ptr [(ArrayList (ptr Doc))] (create [(ArrayList (ptr Doc))] a))]
-    (store! p (al-new [(ptr Doc)] a)) p))
+    (primitive/store! p (al-new [(ptr Doc)] a)) p))
 (defn dl-push! [(dl (ptr (ArrayList (ptr Doc)))) (x (ptr Doc))] (-> i64)
   (al-push! [(ptr Doc)] dl x) 0)
 (defn dl-done [(a (ptr Allocator)) (dl (ptr (ArrayList (ptr Doc))))] (-> (ptr Doc))
@@ -58,62 +59,62 @@
 ; Width if `d` were laid out entirely flat, capped at doc-inf. A hardline or a
 ; forced group yields doc-inf, so any group containing one cannot be flat.
 (defn flat-width [(d (ptr Doc))] (-> i64)
-  (match (load d)
+  (match (primitive/load d)
     (DNil    []      0)
     (DText   [s]     (slice-len s))
-    (DLine   [k]     (if (icmp-eq k 0) 1 (unless (icmp-eq k 1) (doc-inf))))
+    (DLine   [k]     (if (primitive/icmp-eq k 0) 1 (unless (primitive/icmp-eq k 1) (doc-inf))))
     (DNest   [n x]   (flat-width x))
     (DAlign  [n x]   (flat-width x))
-    (DGroup  [x f]   (if (icmp-ne f 0) (doc-inf) (flat-width x)))
+    (DGroup  [x f]   (if (primitive/icmp-ne f 0) (doc-inf) (flat-width x)))
     (DConcat [items]
-      (let [n (al-len [(ptr Doc)] (load items)) (mut i) 0 (mut acc) 0]
+      (let [n (al-len [(ptr Doc)] (primitive/load items)) (mut i) 0 (mut acc) 0]
         (loop
-          (if (icmp-ge (load i) n) (break)
-            (let [wp (flat-width (al-get [(ptr Doc)] (load items) (load i)))]
-              (if (icmp-ge wp (doc-inf)) (do (store! acc (doc-inf)) (break))
-                (do (store! acc (iadd (load acc) wp)) (store! i (iadd (load i) 1)))))))
-        (load acc)))))
+          (if (primitive/icmp-ge (primitive/load i) n) (break)
+            (let [wp (flat-width (al-get [(ptr Doc)] (primitive/load items) (primitive/load i)))]
+              (if (primitive/icmp-ge wp (doc-inf)) (do (primitive/store! acc (doc-inf)) (break))
+                (do (primitive/store! acc (primitive/iadd (primitive/load acc) wp)) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))))
+        (primitive/load acc)))))
 
 ; ---- output helpers --------------------------------------------------------
 (defn sb-emit [(sb (ptr StrBuf)) (s (slice u8))] (-> i64)
   (let [(mut i) 0 n (slice-len s)]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (al-push! (mut (field sb bytes)) (slice-get s (load i)))
-          (store! i (iadd (load i) 1)))))) 0)
+    (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+      (do (al-push! (mut (primitive/field sb bytes)) (slice-get s (primitive/load i)))
+          (primitive/store! i (primitive/iadd (primitive/load i) 1)))))) 0)
 (defn sb-spaces [(sb (ptr StrBuf)) (n i64)] (-> i64)
-  (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break)
-    (do (al-push! (mut (field sb bytes)) (cast u8 32)) (store! i (iadd (load i) 1)))))) 0)
+  (let [(mut i) 0] (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+    (do (al-push! (mut (primitive/field sb bytes)) (primitive/cast u8 32)) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))) 0)
 
 ; ---- renderer --------------------------------------------------------------
 ; mode: 0 = FLAT, 1 = BREAK. Returns the new column.
 (defn render [(sb (ptr StrBuf)) (w i64) (col i64) (ind i64) (mode i64) (d (ptr Doc))] (-> i64)
-  (match (load d)
+  (match (primitive/load d)
     (DNil    []  col)
-    (DText   [s] (sb-emit sb s) (iadd col (slice-len s)))
+    (DText   [s] (sb-emit sb s) (primitive/iadd col (slice-len s)))
     (DLine   [k]
-      (if (icmp-eq mode 0)
-          (if (icmp-eq k 0) (do (sb-emit sb " ") (iadd col 1))
-            (if (icmp-eq k 1) col
+      (if (primitive/icmp-eq mode 0)
+          (if (primitive/icmp-eq k 0) (do (sb-emit sb " ") (primitive/iadd col 1))
+            (if (primitive/icmp-eq k 1) col
               (do (sb-emit sb "\n") (sb-spaces sb ind) ind)))   ; hardline breaks even flat
           (do (sb-emit sb "\n") (sb-spaces sb ind) ind)))
-    (DNest  [n x] (render sb w col (iadd ind n) mode x))
-    (DAlign [n x] (render sb w col (iadd col n) mode x))
+    (DNest  [n x] (render sb w col (primitive/iadd ind n) mode x))
+    (DAlign [n x] (render sb w col (primitive/iadd col n) mode x))
     (DGroup [x f]
-      (let [fw (if (icmp-ne f 0) (doc-inf) (flat-width x))]
-        (if (and (icmp-lt fw (doc-inf)) (icmp-le (iadd col fw) w))
+      (let [fw (if (primitive/icmp-ne f 0) (doc-inf) (flat-width x))]
+        (if (and (primitive/icmp-lt fw (doc-inf)) (primitive/icmp-le (primitive/iadd col fw) w))
             (render sb w col ind 0 x)
             (render sb w col ind 1 x))))
     (DConcat [items]
-      (let [n (al-len [(ptr Doc)] (load items)) (mut i) 0 (mut c) col]
-        (loop (if (icmp-ge (load i) n) (break)
-          (do (store! c (render sb w (load c) ind mode (al-get [(ptr Doc)] (load items) (load i))))
-              (store! i (iadd (load i) 1)))))
-        (load c)))))
+      (let [n (al-len [(ptr Doc)] (primitive/load items)) (mut i) 0 (mut c) col]
+        (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+          (do (primitive/store! c (render sb w (primitive/load c) ind mode (al-get [(ptr Doc)] (primitive/load items) (primitive/load i))))
+              (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+        (primitive/load c)))))
 
 ; ---- entry -----------------------------------------------------------------
 ; Render a Doc to a fresh (slice u8) at the given width.
 (defn render-doc [(a (ptr Allocator)) (d (ptr Doc)) (w i64)] (-> (slice u8))
   (let [sb (unwrap-ptr [StrBuf] (create [StrBuf] a))]
-    (store! (field sb bytes) (al-new [u8] a))
+    (primitive/store! (primitive/field sb bytes) (al-new [u8] a))
     (render sb w 0 0 1 d)
-    (al-slice [u8] (load (field sb bytes)))))
+    (al-slice [u8] (primitive/load (primitive/field sb bytes)))))

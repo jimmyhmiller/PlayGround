@@ -2,6 +2,7 @@
 ; that the copy fallback is still correct when it can't be taken.
 ;   coil test src/examples/arena-growth.coil
 (module arenagrowth)
+(import "primitive.coil" :as primitive)
 (import "src/stdlib/alloc.coil" :use *)
 (import "src/stdlib/arraylist.coil" :use *)
 (import "src/stdlib/assert.coil" :use *)
@@ -9,7 +10,7 @@
 ;; Bytes handed out by an arena so far — its bump offset. Reaching through the
 ;; `Allocator` vtable's `ctx` is how you inspect the concrete allocator behind it.
 (defn arena-used [(a (ptr Allocator))] (-> i64)
-  (load (field (cast (ptr Arena) (load (field a ctx))) off)))
+  (primitive/load (primitive/field (primitive/cast (ptr Arena) (primitive/load (primitive/field a ctx))) off)))
 
 ;; The property ar-resize's in-place path exists for. A list that is the arena's TOP
 ;; block grows by moving the bump pointer, so pushing n elements occupies exactly the
@@ -20,13 +21,13 @@
   (let [a        (arena-allocator 4194304)                ; 4 MiB
         (mut xs) (al-new [i64] a)
         (mut i)  0]
-    (loop (if (>= (load i) 100000)
+    (loop (if (>= (primitive/load i) 100000)
               (break)
-              (do (al-push! (mut xs) (load i))
-                  (store! i (+ (load i) 1)))))
-    (assert-eq (al-len [i64] (load xs)) 100000)
-    (assert-eq (al-get (load xs) 0) 0)
-    (assert-eq (al-get (load xs) 99999) 99999)
+              (do (al-push! (mut xs) (primitive/load i))
+                  (primitive/store! i (+ (primitive/load i) 1)))))
+    (assert-eq (al-len [i64] (primitive/load xs)) 100000)
+    (assert-eq (al-get (primitive/load xs) 0) 0)
+    (assert-eq (al-get (primitive/load xs) 99999) 99999)
     ; 100000 elements doubles the capacity to 131072, and that ONE buffer is all the
     ; arena ever holds: exact, not a bound, because every growth after the first is a
     ; pure bump. Quadratic-space growth would show up here as ~2 MiB.
@@ -40,17 +41,17 @@
         (mut xs) (al-new [i64] a)
         (mut ys) (al-new [i64] a)
         (mut i)  0]
-    (loop (if (>= (load i) 64)
+    (loop (if (>= (primitive/load i) 64)
               (break)
-              (do (al-push! (mut xs) (load i))
-                  (al-push! (mut ys) (* (load i) 10))
-                  (store! i (+ (load i) 1)))))
-    (assert-eq (al-len [i64] (load xs)) 64)
-    (assert-eq (al-len [i64] (load ys)) 64)
-    (assert-eq (al-get (load xs) 0) 0)
-    (assert-eq (al-get (load ys) 0) 0)
-    (assert-eq (al-get (load xs) 63) 63)
-    (assert-eq (al-get (load ys) 63) 630)))
+              (do (al-push! (mut xs) (primitive/load i))
+                  (al-push! (mut ys) (* (primitive/load i) 10))
+                  (primitive/store! i (+ (primitive/load i) 1)))))
+    (assert-eq (al-len [i64] (primitive/load xs)) 64)
+    (assert-eq (al-len [i64] (primitive/load ys)) 64)
+    (assert-eq (al-get (primitive/load xs) 0) 0)
+    (assert-eq (al-get (primitive/load ys) 0) 0)
+    (assert-eq (al-get (primitive/load xs) 63) 63)
+    (assert-eq (al-get (primitive/load ys) 63) 630)))
 
 ;; `al-extend!` is the bulk append `read-file` uses instead of a per-byte `al-push!`
 ;; loop. It must land exactly the same elements, whether or not it has to grow.
@@ -59,19 +60,19 @@
         src      (unwrap-ptr [i64] (alloc-slice [i64] a 300))
         (mut xs) (al-new [i64] a)
         (mut i)  0]
-    (loop (if (>= (load i) 300)
+    (loop (if (>= (primitive/load i) 300)
               (break)
-              (do (store! (index src (load i)) (load i))
-                  (store! i (+ (load i) 1)))))
+              (do (primitive/store! (primitive/index src (primitive/load i)) (primitive/load i))
+                  (primitive/store! i (+ (primitive/load i) 1)))))
     (al-push! (mut xs) -1)                        ; a pre-existing element to append after
     (al-extend! [i64] (mut xs) src 300)           ; one growth from cap 4 to 301
     (al-extend! [i64] (mut xs) src 300)           ; and again, from 301 to 601
-    (assert-eq (al-len [i64] (load xs)) 601)
-    (assert-eq (al-get (load xs) 0) -1)
-    (assert-eq (al-get (load xs) 1) 0)
-    (assert-eq (al-get (load xs) 300) 299)
-    (assert-eq (al-get (load xs) 301) 0)
-    (assert-eq (al-get (load xs) 600) 299)))
+    (assert-eq (al-len [i64] (primitive/load xs)) 601)
+    (assert-eq (al-get (primitive/load xs) 0) -1)
+    (assert-eq (al-get (primitive/load xs) 1) 0)
+    (assert-eq (al-get (primitive/load xs) 300) 299)
+    (assert-eq (al-get (primitive/load xs) 301) 0)
+    (assert-eq (al-get (primitive/load xs) 600) 299)))
 
 ;; The overflow arena must NOT have a capacity cliff: past its region it keeps working.
 ;; A strict arena aborts here — that is the whole reason this flavour exists.
@@ -80,13 +81,13 @@
         a        (overflow-arena-allocator cap)
         (mut xs) (al-new [i64] a)
         (mut i)  0]
-    (loop (if (>= (load i) 50000)                   ; ~400 KB into a 4 KB region
+    (loop (if (>= (primitive/load i) 50000)                   ; ~400 KB into a 4 KB region
               (break)
-              (do (al-push! (mut xs) (* (load i) 3))
-                  (store! i (+ (load i) 1)))))
-    (assert-eq (al-len [i64] (load xs)) 50000)
-    (assert-eq (al-get (load xs) 0) 0)
-    (assert-eq (al-get (load xs) 49999) 149997)
+              (do (al-push! (mut xs) (* (primitive/load i) 3))
+                  (primitive/store! i (+ (primitive/load i) 1)))))
+    (assert-eq (al-len [i64] (primitive/load xs)) 50000)
+    (assert-eq (al-get (primitive/load xs) 0) 0)
+    (assert-eq (al-get (primitive/load xs) 49999) 149997)
     ; the bump region is spent, and everything past it came from malloc
     (assert (<= (arena-used a) cap))))
 
@@ -107,7 +108,7 @@
     (al-push! (mut xs) 4)
     (al-push! (mut xs) 5)                           ; 4 -> 8, in place again
     (assert-eq (arena-used a) 64)
-    (assert-eq (al-get (load xs) 4) 5)))
+    (assert-eq (al-get (primitive/load xs) 4) 5)))
 
 ;; Overflow blocks are real malloc blocks, so freeing one must actually free it rather
 ;; than no-op like an in-region block. Correctness is what is checked here (a double
@@ -118,14 +119,14 @@
         (mut out) (al-new [i64] a)
         (mut i)  0]
     (al-push! (mut in) 42)
-    (loop (if (>= (load i) 2000)                    ; forced past the 256-byte region
+    (loop (if (>= (primitive/load i) 2000)                    ; forced past the 256-byte region
               (break)
-              (do (al-push! (mut out) (load i))
-                  (store! i (+ (load i) 1)))))
+              (do (al-push! (mut out) (primitive/load i))
+                  (primitive/store! i (+ (primitive/load i) 1)))))
     (al-free! (mut out))                            ; frees a malloc block
     (al-free! (mut in))                             ; no-ops an in-region block
-    (assert-eq (al-len [i64] (load out)) 0)
-    (assert-eq (al-len [i64] (load in)) 0)))
+    (assert-eq (al-len [i64] (primitive/load out)) 0)
+    (assert-eq (al-len [i64] (primitive/load in)) 0)))
 
 ;; A zero-length extend is a no-op, not a growth — `read-file` never hits it (the read
 ;; loop breaks on n <= 0) but the primitive has to be total.
@@ -133,6 +134,6 @@
   (let [a        (malloc-allocator)
         (mut xs) (al-new [i64] a)]
     (al-push! (mut xs) 7)
-    (al-extend! [i64] (mut xs) (cast (ptr i64) 0) 0)
-    (assert-eq (al-len [i64] (load xs)) 1)
-    (assert-eq (al-get (load xs) 0) 7)))
+    (al-extend! [i64] (mut xs) (primitive/cast (ptr i64) 0) 0)
+    (assert-eq (al-len [i64] (primitive/load xs)) 1)
+    (assert-eq (al-get (primitive/load xs) 0) 7)))

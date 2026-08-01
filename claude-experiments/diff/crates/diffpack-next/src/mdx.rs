@@ -166,7 +166,7 @@ const RUNNER: &str = include_str!("mdx/runner.mjs");
 /// One configured remark/rehype/recma plugin, as reported by `scripts/rsc/next-config-eval.mjs`.
 /// Only the plugin's IDENTITY survives that JSON boundary — a plugin value is a live JS
 /// function — which is enough to name it in a build error; running it means re-evaluating
-/// `next.config` inside [`RUNNER`].
+/// `next.config` inside the embedded runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdxPlugin {
     /// `remark-gfm` (a specifier) or `remarkGfm` (a function's `name`).
@@ -249,7 +249,7 @@ fn is_native_gfm(plugin: &MdxPlugin) -> bool {
 
 impl MdxConfig {
     /// Whether the app opted into GitHub-Flavoured Markdown by configuring `remark-gfm`
-    /// (in the natively-implementable form — see [`is_native_gfm`]). This is the ONLY
+    /// (in the natively-implementable form recognized by `is_native_gfm`). This is the ONLY
     /// signal that turns GFM on; an app that does not configure it gets CommonMark, which
     /// is exactly what `@next/mdx` gives it.
     pub fn wants_gfm(&self) -> bool {
@@ -497,7 +497,7 @@ fn compile_with_app_pipeline(
 ///   which implements tables, strikethrough, task lists, autolink literals and footnotes
 ///   the way `remark-gfm` + `mdast-util-to-hast` do.
 /// * Any other `createMDX({ options: { remarkPlugins, rehypePlugins, ... } })` — the APP's
-///   OWN pipeline, via [`compile_with_app_pipeline`]. A unified plugin is an
+///   OWN pipeline, via the app-pipeline compiler. A unified plugin is an
 ///   arbitrary JS function over an mdast/hast; the native emitter cannot run one, and
 ///   compiling without it would silently render a different page than the author wrote.
 ///   When the app's pipeline is unavailable this is a HARD ERROR naming the plugins and

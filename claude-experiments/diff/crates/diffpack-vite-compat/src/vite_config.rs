@@ -22,18 +22,7 @@ use std::process::{Command, Stdio};
 /// stdin so no temporary file is written.
 const EVALUATOR: &str = include_str!("vite_config_evaluator.mjs");
 
-/// One `server.proxy` rule: forward requests whose path begins with `context` to
-/// `target`. `change_origin` rewrites the forwarded `Host` header to the target's
-/// host (Vite's `changeOrigin`); `ws` marks the rule as also proxying WebSocket
-/// upgrades. A `rewrite` FUNCTION cannot be expressed natively; the evaluator
-/// counts such rules and [`resolve`] surfaces a warning, never a silent drop.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProxyRule {
-    pub context: String,
-    pub target: String,
-    pub change_origin: bool,
-    pub ws: bool,
-}
+pub use diffpack_web::dev_proxy::ProxyRule;
 
 /// The subset of a resolved Vite config Diffpack consumes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

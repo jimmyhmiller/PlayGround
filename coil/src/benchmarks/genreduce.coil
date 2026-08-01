@@ -2,14 +2,16 @@
 ; indexing a cache-resident 1024-array 200M times. Proves the monomorphizer emits
 ; the same machine code as a hand-written i64 loop (the C baseline).
 (module bench)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (extern printf :cc c [(ptr i8) ...] (-> i32))
 (defn gsum [T] [(a (ptr T)) (i :i64) (n :i64) (acc T)] (-> T)
-  (if (icmp-ge i n) acc
-    (gsum a (iadd i 1) n (iadd acc (load (index a (iand i 1023)))))))
+  (if (primitive/icmp-ge i n) acc
+    (gsum a (primitive/iadd i 1) n (primitive/iadd acc (primitive/load (primitive/index a (primitive/iand i 1023)))))))
 (defn fill [(a (ptr i64)) (i :i64)] (-> :i64)
-  (if (icmp-ge i 1024) 0 (do (store! (index a i) (imul i 2654435761)) (fill a (iadd i 1)))))
+  (if (primitive/icmp-ge i 1024) 0 (do (primitive/store! (primitive/index a i) (primitive/imul i 2654435761)) (fill a (primitive/iadd i 1)))))
 (defn main [] (-> :i64)
-  (let [arr (alloc-stack (array i64 1024))
-        a   (cast (ptr i64) arr)]
+  (let [arr (alloc/stack (array i64 1024))
+        a   (primitive/cast (ptr i64) arr)]
     (fill a 0)
     (do (printf c"%ld\n" (gsum a 0 200000000 0)) 0)))

@@ -1,7 +1,8 @@
 ; src/compiler/ast.coil — self-host Coil compiler, ast module.
 (module ast)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -33,6 +34,17 @@
 (defstruct Param [(name (slice u8)) (ty Type)])
 ; A struct/variant field (name + type).
 (defstruct Field [(name (slice u8)) (ty Type)])
+
+; Compiler primitives are ordinary module definitions. `opcode` is compiler-only
+; lowering metadata; it is never itself entered into source scope. Primitive aliases
+; retain the target definition's identity rather than becoming wrapper functions.
+(defstruct PrimitiveDef
+  [(module (slice u8)) (name (slice u8)) (opcode (slice u8))])
+(defstruct PrimitiveAlias
+  [(module (slice u8)) (name (slice u8)) (target (slice u8))])
+; The loader/resolver computes the primitive bindings visible in one module. The parser
+; consumes only this resolved table, so it never decides primitive-ness from source text.
+(defstruct PrimitiveBinding [(source_name (slice u8)) (opcode (slice u8))])
 
 ; ExprKind — the 43 variants `parse_program` can PRODUCE (the 6 checker/mono-only
 ; variants — SpillRef, DynDispatch, MakeDyn, Construct, StaticRef, TraitCall —
@@ -218,13 +230,13 @@
    (methods (ptr (ArrayList Func)))])
 
 (defn impl-is-inherent [(im (ptr ImplDef))] (-> bool)
-  (match-else (load (field im kind)) (InherentImpl [] true) (_ false)))
+  (match-else (primitive/load (primitive/field im kind)) (InherentImpl [] true) (_ false)))
 (defn impl-is-trait [(im (ptr ImplDef))] (-> bool)
   (not (impl-is-inherent im)))
 (defn impl-trait-name [(im (ptr ImplDef))] (-> (slice u8))
-  (match (load (field im kind))
+  (match (primitive/load (primitive/field im kind))
     (TraitImpl [name] name)
-    (InherentImpl [] (do (abort) (zeroed (slice u8))))))
+    (InherentImpl [] (do (abort) (primitive/zeroed (slice u8))))))
 
 (defstruct ExportC
   [(name (slice u8))
@@ -260,14 +272,14 @@
 ; same order, so the rebootstrap fixpoint holds.
 (defstruct NidCell [(n i64)])
 (defn nid-cell [] (-> (ptr NidCell))
-  (alloc-static NidCell))
+  (alloc/static NidCell))
 (defn next-nid [] (-> i64)
   (let [c (nid-cell)
-        v (iadd (load (field c n)) 1)]
-    (store! (field c n) v)
+        v (primitive/iadd (primitive/load (primitive/field c n)) 1)]
+    (primitive/store! (primitive/field c n) v)
     v))
 
-; ── TYPE-REFERENCE resolution registry (for exact `(code-decl TYPE-NODE)`) ────
+; ── TYPE-REFERENCE resolution registry (for exact `(primitive/code-decl TYPE-NODE)`) ────
 ; Types carry no node id (adding one to the Type sum ripples across every match),
 ; so instead the resolver records, at qualify-type, what each `(module, raw type
 ; name)` resolves to. A metaprogram then resolves a type node exactly: its raw name
@@ -275,210 +287,210 @@
 (defstruct TypeResEntry [(module (slice u8)) (raw (slice u8)) (qual (slice u8))])
 (defstruct TypeResBox [(init i64) (lst (ptr (ArrayList TypeResEntry)))])
 (defn type-res-box [] (-> (ptr TypeResBox))
-  (alloc-static TypeResBox))
+  (alloc/static TypeResBox))
 (defn type-res-list [] (-> (ptr (ArrayList TypeResEntry)))
   (let [b (type-res-box)]
-    (when (icmp-eq (load (field b init)) 0)
-          (store! (field b lst)
+    (when (primitive/icmp-eq (primitive/load (primitive/field b init)) 0)
+          (primitive/store! (primitive/field b lst)
                   (unwrap-ptr [(ArrayList TypeResEntry)] (create [(ArrayList TypeResEntry)] (malloc-allocator))))
-          (store! (load (field b lst)) (al-new [TypeResEntry] (malloc-allocator)))
-          (store! (field b init) 1)
+          (primitive/store! (primitive/load (primitive/field b lst)) (al-new [TypeResEntry] (malloc-allocator)))
+          (primitive/store! (primitive/field b init) 1)
           0)
-    (load (field b lst))))
+    (primitive/load (primitive/field b lst))))
 (defn type-res-reset [] (-> i64)
   (let [_ (type-res-list)
         b (type-res-box)]
-    (store! (load (field b lst)) (al-new [TypeResEntry] (malloc-allocator)))
+    (primitive/store! (primitive/load (primitive/field b lst)) (al-new [TypeResEntry] (malloc-allocator)))
     0))
 (defn type-res-record [(module (slice u8)) (raw (slice u8)) (qual (slice u8))] (-> i64)
-  (let [e (alloc-stack TypeResEntry)]
-    (store! (field e module) module)
-    (store! (field e raw) raw)
-    (store! (field e qual) qual)
-    (al-push! (type-res-list) (load e))
+  (let [e (alloc/stack TypeResEntry)]
+    (primitive/store! (primitive/field e module) module)
+    (primitive/store! (primitive/field e raw) raw)
+    (primitive/store! (primitive/field e qual) qual)
+    (al-push! (type-res-list) (primitive/load e))
     0))
 (defn type-res-lookup [(module (slice u8)) (raw (slice u8))] (-> (slice u8))
   (let [lst (type-res-list)
-        n (al-len [TypeResEntry] (load lst))
-        (mut i) (isub n 1)
+        n (al-len [TypeResEntry] (primitive/load lst))
+        (mut i) (primitive/isub n 1)
         (mut r) ""
-        e (alloc-stack TypeResEntry)]
-    (loop (if (icmp-lt (load i) 0)
+        e (alloc/stack TypeResEntry)]
+    (loop (if (primitive/icmp-lt (primitive/load i) 0)
               (break)
               (do
-                (store! e (al-get [TypeResEntry] (load lst) (load i)))
-                (when (and (str-eq (load (field e module)) module) (str-eq (load (field e raw)) raw))
-                      (store! r (load (field e qual)))
+                (primitive/store! e (al-get [TypeResEntry] (primitive/load lst) (primitive/load i)))
+                (when (and (str-eq (primitive/load (primitive/field e module)) module) (str-eq (primitive/load (primitive/field e raw)) raw))
+                      (primitive/store! r (primitive/load (primitive/field e qual)))
                       (break))
-                (store! i (isub (load i) 1)))))
-    (load r)))
+                (primitive/store! i (primitive/isub (primitive/load i) 1)))))
+    (primitive/load r)))
 ; ── source-id → module-name map (so a node's module is known at query time) ───
 (defstruct SrcModEntry [(source i64) (module (slice u8))])
 (defstruct SrcModBox [(init i64) (lst (ptr (ArrayList SrcModEntry)))])
 (defn src-mod-box [] (-> (ptr SrcModBox))
-  (alloc-static SrcModBox))
+  (alloc/static SrcModBox))
 (defn src-mod-list [] (-> (ptr (ArrayList SrcModEntry)))
   (let [b (src-mod-box)]
-    (when (icmp-eq (load (field b init)) 0)
-          (store! (field b lst)
+    (when (primitive/icmp-eq (primitive/load (primitive/field b init)) 0)
+          (primitive/store! (primitive/field b lst)
                   (unwrap-ptr [(ArrayList SrcModEntry)] (create [(ArrayList SrcModEntry)] (malloc-allocator))))
-          (store! (load (field b lst)) (al-new [SrcModEntry] (malloc-allocator)))
-          (store! (field b init) 1)
+          (primitive/store! (primitive/load (primitive/field b lst)) (al-new [SrcModEntry] (malloc-allocator)))
+          (primitive/store! (primitive/field b init) 1)
           0)
-    (load (field b lst))))
+    (primitive/load (primitive/field b lst))))
 (defn src-mod-reset [] (-> i64)
   (let [_ (src-mod-list)
         b (src-mod-box)]
-    (store! (load (field b lst)) (al-new [SrcModEntry] (malloc-allocator)))
+    (primitive/store! (primitive/load (primitive/field b lst)) (al-new [SrcModEntry] (malloc-allocator)))
     0))
 (defn src-mod-record [(source i64) (module (slice u8))] (-> i64)
-  (unless (icmp-lt source 0)
-          (let [e (alloc-stack SrcModEntry)]
-            (store! (field e source) source)
-            (store! (field e module) module)
-            (al-push! (src-mod-list) (load e))
+  (unless (primitive/icmp-lt source 0)
+          (let [e (alloc/stack SrcModEntry)]
+            (primitive/store! (primitive/field e source) source)
+            (primitive/store! (primitive/field e module) module)
+            (al-push! (src-mod-list) (primitive/load e))
             0)))
 (defn src-mod-lookup [(source i64)] (-> (slice u8))
   (let [lst (src-mod-list)
-        n (al-len [SrcModEntry] (load lst))
+        n (al-len [SrcModEntry] (primitive/load lst))
         (mut i) 0
         (mut r) ""
-        e (alloc-stack SrcModEntry)]
-    (loop (if (icmp-ge (load i) n)
+        e (alloc/stack SrcModEntry)]
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (store! e (al-get [SrcModEntry] (load lst) (load i)))
-                (when (icmp-eq (load (field e source)) source) (store! r (load (field e module))) (break))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+                (primitive/store! e (al-get [SrcModEntry] (primitive/load lst) (primitive/load i)))
+                (when (primitive/icmp-eq (primitive/load (primitive/field e source)) source) (primitive/store! r (primitive/load (primitive/field e module))) (break))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load r)))
 (defn mk-sexp [(kind SexpKind) (lo i64) (hi i64)] (-> Sexp)
-  (let [p (alloc-stack Sexp)]
-    (store! (field p kind) kind)
-    (store! (field p lo) lo)
-    (store! (field p hi) hi)
-    (store! (field p source) (when (icmp-lt lo 0) -1))
-    (store! (field p ctxt) 0)
-    (store! (field p nid) (next-nid))
-    (load p)))
+  (let [p (alloc/stack Sexp)]
+    (primitive/store! (primitive/field p kind) kind)
+    (primitive/store! (primitive/field p lo) lo)
+    (primitive/store! (primitive/field p hi) hi)
+    (primitive/store! (primitive/field p source) (when (primitive/icmp-lt lo 0) -1))
+    (primitive/store! (primitive/field p ctxt) 0)
+    (primitive/store! (primitive/field p nid) (next-nid))
+    (primitive/load p)))
 (defn mk-tok [(kind TokKind) (lo i64) (hi i64)] (-> Tok)
-  (let [p (alloc-stack Tok)]
-    (store! (field p kind) kind)
-    (store! (field p lo) lo)
-    (store! (field p hi) hi)
-    (load p)))
+  (let [p (alloc/stack Tok)]
+    (primitive/store! (primitive/field p kind) kind)
+    (primitive/store! (primitive/field p lo) lo)
+    (primitive/store! (primitive/field p hi) hi)
+    (primitive/load p)))
 ; source = -1 means "not yet attributed to a file"; the span is file-relative, so
 ; it is meaningless until a caller stamps the source that `lo`/`hi` are offsets
 ; into (dwspan / diag-with-source). Defaulting to 0 instead would silently claim
 ; every diagnostic came from the entry file, rendering the right offsets against
 ; the wrong source text.
 (defn mk-diag [(lo i64) (hi i64) (msg (slice u8))] (-> Diag)
-  (let [p (alloc-stack Diag)]
-    (store! (field p lo) lo)
-    (store! (field p hi) hi)
-    (store! (field p msg) msg)
-    (store! (field p source) -1)
-    (store! (field p ctxt) 0)
-    (load p)))
+  (let [p (alloc/stack Diag)]
+    (primitive/store! (primitive/field p lo) lo)
+    (primitive/store! (primitive/field p hi) hi)
+    (primitive/store! (primitive/field p msg) msg)
+    (primitive/store! (primitive/field p source) -1)
+    (primitive/store! (primitive/field p ctxt) 0)
+    (primitive/load p)))
 (defn mk-diag-src [(source i64) (lo i64) (hi i64) (msg (slice u8))] (-> Diag)
-  (let [p (alloc-stack Diag)]
-    (store! p (mk-diag lo hi msg))
-    (store! (field p source) source)
-    (load p)))
+  (let [p (alloc/stack Diag)]
+    (primitive/store! p (mk-diag lo hi msg))
+    (primitive/store! (primitive/field p source) source)
+    (primitive/load p)))
 (defn mk-strread [(s (slice u8)) (end i64)] (-> StrRead)
-  (let [p (alloc-stack StrRead)]
-    (store! (field p s) s)
-    (store! (field p end) end)
-    (load p)))
+  (let [p (alloc/stack StrRead)]
+    (primitive/store! (primitive/field p s) s)
+    (primitive/store! (primitive/field p end) end)
+    (primitive/load p)))
 
 (defn box-items [(a (ptr Allocator)) (items (ArrayList Sexp))] (-> (ptr (ArrayList Sexp)))
   (let [p (unwrap-ptr [(ArrayList Sexp)] (create [(ArrayList Sexp)] a))]
-    (store! p items)
+    (primitive/store! p items)
     p))
 (defn box-sexp [(a (ptr Allocator)) (s Sexp)] (-> (ptr Sexp))
-  (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (store! p s) p))
+  (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (primitive/store! p s) p))
 (defn box-expr [(a (ptr Allocator)) (e Expr)] (-> (ptr Expr))
-  (let [p (unwrap-ptr [Expr] (create [Expr] a))] (store! p e) p))
+  (let [p (unwrap-ptr [Expr] (create [Expr] a))] (primitive/store! p e) p))
 (defn box-type [(a (ptr Allocator)) (t Type)] (-> (ptr Type))
-  (let [p (unwrap-ptr [Type] (create [Type] a))] (store! p t) p))
+  (let [p (unwrap-ptr [Type] (create [Type] a))] (primitive/store! p t) p))
 
 (defn mk-expr [(kind ExprKind) (lo i64) (hi i64) (source i64) (ctxt i64)] (-> Expr)
-  (let [p (alloc-stack Expr)]
-    (store! (field p kind) kind)
-    (store! (field p lo) lo)
-    (store! (field p hi) hi)
-    (store! (field p source) source)
-    (store! (field p ctxt) ctxt)
-    (store! (field p nid) -1)
-    (load p)))
+  (let [p (alloc/stack Expr)]
+    (primitive/store! (primitive/field p kind) kind)
+    (primitive/store! (primitive/field p lo) lo)
+    (primitive/store! (primitive/field p hi) hi)
+    (primitive/store! (primitive/field p source) source)
+    (primitive/store! (primitive/field p ctxt) ctxt)
+    (primitive/store! (primitive/field p nid) -1)
+    (primitive/load p)))
 ; Like mk-expr but carrying a source node id (parse-expr uses this so type-of can key
 ; on node identity). Synthesized exprs keep mk-expr's -1.
 (defn mk-expr-nid [(kind ExprKind) (lo i64) (hi i64) (source i64) (ctxt i64) (nid i64)] (-> Expr)
-  (let [p (alloc-stack Expr)]
-    (store! (field p kind) kind)
-    (store! (field p lo) lo)
-    (store! (field p hi) hi)
-    (store! (field p source) source)
-    (store! (field p ctxt) ctxt)
-    (store! (field p nid) nid)
-    (load p)))
+  (let [p (alloc/stack Expr)]
+    (primitive/store! (primitive/field p kind) kind)
+    (primitive/store! (primitive/field p lo) lo)
+    (primitive/store! (primitive/field p hi) hi)
+    (primitive/store! (primitive/field p source) source)
+    (primitive/store! (primitive/field p ctxt) ctxt)
+    (primitive/store! (primitive/field p nid) nid)
+    (primitive/load p)))
 ; Rebuild a Sexp of `kind` preserving `orig`'s full span (source+ctxt+lo+hi),
 ; mirroring `Sexp::new(kind, s.span)` — so the expander's non-macro
 ; List/Vector reconstruction never drops source/ctxt.
 (defn mk-sexp-src [(kind SexpKind) (orig (ptr Sexp))] (-> Sexp)
-  (let [p (alloc-stack Sexp)]
-    (store! (field p kind) kind)
-    (store! (field p lo) (load (field orig lo)))
-    (store! (field p hi) (load (field orig hi)))
-    (store! (field p source) (load (field orig source)))
-    (store! (field p ctxt) (load (field orig ctxt)))
-    (store! (field p nid) (next-nid))
-    (load p)))
+  (let [p (alloc/stack Sexp)]
+    (primitive/store! (primitive/field p kind) kind)
+    (primitive/store! (primitive/field p lo) (primitive/load (primitive/field orig lo)))
+    (primitive/store! (primitive/field p hi) (primitive/load (primitive/field orig hi)))
+    (primitive/store! (primitive/field p source) (primitive/load (primitive/field orig source)))
+    (primitive/store! (primitive/field p ctxt) (primitive/load (primitive/field orig ctxt)))
+    (primitive/store! (primitive/field p nid) (next-nid))
+    (primitive/load p)))
 
 ; ============================ numeric/string utils ===========================
 (defn f64-bits [(x f64)] (-> i64)
-  (let [p (alloc-stack f64)] (store! p x) (load (cast (ptr i64) p))))
+  (let [p (alloc/stack f64)] (primitive/store! p x) (primitive/load (primitive/cast (ptr i64) p))))
 
 (defn slice->cstr [(a (ptr Allocator)) (s (slice u8))] (-> (ptr i8))
   (let [n (slice-len s)
-        buf (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))
+        buf (unwrap-ptr [i8] (raw-alloc a (primitive/iadd n 1) 1))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (store! (index buf (load i)) (cast i8 (slice-get s (load i))))
-                (store! i (iadd (load i) 1)))))
-    (store! (index buf n) (cast i8 0))
+                (primitive/store! (primitive/index buf (primitive/load i)) (primitive/cast i8 (slice-get s (primitive/load i))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/store! (primitive/index buf n) (primitive/cast i8 0))
     buf))
 
 ; ============================ output primitives ==============================
 (defn wb [(w (ptr Writer)) (b i64)] (-> i64)
-  (write-byte w (cast u8 b))
+  (write-byte w (primitive/cast u8 b))
   0)
 (defn ps [(w (ptr Writer)) (s (slice u8))] (-> i64)
   (print-str w s)
   0)
 (defn hexd [(d i64)] (-> i64)
-  (if (icmp-lt d 10) (iadd d 48) (iadd d 87)))
+  (if (primitive/icmp-lt d 10) (primitive/iadd d 48) (primitive/iadd d 87)))
 
 (defn dump-dec-mag [(w (ptr Writer)) (n i64)] (-> i64)
-  (if (icmp-lt n 10)
-      (wb w (iadd n 48))
-      (do (dump-dec-mag w (udiv n 10)) (wb w (iadd (urem n 10) 48)))))
+  (if (primitive/icmp-lt n 10)
+      (wb w (primitive/iadd n 48))
+      (do (dump-dec-mag w (primitive/udiv n 10)) (wb w (primitive/iadd (primitive/urem n 10) 48)))))
 (defn dump-dec [(w (ptr Writer)) (n i64)] (-> i64)
-  (if (icmp-lt n 0)
-      (do (wb w 45) (dump-dec-mag w (isub 0 n)))
+  (if (primitive/icmp-lt n 0)
+      (do (wb w 45) (dump-dec-mag w (primitive/isub 0 n)))
       (dump-dec-mag w n)))
 
 (defn u-hex16 [(w (ptr Writer)) (n i64)] (-> i64)
   (let [(mut k) 60]
-    (loop (if (icmp-lt (load k) 0)
+    (loop (if (primitive/icmp-lt (primitive/load k) 0)
               (break)
-              (do (wb w (hexd (iand (ishr n (load k)) 15))) (store! k (isub (load k) 4))))))
+              (do (wb w (hexd (primitive/iand (primitive/ishr n (primitive/load k)) 15))) (primitive/store! k (primitive/isub (primitive/load k) 4))))))
   0)
 
 ; A span `@lo:hi`, dummy (lo/hi = -1) prints as `@D:…`/`…:D` (mirrors dump_span).
 (defn dump-span-field [(w (ptr Writer)) (v i64)] (-> i64)
-  (if (icmp-lt v 0) (wb w 68) (dump-dec w v)))
+  (if (primitive/icmp-lt v 0) (wb w 68) (dump-dec w v)))
 (defn dump-span [(w (ptr Writer)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
   (wb w 64)
   (dump-span-field w source)
@@ -490,23 +502,23 @@
   (dump-span-field w ctxt))
 
 (defn hex2 [(w (ptr Writer)) (b i64)] (-> i64)
-  (wb w (hexd (iand (ishr b 4) 15)))
-  (wb w (hexd (iand b 15))))
+  (wb w (hexd (primitive/iand (primitive/ishr b 4) 15)))
+  (wb w (hexd (primitive/iand b 15))))
 (defn esc-write [(w (ptr Writer)) (s (slice u8))] (-> i64)
   (let [(mut i) 0
         n (slice-len s)]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [b (cast i64 (slice-get s (load i)))]
-                  (cond (icmp-eq b 92) (ps w "\\\\")
-                        (icmp-eq b 34) (ps w "\\\"")
-                        (icmp-eq b 10) (ps w "\\n")
-                        (icmp-eq b 9) (ps w "\\t")
-                        (icmp-eq b 13) (ps w "\\r")
-                        (and (icmp-ge b 32) (icmp-le b 126)) (wb w b)
+                (let [b (primitive/cast i64 (slice-get s (primitive/load i)))]
+                  (cond (primitive/icmp-eq b 92) (ps w "\\\\")
+                        (primitive/icmp-eq b 34) (ps w "\\\"")
+                        (primitive/icmp-eq b 10) (ps w "\\n")
+                        (primitive/icmp-eq b 9) (ps w "\\t")
+                        (primitive/icmp-eq b 13) (ps w "\\r")
+                        (and (primitive/icmp-ge b 32) (primitive/icmp-le b 126)) (wb w b)
                         :else (do (ps w "\\x") (hex2 w b))))
-                (store! i (iadd (load i) 1))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 ; A quoted string `"<escaped>"`.
 (defn dstr [(w (ptr Writer)) (s (slice u8))] (-> i64)
@@ -538,22 +550,22 @@
   (ps w tag)
   (dump-span w source lo hi ctxt)
   (let [(mut i) 0
-        n (al-len [Sexp] (load items))]
-    (loop (if (icmp-ge (load i) n)
+        n (al-len [Sexp] (primitive/load items))]
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
                 (wb w 32)
-                (let [child (alloc-stack Sexp)]
-                  (store! child (al-get [Sexp] (load items) (load i)))
+                (let [child (alloc/stack Sexp)]
+                  (primitive/store! child (al-get [Sexp] (primitive/load items) (primitive/load i)))
                   (sx-node w child))
-                (store! i (iadd (load i) 1))))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   (wb w 41))
 (defn sx-node [(w (ptr Writer)) (x (ptr Sexp))] (-> i64)
-  (let [lo (load (field x lo))
-        hi (load (field x hi))
-        src (load (field x source))
-        ctxt (load (field x ctxt))]
-    (match (load (field x kind))
+  (let [lo (primitive/load (primitive/field x lo))
+        hi (primitive/load (primitive/field x hi))
+        src (primitive/load (primitive/field x source))
+        ctxt (primitive/load (primitive/field x ctxt))]
+    (match (primitive/load (primitive/field x kind))
       (KInt [v] (do (ps w "(int") (dump-span w src lo hi ctxt) (wb w 32) (dump-dec w v) (wb w 41)))
       (KFloat [bits] (do (ps w "(float") (dump-span w src lo hi ctxt) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
       (KSym [s] (sx-atom w "sym" s src lo hi ctxt))

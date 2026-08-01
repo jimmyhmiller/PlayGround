@@ -1,4 +1,5 @@
 (module deepif)
+(import "primitive.coil" :as primitive)
 ; An AUDIT rule, not a fix: how deep do the author's `if`s actually nest?
 ;
 ; `condlint` only reports a chain that runs down the ELSE branch, because only that
@@ -19,55 +20,55 @@
 ; the expander's: checkers run on the EXPANDED program, where every `cond`/`when`/
 ; `case` in the file is already nested ifs.
 (defn di-hand-if? [(f Code)] (-> bool)
-  (if (code-list? f)
-      (if (icmp-eq (code-count f) 4)
-          (if (code-eq (code-nth f 0) `if) (not (code-macro? f)) false)
+  (if (primitive/code-list? f)
+      (if (primitive/icmp-eq (primitive/code-count f) 4)
+          (if (primitive/code-eq (primitive/code-nth f 0) `if) (not (primitive/code-macro? f)) false)
           false)
       false))
 
 ; The most hand-written `if`s on any single root-to-leaf path inside `f`.
 (defn di-kids-max [(f Code) (i i64) (n i64) (acc i64)] (-> i64)
-  (if (icmp-ge i n)
+  (if (primitive/icmp-ge i n)
       acc
-      (let [d (di-depth (code-nth f i))]
-        (di-kids-max f (iadd i 1) n (if (icmp-gt d acc) d acc)))))
+      (let [d (di-depth (primitive/code-nth f i))]
+        (di-kids-max f (primitive/iadd i 1) n (if (primitive/icmp-gt d acc) d acc)))))
 
 (defn di-depth [(f Code)] (-> i64)
-  (if (code-list? f)
-      (let [m (di-kids-max f 0 (code-count f) 0)]
-        (if (di-hand-if? f) (iadd 1 m) m))
+  (if (primitive/code-list? f)
+      (let [m (di-kids-max f 0 (primitive/code-count f) 0)]
+        (if (di-hand-if? f) (primitive/iadd 1 m) m))
       0))
 
 ; How long the chain is if it runs down the ELSE branch — the shape `condlint` fixes.
 ; Reported separately so a leftover can be told from a shape no `cond` would express.
 (defn di-else-len [(f Code)] (-> i64)
-  (if (di-hand-if? f) (iadd 1 (di-else-len (code-nth f 3))) 0))
+  (if (di-hand-if? f) (primitive/iadd 1 (di-else-len (primitive/code-nth f 3))) 0))
 
 (defn di-walk [(f Code)] (-> Code)
-  (if (code-list? f)
-      (if (and (di-hand-if? f) (icmp-ge (di-depth f) (di-min)))
-          (if (icmp-ge (di-else-len f) (di-min))
-              (warn f "ELSE-chain: a cond, and condlint should have fixed this")
-              (warn f "nested ifs not in a chain: deep, but not a cond"))
-          (di-kids f 0 (code-count f)))
+  (if (primitive/code-list? f)
+      (if (and (di-hand-if? f) (primitive/icmp-ge (di-depth f) (di-min)))
+          (if (primitive/icmp-ge (di-else-len f) (di-min))
+              (primitive/warn f "ELSE-chain: a cond, and condlint should have fixed this")
+              (primitive/warn f "nested ifs not in a chain: deep, but not a cond"))
+          (di-kids f 0 (primitive/code-count f)))
       `0))
 
 (defn di-kids [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0 (do (di-walk (code-nth f i)) (di-kids f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `0 (do (di-walk (primitive/code-nth f i)) (di-kids f (primitive/iadd i 1) n))))
 
 ; A module record is `(name form1 form2 …)`; only files on disk, never bundled stdlib.
 (defn di-look-at? [(m Code)] (-> bool)
-  (if (icmp-gt (code-count m) 1) (code-from-user? (code-nth m 1)) false))
+  (if (primitive/icmp-gt (primitive/code-count m) 1) (primitive/code-from-user? (primitive/code-nth m 1)) false))
 
 (defn di-forms [(m Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0 (do (di-walk (code-nth m i)) (di-forms m (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `0 (do (di-walk (primitive/code-nth m i)) (di-forms m (primitive/iadd i 1) n))))
 
 (defn di-mods [(ms Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n)
+  (if (primitive/icmp-ge i n)
       `0
       (do
-        (let [m (code-nth ms i)] (if (di-look-at? m) (di-forms m 1 (code-count m)) `0))
-        (di-mods ms (iadd i 1) n))))
+        (let [m (primitive/code-nth ms i)] (if (di-look-at? m) (di-forms m 1 (primitive/code-count m)) `0))
+        (di-mods ms (primitive/iadd i 1) n))))
 
 (defn audit-deep-ifs [(modules Code)] (-> Code)
-  (di-mods modules 0 (code-count modules)))
+  (di-mods modules 0 (primitive/code-count modules)))

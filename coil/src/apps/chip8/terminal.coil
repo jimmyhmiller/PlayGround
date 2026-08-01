@@ -11,6 +11,8 @@
 ; ============================================================================
 
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "chip8.coil" :use *)   ; the VM core (vendored in this app)
 
 (extern read       :cc c [i32 (ptr i8) isize] (-> isize))
@@ -27,57 +29,57 @@
 
 ; ---- terminal rendering (half-block glyphs) --------------------------------
 (defn emit [(buf (ptr u8)) (idx (ptr i64)) (b i64)] (-> i64)
-  (let [i (load idx)] (do (store! (index buf i) (cast :u8 b)) (store! idx (iadd i 1)) 0)))
+  (let [i (primitive/load idx)] (do (primitive/store! (primitive/index buf i) (primitive/cast :u8 b)) (primitive/store! idx (primitive/iadd i 1)) 0)))
 (defn glyph [(buf (ptr u8)) (idx (ptr i64)) (top i64) (bot i64)] (-> i64)
-  (if (icmp-eq top 1)
-      (if (icmp-eq bot 1) (do (emit buf idx 0xE2)(emit buf idx 0x96)(emit buf idx 0x88) 0)   ; full
+  (if (primitive/icmp-eq top 1)
+      (if (primitive/icmp-eq bot 1) (do (emit buf idx 0xE2)(emit buf idx 0x96)(emit buf idx 0x88) 0)   ; full
                           (do (emit buf idx 0xE2)(emit buf idx 0x96)(emit buf idx 0x80) 0))  ; upper
-      (if (icmp-eq bot 1) (do (emit buf idx 0xE2)(emit buf idx 0x96)(emit buf idx 0x84) 0)   ; lower
+      (if (primitive/icmp-eq bot 1) (do (emit buf idx 0xE2)(emit buf idx 0x96)(emit buf idx 0x84) 0)   ; lower
                           (do (emit buf idx 0x20) 0))))                                        ; blank
 
 (defn render [(c (ptr Chip8))] (-> i64)
-  (let [buf (alloc-stack (array u8 8192)) idx (alloc-stack i64) bp (index buf 0)]
+  (let [buf (alloc/stack (array u8 8192)) idx (alloc/stack i64) bp (primitive/index buf 0)]
     (do
-      (store! idx 0)
+      (primitive/store! idx 0)
       (emit bp idx 0x1B) (emit bp idx 0x5B) (emit bp idx 0x48)        ; ESC [ H — home
       (for [r 0 16]
         (do (for [col 0 64]
-              (glyph bp idx (px c (iadd (imul (imul r 2) 64) col))
-                            (px c (iadd (imul (iadd (imul r 2) 1) 64) col))))
+              (glyph bp idx (px c (primitive/iadd (primitive/imul (primitive/imul r 2) 64) col))
+                            (px c (primitive/iadd (primitive/imul (primitive/iadd (primitive/imul r 2) 1) 64) col))))
             (emit bp idx 0x0A)))
-      (write 1 bp (load idx)) 0)))
+      (write 1 bp (primitive/load idx)) 0)))
 
 ; ---- input  (keyboard -> keypad: 1234 / qwer / asdf / zxcv) -----------------
 (defn map-key [(ch i64)] (-> i64)
   (cond
-    (icmp-eq ch 49) 1   (icmp-eq ch 50) 2   (icmp-eq ch 51) 3   (icmp-eq ch 52) 12
-    (icmp-eq ch 113) 4  (icmp-eq ch 119) 5  (icmp-eq ch 101) 6  (icmp-eq ch 114) 13
-    (icmp-eq ch 97) 7   (icmp-eq ch 115) 8  (icmp-eq ch 100) 9  (icmp-eq ch 102) 14
-    (icmp-eq ch 122) 10 (icmp-eq ch 120) 0  (icmp-eq ch 99) 11  (icmp-eq ch 118) 15
+    (primitive/icmp-eq ch 49) 1   (primitive/icmp-eq ch 50) 2   (primitive/icmp-eq ch 51) 3   (primitive/icmp-eq ch 52) 12
+    (primitive/icmp-eq ch 113) 4  (primitive/icmp-eq ch 119) 5  (primitive/icmp-eq ch 101) 6  (primitive/icmp-eq ch 114) 13
+    (primitive/icmp-eq ch 97) 7   (primitive/icmp-eq ch 115) 8  (primitive/icmp-eq ch 100) 9  (primitive/icmp-eq ch 102) 14
+    (primitive/icmp-eq ch 122) 10 (primitive/icmp-eq ch 120) 0  (primitive/icmp-eq ch 99) 11  (primitive/icmp-eq ch 118) 15
     -1))
 
 (defn poll-input [(c (ptr Chip8)) (saved (ptr u8))] (-> i64)
-  (let [buf (alloc-stack (array u8 32)) n (read 0 (index buf 0) 32)]
+  (let [buf (alloc/stack (array u8 32)) n (read 0 (primitive/index buf 0) 32)]
     (do
       (decay-keys c)
-      (if (icmp-gt n 0)
+      (if (primitive/icmp-gt n 0)
           (for [bi 0 n]
-            (let [ch (cast :i64 (load (index buf bi)))]
-              (if (icmp-eq ch 27) (do (tcsetattr 0 0 saved) (exit 0) 0)       ; ESC quits
-                  (let [k (map-key ch)] (if (icmp-ge k 0) (set-key c k 8) 0)))))
+            (let [ch (primitive/cast :i64 (primitive/load (primitive/index buf bi)))]
+              (if (primitive/icmp-eq ch 27) (do (tcsetattr 0 0 saved) (exit 0) 0)       ; ESC quits
+                  (let [k (map-key ch)] (if (primitive/icmp-ge k 0) (set-key c k 8) 0)))))
           0) 0)))
 
 ; ---- terminal raw mode -----------------------------------------------------
 (defn term-raw [(saved (ptr u8))] (-> i64)
-  (let [raw (alloc-stack (array u8 128))]
-    (do (tcgetattr 0 saved) (memcpy (index raw 0) saved 128) (cfmakeraw (index raw 0))
-        (tcsetattr 0 0 (index raw 0)) (fcntl 0 4 4) 0)))      ; TCSANOW; F_SETFL O_NONBLOCK
+  (let [raw (alloc/stack (array u8 128))]
+    (do (tcgetattr 0 saved) (memcpy (primitive/index raw 0) saved 128) (cfmakeraw (primitive/index raw 0))
+        (tcsetattr 0 0 (primitive/index raw 0)) (fcntl 0 4 4) 0)))      ; TCSANOW; F_SETFL O_NONBLOCK
 
 ; headless self-test: run N steps and print the framebuffer as #/.
 (defn dump [(c (ptr Chip8))] (-> i64)
   (do (for [s 0 200] (step c))
       (for [r 0 32]
-        (do (for [col 0 64] (putchar (if (icmp-eq (px c (iadd (imul r 64) col)) 1) 35 46)))
+        (do (for [col 0 64] (putchar (if (primitive/icmp-eq (px c (primitive/iadd (primitive/imul r 64) col)) 1) 35 46)))
             (putchar 10))) 0))
 
 (defn run [(c (ptr Chip8)) (saved (ptr u8))] (-> i64)
@@ -85,19 +87,19 @@
     (do (poll-input c saved)
         (for [k 0 12] (step c))
         (tick c)
-        (if (icmp-eq (draw? c) 1) (do (render c) (clear-draw c) 0) 0)
+        (if (primitive/icmp-eq (draw? c) 1) (do (render c) (clear-draw c) 0) 0)
         (usleep 16000))))
 
 (defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
-  (let [c     (alloc-stack Chip8)
-        saved (alloc-stack (array u8 128))]
+  (let [c     (alloc/stack Chip8)
+        saved (alloc/stack (array u8 128))]
     (do
       (init c)
-      (if (icmp-lt (cast :i64 argc) 2)
+      (if (primitive/icmp-lt (primitive/cast :i64 argc) 2)
           (do (puts c"usage: chip8 <rom> [--dump]") 1)
-          (if (icmp-lt (load-rom c (load (index argv 1))) 0)
+          (if (primitive/icmp-lt (load-rom c (primitive/load (primitive/index argv 1))) 0)
               (do (puts c"chip8: cannot open ROM") 1)
-              (do (if (icmp-ge (cast :i64 argc) 3)
+              (do (if (primitive/icmp-ge (primitive/cast :i64 argc) 3)
                       (dump c)                                  ; headless
-                      (do (term-raw (index saved 0)) (run c (index saved 0))))
+                      (do (term-raw (primitive/index saved 0)) (run c (primitive/index saved 0))))
                   0))))))

@@ -1,10 +1,10 @@
 error: in 'main': arithmetic on different types (f64 vs i64)
-  --> tests/compiler/oracle/diag/inputs/08-macro-trace.coil:3:24
+  --> tests/compiler/oracle/diag/inputs/08-macro-trace.coil:4:24
   |
-3 | (defn main [] (-> i64) (add-half 3))
+4 | (defn main [] (-> i64) (add-half 3))
   |                        ^^^^^^^^^^^^
 note: in expansion of macro `app.add-half`
-  ::: tests/compiler/oracle/diag/inputs/08-macro-trace.coil:2:1
+  ::: tests/compiler/oracle/diag/inputs/08-macro-trace.coil:3:1
   |
-2 | (defn add-half [(x Code)] (-> Code) `(iadd ~x 1.5))
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+3 | (defn add-half [(x Code)] (-> Code) `(primitive/iadd ~x 1.5))
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

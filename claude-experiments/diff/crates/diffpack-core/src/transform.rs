@@ -85,7 +85,7 @@ pub struct TransformResult {
 }
 
 /// The export/import structure of a module, at the granularity the generic
-/// dead-module elimination pass ([`crate::bundler`]) needs to compute
+/// dead-module elimination pass in the loader driver needs to compute
 /// export-level liveness across the graph.
 ///
 /// The distinction that makes barrel tree-shaking possible is between a **body

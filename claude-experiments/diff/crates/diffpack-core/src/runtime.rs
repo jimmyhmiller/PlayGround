@@ -67,14 +67,53 @@ pub struct RuntimePolicyRequest<'a> {
 
 #[derive(Debug, Default)]
 pub struct RuntimePolicyOutput {
-    pub entry_preludes: Vec<String>,
-    pub compatibility_prelude: Option<String>,
-    pub browser_require_native: Option<String>,
-    pub hot: Option<OwnedRuntimeHotPolicy>,
+    pub entry_preludes: Vec<RuntimeContribution<String>>,
+    pub compatibility_prelude: Option<RuntimeContribution<String>>,
+    pub browser_require_native: Option<RuntimeContribution<String>>,
+    pub hot: Option<RuntimeContribution<OwnedRuntimeHotPolicy>>,
+}
+
+#[derive(Debug)]
+pub struct RuntimeContribution<T> {
+    pub name: &'static str,
+    pub owner: &'static str,
+    pub value: T,
+}
+
+impl<T> RuntimeContribution<T> {
+    pub fn new(name: &'static str, owner: &'static str, value: T) -> Self {
+        Self { name, owner, value }
+    }
+}
+
+impl RuntimePolicyOutput {
+    /// Ordered capability/owner snapshot for profile validation and diagnostics.
+    pub fn describe(&self) -> Vec<String> {
+        let mut out = self
+            .entry_preludes
+            .iter()
+            .map(|item| format!("{}@{}", item.name, item.owner))
+            .collect::<Vec<_>>();
+        for item in [
+            self.compatibility_prelude
+                .as_ref()
+                .map(|item| (item.name, item.owner)),
+            self.browser_require_native
+                .as_ref()
+                .map(|item| (item.name, item.owner)),
+            self.hot.as_ref().map(|item| (item.name, item.owner)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            out.push(format!("{}@{}", item.0, item.1));
+        }
+        out
+    }
 }
 
 pub trait RuntimeIntegrationPolicy: Send + Sync {
-    fn configure(&self, request: RuntimePolicyRequest<'_>) -> RuntimePolicyOutput;
+    fn configure(&self, request: RuntimePolicyRequest<'_>) -> Result<RuntimePolicyOutput, String>;
 
     fn flat_entry_prelude(&self, _browser_process_shim: bool) -> Option<String> {
         None
@@ -94,22 +133,43 @@ impl RuntimePolicyChain {
 }
 
 impl RuntimeIntegrationPolicy for RuntimePolicyChain {
-    fn configure(&self, request: RuntimePolicyRequest<'_>) -> RuntimePolicyOutput {
+    fn configure(&self, request: RuntimePolicyRequest<'_>) -> Result<RuntimePolicyOutput, String> {
         let mut combined = RuntimePolicyOutput::default();
         for policy in &self.policies {
-            let output = policy.configure(request);
+            let output = policy.configure(request)?;
             combined.entry_preludes.extend(output.entry_preludes);
-            if output.compatibility_prelude.is_some() {
-                combined.compatibility_prelude = output.compatibility_prelude;
-            }
-            if output.browser_require_native.is_some() {
-                combined.browser_require_native = output.browser_require_native;
-            }
-            if output.hot.is_some() {
-                combined.hot = output.hot;
-            }
+            merge_exclusive(
+                &mut combined.compatibility_prelude,
+                output.compatibility_prelude,
+            )?;
+            merge_exclusive(
+                &mut combined.browser_require_native,
+                output.browser_require_native,
+            )?;
+            merge_exclusive(&mut combined.hot, output.hot)?;
         }
-        combined
+        if request.format == ModuleFormat::BrowserEsm && combined.browser_require_native.is_none() {
+            return Err(
+                "runtime plan is missing required `browser-require-native` capability".into(),
+            );
+        }
+        if request.hmr && combined.hot.is_none() {
+            return Err("runtime plan is missing required `hmr-runtime` capability".into());
+        }
+        if request.is_main
+            && request.format == ModuleFormat::BrowserEsm
+            && request.browser_process_shim
+            && !combined
+                .entry_preludes
+                .iter()
+                .any(|prelude| prelude.name == "browser-process-compatibility")
+        {
+            return Err(
+                "runtime plan is missing required `browser-process-compatibility` capability"
+                    .into(),
+            );
+        }
+        Ok(combined)
     }
 
     fn flat_entry_prelude(&self, browser_process_shim: bool) -> Option<String> {
@@ -126,8 +186,73 @@ impl RuntimeIntegrationPolicy for RuntimePolicyChain {
 pub struct NoRuntimeIntegrationPolicy;
 
 impl RuntimeIntegrationPolicy for NoRuntimeIntegrationPolicy {
-    fn configure(&self, _request: RuntimePolicyRequest<'_>) -> RuntimePolicyOutput {
-        RuntimePolicyOutput::default()
+    fn configure(&self, _request: RuntimePolicyRequest<'_>) -> Result<RuntimePolicyOutput, String> {
+        Ok(RuntimePolicyOutput::default())
+    }
+}
+
+fn merge_exclusive<T>(
+    current: &mut Option<RuntimeContribution<T>>,
+    incoming: Option<RuntimeContribution<T>>,
+) -> Result<(), String> {
+    let Some(incoming) = incoming else {
+        return Ok(());
+    };
+    if let Some(existing) = current.as_ref() {
+        return Err(format!(
+            "runtime capability `{}` is provided by both `{}` and `{}`",
+            incoming.name, existing.owner, incoming.owner
+        ));
+    }
+    *current = Some(incoming);
+    Ok(())
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    struct Native(&'static str);
+    impl RuntimeIntegrationPolicy for Native {
+        fn configure(&self, _: RuntimePolicyRequest<'_>) -> Result<RuntimePolicyOutput, String> {
+            Ok(RuntimePolicyOutput {
+                browser_require_native: Some(RuntimeContribution::new(
+                    "browser-require-native",
+                    self.0,
+                    "stub".into(),
+                )),
+                ..Default::default()
+            })
+        }
+    }
+
+    fn request() -> RuntimePolicyRequest<'static> {
+        RuntimePolicyRequest {
+            format: ModuleFormat::BrowserEsm,
+            is_main: false,
+            hmr: false,
+            entry_id: "entry",
+            entry_runtime_id: 0,
+            any_async: false,
+            base: "/",
+            chunk_files: &[],
+            modules: &[],
+            browser_process_shim: false,
+        }
+    }
+
+    #[test]
+    fn duplicate_exclusive_capability_is_a_named_error() {
+        let chain = RuntimePolicyChain::new(vec![
+            std::sync::Arc::new(Native("first")),
+            std::sync::Arc::new(Native("second")),
+        ]);
+        let error = chain.configure(request()).unwrap_err();
+        assert!(error.contains("browser-require-native"), "{error}");
+        assert!(
+            error.contains("first") && error.contains("second"),
+            "{error}"
+        );
     }
 }
 
@@ -190,6 +315,9 @@ pub fn render_registry_runtime(
     };
     let require_dynamic = match format {
         ModuleFormat::Esm | ModuleFormat::BrowserEsm => require_dynamic_esm,
+        ModuleFormat::Cjs if async_modules.any => {
+            r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");requireNative(chunk[0]);}return __requireAsync(chunk[1]);};"#
+        }
         ModuleFormat::Cjs => {
             r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");requireNative(chunk[0]);}return __require(chunk[1]);};"#
         }
@@ -448,12 +576,9 @@ __runtime.register(__newModules,__newMaps,__newChunks);
     // boundary differs. CJS assigns the entry's exports to `module.exports`.
     // Both ESM variants bind them to a local and re-export as the default. The
     // host prelude supplies any native module bridge required by its ESM goal.
-    // A chunk that evaluates an ASYNC module can only publish its finished
-    // namespace by awaiting it, so its wrapper becomes an async IIFE and the
-    // chunk itself top-level-`await`s — legal in an ES module (which is why
-    // `emit_with_options` still refuses top-level await in CommonJS output),
-    // and it makes the emitted file's own evaluation async exactly as the
-    // source module graph's is.
+    // An ESM chunk awaits async entry evaluation. A CommonJS chunk exports the
+    // same promise; Next's async `requirePage` and webpack-compatible route
+    // loaders assimilate it before consuming the namespace.
     let (open_wrapper, close_wrapper) = if awaits_evaluation {
         ("await (async()=>{", "})()")
     } else {

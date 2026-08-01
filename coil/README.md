@@ -42,8 +42,8 @@ the struct-ABI gate diffs against clang.)
 seeds mean a fresh checkout needs no toolchain beyond `cc` (and, outside the
 LLVM-free flavor, libLLVM).
 Verification is a rebootstrap (stage2 == stage3, byte for byte) plus the
-`tests/compiler/oracle` gates, which snapshot every pipeline stage over a 96-file corpus
-of the standard library, examples, and real apps.
+`tests/compiler/oracle` gates, which snapshot focused fixtures at every pipeline stage,
+plus broader behavioral runtime and CLI corpora.
 
 ## Repository layout
 
@@ -107,8 +107,11 @@ first type error.
   executables, including recursion through the exotic ABI, on both arches.
 - Allocation: pointers are **region-less** — `(ptr T)` is just a pointer
   (à la Zig/C). *Where* memory comes from is an **operation**, not part of the
-  type: `(alloc-stack T)` → `alloca`, `(alloc-static T)` → a global,
-  `(alloc-heap T)` → `malloc`; all yield `(ptr T)`. No ownership, borrows, or
+  type: `(alloc/stack T)` → `alloca`, `(alloc/static T)` → a global,
+  `(alloc/heap T)` → `malloc`; all yield `(ptr T)`. These are definitions in
+  `coil.alloc`, imported with `:as alloc`. Raw compiler operations live in the
+  explicitly imported `coil.primitive` namespace; bare names such as `iadd`,
+  `load`, and `alloc-stack` are not callable primitives. No ownership, borrows, or
   lifetimes — control over allocation comes from allocators (below).
 - Allocators (Zig-style): an allocator is an explicit **value** — a vtable
   struct of function pointers — threaded through, so a function that allocates
@@ -128,9 +131,23 @@ first type error.
   Errors are a sum type (`(Result :i64 IoError)`). It composes with allocation —
   the same `Writer` interface formats into an allocator-provided buffer or a file
   descriptor (see `src/examples/io.coil`).
+- HTTP modules use direction-specific namespaces: `coil.http.client` is the hosted
+  outbound client, while `coil.http.server` exposes strict inbound HTTP/1.x request
+  parsing backed by a pinned llhttp static library. The server parser supports
+  incremental/truncated-input detection, pipelining, strict framing, and decoded
+  chunked bodies; successful requests are released with `request-free`. Build its
+  native archive with `scripts/native/build-llhttp.sh`.
+  `src/stdlib/http_client.coil` provides typed blocking
+  requests, transport errors, status codes, and allocator-owned binary response
+  bodies. It uses Coil's pinned, HTTP-only static libcurl build; importing the
+  module activates that archive automatically, while programs that do not import
+  it contain no curl code or curl runtime dependency. The archive lives beside
+  `coil`; macOS and Linux source builds create the pinned artifact with
+  `scripts/native/build-curl.sh`. Both use pinned static mbedTLS rather than the
+  user's curl, OpenSSL, or platform TLS-library version.
 - Macros: there is **no separate macro dialect and no `defmacro`**. A macro is an
   ordinary Coil function whose parameters and return are `Code` — detected by
-  type — with quasiquote `` ` ``, unquote `~`, splicing `~@`, `(gensym)`, and `&`
+  type — with quasiquote `` ` ``, unquote `~`, splicing `~@`, `(primitive/gensym)`, and `&`
   for a variadic tail. Macros can compute, recurse, and emit whole top-level
   definitions (via `(meta …)`), and they compose with conventions and allocators.
   The target is a compile-time value (`target-arch`, `target-os`,
@@ -177,13 +194,13 @@ first type error.
   error). Integer **literals infer their width** from context (bidirectional
   elaboration): a bare `42` adopts the `iN`/`uN` it meets — the other operand of
   an op, the other `if`/`match` branch, a `store!`/return/call/field target — so
-  `(store! p 42)` into a `(ptr u8)` and `(iadd x 1)` with `x : u8` need no
-  `(cast :u8 …)`; a literal that doesn't fit its inferred type is a compile
+  `(primitive/store! p 42)` into a `(ptr u8)` and `(primitive/iadd x 1)` with `x : u8` need no
+  `(primitive/cast :u8 …)`; a literal that doesn't fit its inferred type is a compile
   error. Typed pointers `(ptr TYPE)` (so
-  `(ptr (ptr i8))` is `char**`), pointer indexing `(index p i)`, and `(sizeof
+  `(ptr (ptr i8))` is `char**`), pointer indexing `(primitive/index p i)`, and `(primitive/sizeof
   TYPE)`. `cast` converts among ints and pointers in every direction: int↔int
-  width change, ptr↔ptr reinterpret, and **int↔ptr** (`(cast (ptr i8) 0)` is
-  null, `(cast :i64 p)` is an address — for null tests, MMIO, tagged pointers,
+  width change, ptr↔ptr reinterpret, and **int↔ptr** (`(primitive/cast (ptr i8) 0)` is
+  null, `(primitive/cast :i64 p)` is an address — for null tests, MMIO, tagged pointers,
   packing an fd into a vtable `ctx`). **String literals** `"…"` lower to a
   private NUL-terminated `[N x i8]` and have type `(ptr i8)` (C-string
   compatible). `main` may take `(argc :i32) (argv (ptr (ptr i8)))`, so programs
@@ -196,15 +213,15 @@ first type error.
   definition. Distinct from `def` (the compile-time macro binding); consts live
   in a flat global namespace and are shadowed by locals. C enum constants and
   object-like `#define`s lower to these (see C interop).
-- Structs & arrays: `(defstruct Name [(field :type) ...])` and `(array T N)`.
-  A field/element is reached as a pointer via `(field p name)` / `(index p i)`,
+- Structs & arrays: `(defstruct Name [(primitive/field :type) ...])` and `(array T N)`.
+  A field/element is reached as a pointer via `(primitive/field p name)` / `(primitive/index p i)`,
   then `load`/`store!`. Structs nest by value (or self-reference by pointer);
   allocate any type with `(alloc-stack/static/heap TYPE)`.
 - References & mutability (the everyday tier over `ptr`): a bare struct
   parameter `(p Point)` is an **immutable reference** — read its fields, but a
   `store!` through it is a compile error; `(mut Point)` is a **mutable
   reference**, opt-in. A `let` of a struct/array value (e.g.
-  `(let [(mut v) (zeroed Vec)] …)`) is a **stack place** of that value type — no
+  `(let [(mut v) (primitive/zeroed Vec)] …)`) is a **stack place** of that value type — no
   `(ptr …)`, no `alloc-stack` — and `(mut place)` borrows a place mutably at a
   call site (`(push (mut v) x)`), the one marker that points where a write can
   escape. It's **const-correctness, not borrow-checking** (no lifetimes/aliasing
@@ -217,7 +234,7 @@ first type error.
   per-field `:at` offset (gaps = padding, overlap = a union), realized as a byte
   blob. `:layout bits` packs sub-byte fields (`(f :bits N)`) into a backing
   integer, accessed by value as `uN` via `(get p f)` / `(set! p f v)`.
-  Compile-time `(sizeof T)`, `(alignof T)`, `(offsetof Struct field)` and
+  Compile-time `(primitive/sizeof T)`, `(primitive/alignof T)`, `(primitive/offsetof Struct field)` and
   `(static-assert COND "msg")` pin a layout down — a wrong size/offset is a
   compile error. (Per-field endianness sketched in [`docs/design/LAYOUT.md`](docs/design/LAYOUT.md).)
 - Generics (monomorphization): `(defn id [T] [(x T)] (-> T) x)`, generic
@@ -234,8 +251,8 @@ first type error.
   down (e.g. a bare `(None)` in a plain `let` with no expected type). The
   inferred arguments are filled in before monomorphization, which stays a pure
   specializer.
-- Function pointers & closures: `(fnptr CC [types] ret)` type, `(fnptr-of name)`
-  for a function's address, and indirect `(call-ptr fp args...)` (honoring the
+- Function pointers & closures: `(fnptr CC [types] ret)` type, `(primitive/fnptr-of name)`
+  for a function's address, and indirect `(primitive/call-ptr fp args...)` (honoring the
   convention). Closures are **not** a language primitive — a closure is a struct
   of `{ code pointer, environment pointer }`. `closure.coil` shows heterogeneous
   heap closures (different captures, one type, one generic `apply`); `defclosure`
@@ -284,7 +301,7 @@ pointer.
 ## Raw LLVM IR & SIMD
 
 Coil exposes LLVM's instruction set directly, the way Mojo reaches into MLIR —
-one general primitive, no per-opcode compiler support. `(llvm-ir RESULT
+one general primitive, no per-opcode compiler support. `(primitive/llvm-ir RESULT
 [operands…] "BODY")` drops a snippet of LLVM IR into an `alwaysinline` helper:
 `$ret`/`$tN` expand to the result/operand LLVM type strings and `$N` to the
 operand SSA names, `declare` lines are hoisted to module scope, and the helper
@@ -297,17 +314,17 @@ The one supporting *type* is `(vec T N)` — an LLVM `<N x T>` SIMD vector (`loa
 `store!` and the existing arithmetic work on it lane-wise). On top, **SIMD is a
 macro library** (`src/stdlib/simd.coil`): `vec4f`, `splat4f`, `vadd4f`/`vmul4f`, `vfma4f`
 (via `@llvm.fma`), `reduce-add4f`, and a `dot4f` — each a one-line macro over
-`(llvm-ir …)`. So it's *explicit* SIMD (you choose the width, not the
+`(primitive/llvm-ir …)`. So it's *explicit* SIMD (you choose the width, not the
 auto-vectorizer) that still optimizes: `src/examples/simd.coil`'s dot product lowers
 to NEON `ldr q`, `fmul.4s`, and a horizontal reduce (`coil emit-ir` shows the
 `<4 x float>` ops pre-inline). Because Coil hosts arbitrary LLVM IR, a C function
-compiled with `clang -emit-llvm` can be pasted into an `(llvm-ir …)` and runs
+compiled with `clang -emit-llvm` can be pasted into an `(primitive/llvm-ir …)` and runs
 identically — proven with the murmur3 finalizer.
 
 ```lisp
 (import "simd.coil" :use *)
 (defn main [] (-> :i64)                         ; dot([10,10,10,12],[1,1,1,1]) = 42
-  (cast :i64 (dot4f (vec4f 10 10 10 12) (splat4f 1))))
+  (primitive/cast :i64 (dot4f (vec4f 10 10 10 12) (splat4f 1))))
 ```
 
 ## What it looks like
@@ -316,7 +333,7 @@ identically — proven with the murmur3 finalizer.
 (defcc fast2 :params [rax rdx] :ret rax
   :clobber [rax rdx rcx] :preserve [rbx rbp] :native fast)
 
-(defn add :cc fast2 [(a :i64) (b :i64)] (-> :i64) (iadd a b))
+(defn add :cc fast2 [(a :i64) (b :i64)] (-> :i64) (primitive/iadd a b))
 (defn main [] (-> :i64) (add 20 22))
 ```
 
@@ -365,10 +382,10 @@ shape, told apart only by what they receive:
 | **transform** | every module | rewrites the program |
 
 Checkers run *after* the program is resolved and typechecked, so they read the
-compiler's authoritative model — `(code-decl N)` for what a reference actually
-binds to, `(type-of N)` for an inferred type, `(binding-of N)` for local identity
-— and layer policy on code that already typechecks. `(warn N MSG)` and
-`(report N MSG)` collect, so one pass prints every diagnostic with the source span
+compiler's authoritative model — `(primitive/code-decl N)` for what a reference actually
+binds to, `(primitive/type-of N)` for an inferred type, `(primitive/binding-of N)` for local identity
+— and layer policy on code that already typechecks. `(primitive/warn N MSG)` and
+`(primitive/report N MSG)` collect, so one pass prints every diagnostic with the source span
 underlined. Transforms run to a fixpoint before checkers and may add or remove
 top-level forms, so a transform can be the thing that *makes* a program valid.
 
@@ -391,7 +408,7 @@ becomes API docs. The doc lives in the source and nowhere else.
 ```
 
 `coil doc <file.coil>` renders a module's documented surface as markdown, and
-`(code-doc NODE)` hands a metaprogram the same doc at compile time — so a checker
+`(primitive/code-doc NODE)` hands a metaprogram the same doc at compile time — so a checker
 can, say, require that every exported function is documented.
 
 ## Testing
@@ -452,7 +469,7 @@ build/bin/coil build src/examples/fib.coil -o /tmp/fib -g && lldb /tmp/fib      
 
 # Safety in debug: slice bounds checks, a poisoning debug allocator, and a
 # stack-escape lint — off by default and zero-cost when off (every check lives
-# behind a macro branched on (debug-checks?) at expansion time).
+# behind a macro branched on (primitive/debug-checks?) at expansion time).
 build/bin/coil run src/examples/arraylist.coil --debug-checks
 # ⚠ --debug-checks auto-loads the stack lint as a metaprogram, so the file must
 #   declare (module NAME) — a bare single-file program without one is refused.
@@ -535,13 +552,13 @@ the value) and run:
 
 ```
 $ build/bin/coil repl
-coil> (defn square [(x i64)] (-> i64) (imul x x))
+coil> (defn square [(x i64)] (-> i64) (primitive/imul x x))
 #'repl/square
 coil> (square 12)
 144
 coil> (def n (square 3))          ; bind a VALUE for later inputs
 n = 9
-coil> (iadd n 33)
+coil> (primitive/iadd n 33)
 42
 ```
 
@@ -555,8 +572,8 @@ is an immutable snapshot — rebind with another `def`; persistent *mutable*
 state is an explicit pointer, Coil's normal discipline:
 
 ```
-coil> (def counter (alloc-heap i64))
-coil> (store! counter (iadd (load counter) 1))
+coil> (def counter (alloc/heap i64))
+coil> (primitive/store! counter (primitive/iadd (primitive/load counter) 1))
 ```
 
 The trade: a crashing eval takes the session down (it *is* the process).

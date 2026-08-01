@@ -14,15 +14,14 @@ before writing Coil.
   (a `;;` block directly above a definition is its doc; a single `;` is not).
 - The compiler is **self-hosted** (written in Coil, in `src/compiler/`). Rebuild +
   verify it with `python3 scripts/dev.py build full` (fixpoint + gates).
-- ⚠ The gate corpora include **every `src/stdlib/*.coil`** and the `src/examples/`, `src/apps/` and
-  `src/examples/freestanding/` files listed in each `tests/compiler/oracle/*/corpus.txt`. Changing one
-  of those changes what the gates see, so re-bless the affected snapshots in the same
-  commit: `python3 scripts/oracle.py snapshot <stage> --compiler build/bin/coil`
+- The snapshot gates use small, stage-specific fixtures listed in
+  `scripts/oracle.py::STAGE_INPUTS`, plus curated negative and diagnostic fixtures.
+  Broad application and standard-library coverage belongs to the runtime and CLI gates.
+  When a listed fixture or its compiler-stage output changes, re-bless that stage in the
+  same commit: `python3 scripts/oracle.py snapshot <stage> --compiler build/bin/coil`
   (`<stage>` is `read`, `full`, `ast`, `load`, `resolved`, `checked`, `expand`,
-  `mono`, `ir`, `diag`, `x86`, or `all`). Rebootstrap runs all of them, so a
-  forgotten one fails there rather than rotting silently — which is exactly what
-  happened to read/load/expand/ir/x86 when `src/stdlib/slice.coil` changed and only some
-  snapshots were re-blessed.
+  `mono`, `ir`, `diag`, `x86`, or `all`). Rebootstrap runs all of them and also
+  verifies the larger behavioral corpus.
 
 ## Where things live
 

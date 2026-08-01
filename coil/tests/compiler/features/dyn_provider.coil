@@ -1,4 +1,5 @@
 (module dyn_provider)
+(import "primitive.coil" :as primitive)
 
 (export ModelProvider Provider)
 
@@ -9,4 +10,4 @@
 
 (impl ModelProvider Provider
   (run [(self (ptr Provider))] (-> i64)
-    (load (field self value))))
+    (primitive/load (primitive/field self value))))

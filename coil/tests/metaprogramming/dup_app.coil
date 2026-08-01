@@ -1,4 +1,6 @@
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "sigcheck.coil" :use *)
 (import "dupa.coil" :as da)
 (import "dupb.coil" :as db)
@@ -7,6 +9,6 @@
 ; MISS the policy violation. With node-identity resolution, the checker resolves each
 ; call exactly: da/probe → i64 (fine), db/probe → (ptr i64) (banned).
 (defn main [] (-> i64)
-  (let [p (alloc-stack i64)]
-    (store! p 0)
-    (iadd (da/probe) (load (db/probe p)))))
+  (let [p (alloc/stack i64)]
+    (primitive/store! p 0)
+    (primitive/iadd (da/probe) (primitive/load (db/probe p)))))

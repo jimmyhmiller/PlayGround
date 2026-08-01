@@ -1,14 +1,16 @@
 (module shapes)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (defstruct Point [(x i64) (y i64)])
-(defn clamp0 [(n i64)] (-> i64) (if (icmp-lt n 0) 0 n))
+(defn clamp0 [(n i64)] (-> i64) (if (primitive/icmp-lt n 0) 0 n))
 (defn make-point [(x i64) (y i64)] (-> Point)
-  (let [p (alloc-stack Point)]
-    (store! (field p x) (clamp0 x))
-    (store! (field p y) (clamp0 y))
-    (load p)))
+  (let [p (alloc/stack Point)]
+    (primitive/store! (primitive/field p x) (clamp0 x))
+    (primitive/store! (primitive/field p y) (clamp0 y))
+    (primitive/load p)))
 (defn dist2 [(p Point)] (-> i64)
-  (iadd (imul (load (field p x)) (load (field p x)))
-        (imul (load (field p y)) (load (field p y)))))
+  (primitive/iadd (primitive/imul (primitive/load (primitive/field p x)) (primitive/load (primitive/field p x)))
+        (primitive/imul (primitive/load (primitive/field p y)) (primitive/load (primitive/field p y)))))
 ; A by-value struct reaching C through an INDIRECT call. This locks in the C-ABI
 ; lowering of `call-ptr`, which used to be skipped entirely: the call was built
 ; from the declared parameter types, so the callee (declared with the C-lowered
@@ -19,7 +21,7 @@
 ; load or store can touch it.
 (defstruct Tiny [(a u8) (b u8) (c u8) (d u8)])
 (defstruct Sink [(f (fnptr c [Tiny] i64))])
-(defn via-fnptr [(s (ptr Sink)) (t Tiny)] (-> i64) (call-ptr (load (field s f)) t))
+(defn via-fnptr [(s (ptr Sink)) (t Tiny)] (-> i64) (primitive/call-ptr (primitive/load (primitive/field s f)) t))
 
 (export-c
   [make-point :as "shapes_make_point"]

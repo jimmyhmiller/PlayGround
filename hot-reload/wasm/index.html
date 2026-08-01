@@ -18,9 +18,11 @@
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column;
   }
   header {
     padding: 18px 24px 14px; border-bottom: 1px solid var(--edge);
@@ -29,9 +31,35 @@
   header p { margin: 5px 0 0; color: var(--dim); font-size: 13px; max-width: 78ch; }
   main {
     display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 18px; padding: 18px 24px 28px; align-items: start;
+    gap: 18px; padding: 18px 24px; align-items: stretch;
+    flex: 1; min-height: 0; overflow: hidden;
   }
-  @media (max-width: 1040px) { main { grid-template-columns: minmax(0, 1fr); } }
+  main > section { min-width: 0; min-height: 0; }
+  .left-column {
+    display: grid; grid-template-rows: minmax(0, .85fr) minmax(0, 1.15fr);
+    gap: 18px; overflow: hidden;
+  }
+  .left-column > .panel { min-height: 0; }
+  .left-column > .stage { display: flex; flex-direction: column; }
+  .left-column > .stage canvas { flex: 1; min-height: 0; object-fit: contain; }
+  .left-column > #walkthrough { display: flex; flex-direction: column; }
+  .left-column > #walkthrough > .body {
+    display: flex; flex: 1; flex-direction: column;
+    min-height: 0; overflow: hidden;
+  }
+  #walkthrough .scenario-source {
+    flex: 1; min-height: 0; max-height: none;
+  }
+  .right-column, .source-panel, .source-panel > .body {
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .source-panel { height: 100%; }
+  .source-panel > .body { flex: 1; overflow-y: auto; }
+  @media (max-width: 1040px) {
+    main { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: 12px; gap: 12px; }
+    header { padding: 12px; }
+    .left-column { gap: 12px; }
+  }
   .panel {
     background: var(--panel); border: 1px solid var(--edge);
     border-radius: 10px; overflow: hidden;
@@ -74,7 +102,7 @@
   .editor-stack {
     position: relative; background: #0b0f14;
     border: 1px solid var(--edge); border-radius: 8px;
-    height: 420px; overflow: hidden;
+    flex: 1; min-height: 180px; overflow: hidden;
   }
   .editor-stack:focus-within { border-color: var(--accent); }
   .editor-stack textarea,
@@ -175,7 +203,7 @@
     border: 1px solid var(--edge); border-radius: 7px;
     font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
     white-space: pre-wrap; overflow-wrap: break-word; color: var(--ink);
-    max-height: 260px; overflow: auto;
+    max-height: min(180px, 18vh); overflow: auto;
   }
 
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -189,11 +217,6 @@
   tr.broken td { color: var(--bad); }
   .why { color: var(--bad); font-size: 11px; }
 
-  dl.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 0; }
-  dl.stats div { background: #0b0f14; border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px; }
-  dl.stats dt { color: var(--dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
-  dl.stats dd { margin: 3px 0 0; font-family: var(--mono); font-size: 17px; }
-  dl.stats dd.pinned { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -203,7 +226,7 @@
 </header>
 
 <main>
-  <section>
+  <section class="left-column">
     <div class="panel stage">
       <canvas id="stage" width="640" height="400"></canvas>
       <div class="frozen-veil">
@@ -224,32 +247,34 @@
             Pausing stops the host from stepping the program. Edits still install while paused.
           </span>
         </div>
-        <dl class="stats">
-          <div><dt>Frames</dt><dd id="stat-frames">0</dd></div>
-          <div><dt>Canvas opened</dt><dd id="stat-canvas" class="pinned">0</dd></div>
-          <div><dt>Shapes drawn</dt><dd id="stat-shapes">0</dd></div>
-          <div><dt>Status</dt><dd id="stat-status">booting</dd></div>
-        </dl>
       </div>
     </div>
 
-    <div class="panel" style="margin-top:18px">
-      <h2>The live world</h2>
-      <div class="body">
-        <table>
-          <thead><tr><th>Function</th><th style="width:5.5em">Version</th></tr></thead>
-          <tbody id="fns"></tbody>
-        </table>
-        <table style="margin-top:14px">
-          <thead><tr><th>Type</th><th style="width:5.5em">Version</th><th>Shape</th></tr></thead>
-          <tbody id="types"></tbody>
-        </table>
+    <div class="panel" id="walkthrough">
+    <h2>Walkthrough — seven steps, in order</h2>
+    <div class="body">
+      <ol class="step-dots" id="step-dots"></ol>
+      <h3 class="step-title" id="step-title"></h3>
+      <p class="step-watch" id="step-watch"></p>
+      <pre class="scenario-source" id="step-source"></pre>
+      <p class="hint" style="margin: -4px 0 10px">
+        The numbers here drag too — scrubbing one applies the step live.
+      </p>
+      <div class="row">
+        <button class="primary" id="step-apply">Apply this step</button>
+        <button class="warn" id="step-resume" style="display:none">Thaw &amp; resume</button>
+        <button id="step-next">Next step →</button>
+        <button id="step-back">← Back</button>
+        <button id="step-restart">Start over</button>
       </div>
+      <div id="step-status"></div>
     </div>
+    </div>
+
   </section>
 
-  <section>
-    <div class="panel">
+  <section class="right-column">
+    <div class="panel source-panel">
     <h2>Source — edit and apply while it runs</h2>
     <div class="body">
       <div class="editor-stack" id="editor-stack">
@@ -276,26 +301,6 @@
     </div>
     </div>
 
-    <div class="panel" id="walkthrough" style="margin-top:18px">
-    <h2>Walkthrough — seven steps, in order</h2>
-    <div class="body">
-      <ol class="step-dots" id="step-dots"></ol>
-      <h3 class="step-title" id="step-title"></h3>
-      <p class="step-watch" id="step-watch"></p>
-      <pre class="scenario-source" id="step-source"></pre>
-      <p class="hint" style="margin: -4px 0 10px">
-        The numbers here drag too — scrubbing one applies the step live.
-      </p>
-      <div class="row">
-        <button class="primary" id="step-apply">Apply this step</button>
-        <button class="warn" id="step-resume" style="display:none">Thaw &amp; resume</button>
-        <button id="step-next">Next step →</button>
-        <button id="step-back">← Back</button>
-        <button id="step-restart">Start over</button>
-      </div>
-      <div id="step-status"></div>
-    </div>
-    </div>
   </section>
 </main>
 
@@ -356,62 +361,30 @@ function advanceOneFrame() {
   if (status === STATUS_RUNNING) {
     paint(demo.draw_ops());
     document.body.classList.remove("frozen");
-    $("stat-status").textContent = "running";
   } else if (status === STATUS_FROZEN) {
     // Deliberately do NOT repaint: the last completed frame stays on screen.
     document.body.classList.add("frozen");
     $("condition").textContent = demo.condition || "(frozen)";
-    $("stat-status").textContent = "frozen";
     renderFrozenActions();
-  } else if (status === STATUS_DONE) {
-    $("stat-status").textContent = "completed";
-  } else if (status === STATUS_CAPPED) {
-    $("stat-status").textContent = "no yield reached";
   }
-  refreshStats();
+  refreshUi();
 }
 
-function refreshStats() {
-  if (paused && !demo.frozen) $("stat-status").textContent = "paused";
+function refreshUi() {
   // Resuming is offered only on repair steps. It is available a step
   // earlier too — where it would simply re-trap, since nothing is fixed yet —
   // but that is a detour from the walkthrough's one next thing to do.
   $("step-resume").style.display =
     demo.frozen && (step === 3 || step === STEP_COUNT - 1) ? "" : "none";
-  $("stat-frames").textContent = demo.frames;
-  $("stat-canvas").textContent = demo.canvases_opened;
-  $("stat-shapes").textContent = demo.shapes_drawn.toLocaleString();
 
-  // The inspector is read out of the engine; only redraw it when it changes.
-  const world = demo.world_json();
-  if (world !== lastWorld) {
-    lastWorld = world;
-    renderWorld(JSON.parse(world));
-  }
 }
 
 function tick() {
   // Keep the loop alive while paused so edits, the inspector, and Step still
   // respond — the host simply does not advance the program.
-  if (paused) refreshStats();
+  if (paused) refreshUi();
   else advanceOneFrame();
   requestAnimationFrame(tick);
-}
-
-function renderWorld({ functions, types }) {
-  $("fns").innerHTML = functions.map((f) => {
-    const why = f.broken && f.why
-      ? `<tr class="broken"><td colspan="2" class="why">↳ ${escapeHtml(f.why)}</td></tr>`
-      : "";
-    return `<tr class="${f.broken ? "broken" : ""}">
-      <td>${escapeHtml(f.name)}${f.broken ? " — BROKEN" : ""}</td>
-      <td class="v">${f.version}</td></tr>${why}`;
-  }).join("");
-
-  $("types").innerHTML = types.map((t) => `<tr>
-      <td>${escapeHtml(t.name)}</td>
-      <td class="v">${t.version}</td>
-      <td class="shape">${escapeHtml(t.shape)}</td></tr>`).join("");
 }
 
 const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) =>
@@ -746,7 +719,7 @@ $("pause").addEventListener("click", () => {
   paused = !paused;
   $("pause").textContent = paused ? "Resume" : "Pause";
   $("pause").classList.toggle("primary", paused);
-  refreshStats();
+  refreshUi();
 });
 $("step").addEventListener("click", () => {
   // One frame regardless of pause state — the natural companion to pausing.

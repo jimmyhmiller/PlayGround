@@ -1,3 +1,6 @@
+(module example.closure)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 ; Closures with manual memory. A closure = { code pointer, environment pointer }.
 ; The environment is a struct on the heap; the env pointer is type-erased to
 ; (ptr i8) so heterogeneous closures share ONE Closure type and ONE generic
@@ -11,36 +14,36 @@
 ; ---- an adder: captures n, computes n + x ----
 (defstruct AdderEnv [(n :i64)])
 (defn adder-code [(env (ptr i8)) (x :i64)] (-> :i64)
-  (iadd (load (field (cast (ptr AdderEnv) env) n)) x))
+  (primitive/iadd (primitive/load (primitive/field (primitive/cast (ptr AdderEnv) env) n)) x))
 
 (defn make-adder [(n :i64)] (-> (ptr Closure))
-  (let [e (alloc-heap AdderEnv)
-        c (alloc-heap Closure)]
-    (store! (field e n) n)
-    (store! (field c code) (fnptr-of adder-code))
-    (store! (field c env) (cast (ptr i8) e))
+  (let [e (alloc/heap AdderEnv)
+        c (alloc/heap Closure)]
+    (primitive/store! (primitive/field e n) n)
+    (primitive/store! (primitive/field c code) (primitive/fnptr-of adder-code))
+    (primitive/store! (primitive/field c env) (primitive/cast (ptr i8) e))
     c))
 
 ; ---- a multiplier: captures k, computes k * x (different env, same Closure) ----
 (defstruct MulEnv [(k :i64)])
 (defn mul-code [(env (ptr i8)) (x :i64)] (-> :i64)
-  (imul (load (field (cast (ptr MulEnv) env) k)) x))
+  (primitive/imul (primitive/load (primitive/field (primitive/cast (ptr MulEnv) env) k)) x))
 
 (defn make-mul [(k :i64)] (-> (ptr Closure))
-  (let [e (alloc-heap MulEnv)
-        c (alloc-heap Closure)]
-    (store! (field e k) k)
-    (store! (field c code) (fnptr-of mul-code))
-    (store! (field c env) (cast (ptr i8) e))
+  (let [e (alloc/heap MulEnv)
+        c (alloc/heap Closure)]
+    (primitive/store! (primitive/field e k) k)
+    (primitive/store! (primitive/field c code) (primitive/fnptr-of mul-code))
+    (primitive/store! (primitive/field c env) (primitive/cast (ptr i8) e))
     c))
 
 ; one generic apply works for ANY closure
 (defn apply [(c (ptr Closure)) (x :i64)] (-> :i64)
-  (call-ptr (load (field c code)) (load (field c env)) x))
+  (primitive/call-ptr (primitive/load (primitive/field c code)) (primitive/load (primitive/field c env)) x))
 
 (defn free-closure [(c (ptr Closure))] (-> :i64)
-  (do (free (load (field c env)))    ; free the captured environment
-      (free c)))                      ; free the closure itself
+  (do (primitive/free (primitive/load (primitive/field c env)))    ; free the captured environment
+      (primitive/free c)))                      ; free the closure itself
 
 (defn main [] (-> :i64)
   (let [add5 (make-adder 5)
@@ -49,4 +52,4 @@
           b (apply mul3 14)]     ; 3 * 14 = 42
       (free-closure add5)
       (free-closure mul3)
-      (iadd a (isub b 42)))))    ; 42 + (42 - 42) = 42
+      (primitive/iadd a (primitive/isub b 42)))))    ; 42 + (42 - 42) = 42

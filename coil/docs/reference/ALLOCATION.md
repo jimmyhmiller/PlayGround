@@ -283,7 +283,7 @@ runaway; the constant is simply enormous.
 
 Separating the two variables — 4,000 defns × 1 expression vs 4,000 × 10 vs 1 × 40,000 —
 gives roughly **36 KB per definition plus 10 KB per expression**. For scale, `sizeof Sexp`
-is 64 bytes and `sizeof Expr` is 168. An `(iadd x 5)` is a few hundred bytes of actual
+is 64 bytes and `sizeof Expr` is 168. An `(primitive/iadd x 5)` is a few hundred bytes of actual
 data and costs about 10 KB, so we spend on the order of 100× the size of the thing being
 represented.
 

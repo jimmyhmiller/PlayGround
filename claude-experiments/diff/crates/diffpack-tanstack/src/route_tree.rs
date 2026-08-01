@@ -215,7 +215,7 @@ fn source_dir(project_root: &Path) -> PathBuf {
 
 /// Parse every route file under `routes_dir` (the default `routes` directory,
 /// with no ignore pattern) and assemble the route graph. Kept for the tests and
-/// callers that use the convention default; [`generate_from_routes_dir_with`] is
+/// callers that use the convention default; the private configurable variant is
 /// the configurable core.
 pub fn generate_from_routes_dir(routes_dir: &Path) -> Result<RouteTree, String> {
     generate_from_routes_dir_with(routes_dir, DEFAULT_ROUTES_DIR, &RouteIgnore::none())

@@ -1,4 +1,5 @@
 (module scheme)
+(import "primitive.coil" :as primitive)
 ; The SAME metacircular Scheme evaluator as meta/evalcore.scm, but HAND-WRITTEN in
 ; native Coil (over the Val runtime, with the transparent-GC transform). Mirrors
 ; evalcore.scm function-for-function. Embeds the same fib target and runs it, so we
@@ -72,12 +73,12 @@
 ; Sexp -> Val (same as scheme.coil)
 (defn sexp->val [(x Sexp)] (-> Val)
   (let [tg (sx-tag x)]
-    (if (icmp-eq tg 0) (mk-int (sx-ival x))
-    (if (icmp-eq tg 2) (mk-sym (intern (sx-sval x)))
-    (if (or (icmp-eq tg 6) (icmp-eq tg 7)) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x)))
+    (if (primitive/icmp-eq tg 0) (mk-int (sx-ival x))
+    (if (primitive/icmp-eq tg 2) (mk-sym (intern (sx-sval x)))
+    (if (or (primitive/icmp-eq tg 6) (primitive/icmp-eq tg 7)) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x)))
         (mk-int 0))))))
 (defn sexp-list->val [(items (ptr (ArrayList Sexp))) (i i64) (n i64)] (-> Val)
-  (if (icmp-ge i n) (snil) (cons (sexp->val (sx-at items i)) (sexp-list->val items (+ i 1) n))))
+  (if (primitive/icmp-ge i n) (snil) (cons (sexp->val (sx-at items i)) (sexp-list->val items (+ i 1) n))))
 
 (defn main [] (-> :i64)
   (set-genv! (snil))

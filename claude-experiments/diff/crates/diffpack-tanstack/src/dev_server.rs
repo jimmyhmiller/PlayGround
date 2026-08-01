@@ -19,7 +19,7 @@
 //!    manifest + server-fn resolver virtual modules, `emit_server`) exactly as
 //!    `build-app` does, but keep both bundlers alive and emit with
 //!    `EmitOptions { hmr: true, .. }` (the HMR runtime, version-aware dynamic
-//!    import, and Fast Refresh instrumentation from [`crate::hmr`]). The mandatory
+//!    import, and Fast Refresh instrumentation from the Web HMR layer). The mandatory
 //!    client-before-server order is preserved (the server manifest needs the
 //!    finished client chunk URLs).
 //! 2. Boot the emitted `server/index.mjs` as a child Node process on an internal
@@ -47,7 +47,7 @@
 //! edit that grows/shrinks the graph (full rebuild or reload — the module ids
 //! shift, so these cannot be hot-patched); and BOTH app shapes — a TanStack Start
 //! app (client + Node SSR, in-process server HMR) and a plain Vite HTML-entry SPA
-//! (single client environment, static serving, no Node child; see the [`spa`]
+//! (single client environment, static serving, no Node child; see the Web SPA
 //! module). Deferred, with clear hard errors rather than silent partial handling:
 //! CSS hot-swap without reload (a `.css` edit reloads today), config-change
 //! handling, and error overlays. An edit class this slice does not handle is a hard

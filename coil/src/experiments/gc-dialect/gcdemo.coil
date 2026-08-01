@@ -1,4 +1,5 @@
 (module app)
+(import "primitive.coil" :as primitive)
 (import "io.coil"  :use *)
 (import "fmt.coil" :use *)
 (import "gc.coil"  :use *)
@@ -9,14 +10,14 @@
 (defn run [(n :i64)] (-> :i64)
   (let [(mut i) 0 (mut acc) 0]
     (loop
-      (if (icmp-ge (load i) n)
-          (break (load acc))
+      (if (primitive/icmp-ge (primitive/load i) n)
+          (break (primitive/load acc))
           (do
             (gc-let p (new Point)
-              (fset p x (load i))
-              (fset p y (imul (load i) 2))
-              (store! acc (iadd (load acc) (iadd (fget p x) (fget p y)))))
-            (store! i (iadd (load i) 1)))))))
+              (fset p x (primitive/load i))
+              (fset p y (primitive/imul (primitive/load i) 2))
+              (primitive/store! acc (primitive/iadd (primitive/load acc) (primitive/iadd (fget p x) (fget p y)))))
+            (primitive/store! i (primitive/iadd (primitive/load i) 1)))))))
 
 (defn main [] (-> :i64)
   (let [s (run 100000)]

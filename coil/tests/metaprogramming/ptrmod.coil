@@ -1,2 +1,3 @@
 (module ptrmod)
+(import "primitive.coil" :as primitive)
 (defn ident [(p (ptr i64))] (-> (ptr i64)) p)

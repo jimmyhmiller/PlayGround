@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 pub mod async_graph;
 pub mod build_profile;
 pub mod bundle;
-pub mod cancel;
+mod cancel;
 pub mod compiler;
 pub mod dead_branch;
 pub mod diagnostic;
-pub mod emission;
+mod emission;
 pub mod frontend_profile;
 pub mod graph;
 pub mod js_reachability;
@@ -29,7 +29,7 @@ pub mod source_map;
 pub mod text_edit;
 pub mod transform;
 pub mod tree_shake;
-pub mod visualization;
+mod visualization;
 
 pub use cancel::CancelToken;
 pub use diagnostic::{Diagnostic, DiagnosticKind, partition_diagnostics};
@@ -106,6 +106,7 @@ pub struct LoadedSource {
     pub language: SourceLanguage,
     pub source_map: Option<Vec<u8>>,
     pub watch_files: Vec<PathBuf>,
+    pub diagnostics: Vec<ProviderMessage>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +125,13 @@ pub struct TransformOutput {
     pub source_map: Option<Vec<u8>>,
     pub watch_files: Vec<PathBuf>,
     pub emitted_assets: Vec<EmittedAsset>,
+    pub diagnostics: Vec<ProviderMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderMessage {
+    pub message: String,
+    pub fatal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +243,7 @@ impl ProviderPipeline {
                 source.source_map = output.source_map;
                 source.watch_files.extend(output.watch_files);
                 assets.extend(output.emitted_assets);
+                source.diagnostics.extend(output.diagnostics);
             }
         }
         source.watch_files.sort();

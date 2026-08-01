@@ -2,10 +2,11 @@
 ; compiler. All extern declarations live here; modules that call them
 ; (import "ffi.coil" :use *). Extern link-names are the bare C symbols.
 (module ffi)
+(import "../stdlib/primitive.coil" :as primitive)
 
 (extern open :cc c [(ptr i8) i32] (-> i32))
 (extern close :cc c [i32] (-> i32))
-; libc `void exit(int)` — process exit with a code. Declared `(-> i64)` (like
+; libc `void exit(int?)` — process exit with a code. Declared `(-> i64)` (like
 ; `abort`) so it composes as an expression; the return is never taken (exit does
 ; not return). Used to halt the tool with the nonzero exit code the
 ; `report`/`ExitCode::FAILURE` produces, instead of `abort`'s SIGABRT (134).
@@ -199,7 +200,7 @@
 (extern LLVMBuildMemCpy :cc c [(ptr i8) (ptr i8) i32 (ptr i8) i32 (ptr i8)] (-> (ptr i8)))
 ; ---- inline asm (:shim trampolines + register-constrained shim call sites) ----
 (extern LLVMGetInlineAsm :cc c [(ptr i8) (ptr i8) i64 (ptr i8) i64 i32 i32 i32 i32] (-> (ptr i8)))
-; ---- module linking (for (llvm-ir ...)) ----
+; ---- module linking (for (primitive/llvm-ir ...)) ----
 (extern LLVMCreateMemoryBufferWithMemoryRangeCopy :cc c [(ptr i8) i64 (ptr i8)] (-> (ptr i8)))
 (extern LLVMParseIRInContext :cc c [(ptr i8) (ptr i8) (ptr (ptr i8)) (ptr (ptr i8))] (-> i32))
 (extern LLVMLinkModules2 :cc c [(ptr i8) (ptr i8)] (-> i32))

@@ -1,7 +1,8 @@
 ; src/compiler/diag.coil — self-host Coil compiler, diag module.
 (module diag)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -16,34 +17,34 @@
 
 (defn dump-error [(w (ptr Writer)) (d (ptr Diag))] (-> i64)
   (ps w "(error")
-  (dump-span w (load (field d source)) (load (field d lo)) (load (field d hi)) (load (field d ctxt)))
+  (dump-span w (primitive/load (primitive/field d source)) (primitive/load (primitive/field d lo)) (primitive/load (primitive/field d hi)) (primitive/load (primitive/field d ctxt)))
   (ps w " \"")
-  (esc-write w (load (field d msg)))
+  (esc-write w (primitive/load (primitive/field d msg)))
   (ps w "\")"))
 
 (defn sm-src-text [(s (mut LS)) (id i64)] (-> (Option (slice u8)))
-  (if (or (icmp-lt id 0) (icmp-ge id (al-len [Source] (load (field s sources)))))
+  (if (or (primitive/icmp-lt id 0) (primitive/icmp-ge id (al-len [Source] (primitive/load (primitive/field s sources)))))
       (None [(slice u8)])
-      (let [sp (alloc-stack Source)]
-        (store! sp (al-get [Source] (load (field s sources)) id))
-        (Some (load (field sp text))))))
+      (let [sp (alloc/stack Source)]
+        (primitive/store! sp (al-get [Source] (primitive/load (primitive/field s sources)) id))
+        (Some (primitive/load (primitive/field sp text))))))
 (defn sm-src-name [(s (mut LS)) (id i64)] (-> (slice u8))
-  (if (or (icmp-lt id 0) (icmp-ge id (al-len [Source] (load (field s sources)))))
+  (if (or (primitive/icmp-lt id 0) (primitive/icmp-ge id (al-len [Source] (primitive/load (primitive/field s sources)))))
       "<source>"
-      (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load (field s sources)) id)) (load (field sp name)))))
+      (let [sp (alloc/stack Source)] (primitive/store! sp (al-get [Source] (primitive/load (primitive/field s sources)) id)) (primitive/load (primitive/field sp name)))))
 (defn sm-exp [(s (mut LS)) (ctxt i64)] (-> (Option Expansion))
-  (if (or (icmp-le ctxt 0) (icmp-gt ctxt (al-len [Expansion] (load (field s expansions)))))
+  (if (or (primitive/icmp-le ctxt 0) (primitive/icmp-gt ctxt (al-len [Expansion] (primitive/load (primitive/field s expansions)))))
       (None [Expansion])
-      (Some (al-get [Expansion] (load (field s expansions)) (isub ctxt 1)))))
+      (Some (al-get [Expansion] (primitive/load (primitive/field s expansions)) (primitive/isub ctxt 1)))))
 
 ; number of decimal digits in n (n >= 0).
 (defn dec-len [(n i64)] (-> i64)
-  (if (icmp-lt n 10) 1 (iadd 1 (dec-len (udiv n 10)))))
+  (if (primitive/icmp-lt n 10) 1 (primitive/iadd 1 (dec-len (primitive/udiv n 10)))))
 (defn wspaces [(w (ptr Writer)) (n i64)] (-> i64)
-  (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break) (do (wb w 32) (store! i (iadd (load i) 1))))))
+  (let [(mut i) 0] (loop (if (primitive/icmp-ge (primitive/load i) n) (break) (do (wb w 32) (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 (defn wrepeat [(w (ptr Writer)) (b i64) (n i64)] (-> i64)
-  (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break) (do (wb w b) (store! i (iadd (load i) 1))))))
+  (let [(mut i) 0] (loop (if (primitive/icmp-ge (primitive/load i) n) (break) (do (wb w b) (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 
 ; line (1-based), column (1-based, bytes = chars for ASCII), and the offending
@@ -51,27 +52,27 @@
 (defstruct Loc [(line i64) (col i64) (lstart i64) (lend i64)])
 (defn locate [(src (slice u8)) (off0 i64)] (-> Loc)
   (let [n (slice-len src)
-        off (if (icmp-gt off0 n) n off0)
+        off (if (primitive/icmp-gt off0 n) n off0)
         (mut ls) 0
         (mut line) 1
         (mut k) 0]
-    (loop (if (icmp-ge (load k) off)
+    (loop (if (primitive/icmp-ge (primitive/load k) off)
               (break)
               (do
-                (when (icmp-eq (cast i64 (slice-get src (load k))) 10)
-                      (store! line (iadd (load line) 1))
-                      (store! ls (iadd (load k) 1)))
-                (store! k (iadd (load k) 1)))))
+                (when (primitive/icmp-eq (primitive/cast i64 (slice-get src (primitive/load k))) 10)
+                      (primitive/store! line (primitive/iadd (primitive/load line) 1))
+                      (primitive/store! ls (primitive/iadd (primitive/load k) 1)))
+                (primitive/store! k (primitive/iadd (primitive/load k) 1)))))
     (let [(mut le) off]
-      (loop (if (or (icmp-ge (load le) n) (icmp-eq (cast i64 (slice-get src (load le))) 10))
+      (loop (if (or (primitive/icmp-ge (primitive/load le) n) (primitive/icmp-eq (primitive/cast i64 (slice-get src (primitive/load le))) 10))
                 (break)
-                (store! le (iadd (load le) 1))))
-      (let [lp (alloc-stack Loc)]
-        (store! (field lp line) (load line))
-        (store! (field lp col) (iadd (isub off (load ls)) 1))
-        (store! (field lp lstart) (load ls))
-        (store! (field lp lend) (load le))
-        (load lp)))))
+                (primitive/store! le (primitive/iadd (primitive/load le) 1))))
+      (let [lp (alloc/stack Loc)]
+        (primitive/store! (primitive/field lp line) (primitive/load line))
+        (primitive/store! (primitive/field lp col) (primitive/iadd (primitive/isub off (primitive/load ls)) 1))
+        (primitive/store! (primitive/field lp lstart) (primitive/load ls))
+        (primitive/store! (primitive/field lp lend) (primitive/load le))
+        (primitive/load lp)))))
 
 ; Render one located frame (mirrors span::render_frame). Returns false (no output)
 ; when the span is dummy / out of range, so the caller falls back to the message.
@@ -79,16 +80,16 @@
   (match (sm-src-text (mut s) source)
     (None [] false)
     (Some [src]
-          (if (or (icmp-lt lo 0) (icmp-gt lo (slice-len src)))
+          (if (or (primitive/icmp-lt lo 0) (primitive/icmp-gt lo (slice-len src)))
               false
-              (let [loc (alloc-stack Loc)]
-                (store! loc (locate src lo))
-                (let [line (load (field loc line))
-                      col (load (field loc col))
-                      lstart (load (field loc lstart))
-                      lend (load (field loc lend))
-                      hic (let [h (if (icmp-gt hi lend) lend hi)] (if (icmp-lt h lo) lo h))
-                      carets (let [c (isub hic lo)] (if (icmp-lt c 1) 1 c))
+              (let [loc (alloc/stack Loc)]
+                (primitive/store! loc (locate src lo))
+                (let [line (primitive/load (primitive/field loc line))
+                      col (primitive/load (primitive/field loc col))
+                      lstart (primitive/load (primitive/field loc lstart))
+                      lend (primitive/load (primitive/field loc lend))
+                      hic (let [h (if (primitive/icmp-gt hi lend) lend hi)] (if (primitive/icmp-lt h lo) lo h))
+                      carets (let [c (primitive/isub hic lo)] (if (primitive/icmp-lt c 1) 1 c))
                       numlen (dec-len line)
                       file (sm-src-name (mut s) source)]
                   ; Window a very long line around the span. A macro-generated line can be tens
@@ -97,19 +98,19 @@
                   ; width matches the caret math) marking either truncated end.
                   (let [maxw 120
                         ctx 32
-                        long (icmp-gt (isub lend lstart) maxw)
-                        wstart (if long (let [x (isub lo ctx)] (if (icmp-lt x lstart) lstart x)) lstart)
-                        wend (if long (let [x (iadd wstart maxw)] (if (icmp-gt x lend) lend x)) lend)
-                        pre (icmp-gt wstart lstart)
-                        post (icmp-lt wend lend)
+                        long (primitive/icmp-gt (primitive/isub lend lstart) maxw)
+                        wstart (if long (let [x (primitive/isub lo ctx)] (if (primitive/icmp-lt x lstart) lstart x)) lstart)
+                        wend (if long (let [x (primitive/iadd wstart maxw)] (if (primitive/icmp-gt x lend) lend x)) lend)
+                        pre (primitive/icmp-gt wstart lstart)
+                        post (primitive/icmp-lt wend lend)
                         ; caret offset = span start within the window (+3 for a leading "...")
-                        pad (iadd (isub lo wstart) (when pre 3))
+                        pad (primitive/iadd (primitive/isub lo wstart) (when pre 3))
                         ; don't let carets run past the visible window
                         shown
-                          (let [avail (isub wend lo)
-                                c (if (icmp-lt carets avail) carets avail)]
-                            (if (icmp-lt c 1) 1 c))]
-                    (when (icmp-gt (slice-len msg) 0) (ps w msg) (wb w 10))
+                          (let [avail (primitive/isub wend lo)
+                                c (if (primitive/icmp-lt carets avail) carets avail)]
+                            (if (primitive/icmp-lt c 1) 1 c))]
+                    (when (primitive/icmp-gt (slice-len msg) 0) (ps w msg) (wb w 10))
                     (wspaces w numlen)
                     (wb w 32)
                     (ps w arrow)
@@ -137,49 +138,49 @@
 
 ; Render one diagnostic body (mirrors span::render). No leading `error:`.
 (defn render-diag [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
-  (let [dp (alloc-stack Diag)]
-    (store! dp d)
-    (let [source (load (field dp source))
-          lo (load (field dp lo))
-          hi (load (field dp hi))
-          ctxt0 (load (field dp ctxt))
-          msg (load (field dp msg))]
+  (let [dp (alloc/stack Diag)]
+    (primitive/store! dp d)
+    (let [source (primitive/load (primitive/field dp source))
+          lo (primitive/load (primitive/field dp lo))
+          hi (primitive/load (primitive/field dp hi))
+          ctxt0 (primitive/load (primitive/field dp ctxt))
+          msg (primitive/load (primitive/field dp msg))]
       (if (not (render-frame w (mut s) source lo hi msg "-->"))
           (ps w msg)  ; fallback: bare message
           (let [(mut ctxt) ctxt0]
-            (loop (match (sm-exp (mut s) (load ctxt))
+            (loop (match (sm-exp (mut s) (primitive/load ctxt))
                     (None [] (break))
                     (Some [exp]
-                          (let [ep (alloc-stack Expansion)]
-                            (store! ep exp)
-                            (let [def-dummy (icmp-lt (load (field ep def_lo)) 0)
-                                  at-src (if def-dummy (load (field ep call_source)) (load (field ep def_source)))
-                                  at-lo (if def-dummy (load (field ep call_lo)) (load (field ep def_lo)))
-                                  at-hi (if def-dummy (load (field ep call_hi)) (load (field ep def_hi)))
+                          (let [ep (alloc/stack Expansion)]
+                            (primitive/store! ep exp)
+                            (let [def-dummy (primitive/icmp-lt (primitive/load (primitive/field ep def_lo)) 0)
+                                  at-src (if def-dummy (primitive/load (primitive/field ep call_source)) (primitive/load (primitive/field ep def_source)))
+                                  at-lo (if def-dummy (primitive/load (primitive/field ep call_lo)) (primitive/load (primitive/field ep def_lo)))
+                                  at-hi (if def-dummy (primitive/load (primitive/field ep call_hi)) (primitive/load (primitive/field ep def_hi)))
                                   note
-                                    (sconcat3 (load (field s a))
+                                    (sconcat3 (primitive/load (primitive/field s a))
                                               "note: in expansion of macro `"
-                                              (load (field ep macro_name))
+                                              (primitive/load (primitive/field ep macro_name))
                                               "`")]
                               (wb w 10)  ; the "\n" before each note
                               (when (not (render-frame w (mut s) at-src at-lo at-hi note ":::")) (ps w note))
-                              (store! ctxt (load (field ep parent))))))))))))
+                              (primitive/store! ctxt (primitive/load (primitive/field ep parent))))))))))))
   0)
 
 ; Render all diagnostics (mirrors span::render_all): the caller has written the
 ; leading `error: `; subsequent errors get their own `\n\nerror: `, then an
 ; `N errors` summary when there is more than one.
 (defn render-all [(w (ptr Writer)) (s (mut LS)) (diags (ptr (ArrayList Diag)))] (-> i64)
-  (let [n (al-len [Diag] (load diags))]
-    (if (icmp-le n 1)
-        (unless (icmp-eq n 0) (render-diag w (mut s) (al-get [Diag] (load diags) 0)))
+  (let [n (al-len [Diag] (primitive/load diags))]
+    (if (primitive/icmp-le n 1)
+        (unless (primitive/icmp-eq n 0) (render-diag w (mut s) (al-get [Diag] (primitive/load diags) 0)))
         (let [(mut i) 0]
-          (loop (if (icmp-ge (load i) n)
+          (loop (if (primitive/icmp-ge (primitive/load i) n)
                     (break)
                     (do
-                      (when (icmp-gt (load i) 0) (ps w "\n\nerror: "))
-                      (render-diag w (mut s) (al-get [Diag] (load diags) (load i)))
-                      (store! i (iadd (load i) 1)))))
+                      (when (primitive/icmp-gt (primitive/load i) 0) (ps w "\n\nerror: "))
+                      (render-diag w (mut s) (al-get [Diag] (primitive/load diags) (primitive/load i)))
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
           (ps w "\n\n")
           (dump-dec w n)
           (ps w " errors")
@@ -198,6 +199,6 @@
 ; A check failure: render EVERY collected body error (`error: … / … / N errors`)
 ; when there is more than one, else the single diagnostic. Mirrors render_all.
 (defn report-check-diags [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
-  (if (icmp-gt (al-len [Diag] (load (field s check_diags))) 1)
-      (do (ps w "error: ") (render-all w (mut s) (load (field s check_diags))) (wb w 10) 0)
+  (if (primitive/icmp-gt (al-len [Diag] (primitive/load (primitive/field s check_diags))) 1)
+      (do (ps w "error: ") (render-all w (mut s) (primitive/load (primitive/field s check_diags))) (wb w 10) 0)
       (report-diag w (mut s) d)))

@@ -1,0 +1,121 @@
+(module async-explicit-test)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
+
+(import "async.coil" :use *)
+(import "assert.coil" :use *)
+
+; A manually written asynchronous operation: it returns Pending twice, then Ready.
+(defstruct CountState
+  [(polls i64)
+   (closed i64)
+   (cancelled bool)])
+
+(defn count-poll [(raw (ptr i8)) (cx (ptr Context))] (-> (Poll i64))
+  (let [state (primitive/cast (ptr CountState) raw)
+        polls (primitive/load (primitive/field state polls))]
+    (if (< polls 2)
+        (do
+          (primitive/store! (primitive/field state polls) (+ polls 1))
+          (Pending))
+        (Ready 42))))
+
+(defn count-close [(raw (ptr i8)) (cancelled bool)] (-> i64)
+  (let [state (primitive/cast (ptr CountState) raw)]
+    (primitive/store! (primitive/field state closed) (+ (primitive/load (primitive/field state closed)) 1))
+    (primitive/store! (primitive/field state cancelled) cancelled)
+    0))
+
+(defstruct ParkState [(calls i64) (fail-code i64)])
+
+(defn test-park [(raw (ptr i8))] (-> i64)
+  (let [state (primitive/cast (ptr ParkState) raw)]
+    (primitive/store! (primitive/field state calls) (+ (primitive/load (primitive/field state calls)) 1))
+    (primitive/load (primitive/field state fail-code))))
+
+(defn run-is-42 [(result (Result i64 TaskError))] (-> bool)
+  (match result
+    (Ok [value] (= value 42))
+    (Err [_] false)))
+
+(defn poll-is-completed [(result (Result (Poll i64) TaskError))] (-> bool)
+  (match result
+    (Ok [_] false)
+    (Err [error]
+         (match error
+           (AlreadyCompleted [] true)
+           (Closed [] false)
+           (ParkFailed [_] false)))))
+
+(defn poll-is-closed [(result (Result (Poll i64) TaskError))] (-> bool)
+  (match result
+    (Ok [_] false)
+    (Err [error]
+         (match error
+           (AlreadyCompleted [] false)
+           (Closed [] true)
+           (ParkFailed [_] false)))))
+
+(defn run-is-park-failed-17 [(result (Result i64 TaskError))] (-> bool)
+  (match result
+    (Ok [_] false)
+    (Err [error]
+         (match error
+           (AlreadyCompleted [] false)
+           (Closed [] false)
+           (ParkFailed [code] (= code 17))))))
+
+(defn main [] (-> i64)
+  (let [cx (alloc/stack Context)
+        state (alloc/stack CountState)
+        task (alloc/stack (Task i64))
+        park-state (alloc/stack ParkState)
+        parker (alloc/stack Parker)]
+    (primitive/store! (primitive/field cx user) (primitive/cast (ptr i8) 0))
+    (primitive/store! (primitive/field state polls) 0)
+    (primitive/store! (primitive/field state closed) 0)
+    (primitive/store! (primitive/field state cancelled) false)
+    (primitive/store! (primitive/field park-state calls) 0)
+    (primitive/store! (primitive/field park-state fail-code) 0)
+    (primitive/store! (primitive/field parker park-fn) (primitive/fnptr-of test-park))
+    (primitive/store! (primitive/field parker state) (primitive/cast (ptr i8) park-state))
+    (task-init task
+               (primitive/cast (ptr i8) state)
+               (primitive/fnptr-of count-poll)
+               (primitive/fnptr-of count-close))
+    
+    (assert (run-is-42 (task-run task cx parker)))
+    (assert-eq (primitive/load (primitive/field state polls)) 2)
+    (assert-eq (primitive/load (primitive/field park-state calls)) 2)
+    (assert (poll-is-completed (task-poll task cx)))
+    (assert-eq (task-close task) 0)
+    (assert-eq (primitive/load (primitive/field state closed)) 1)
+    (assert-eq (primitive/load (primitive/field state cancelled)) false)
+    (assert-eq (task-close task) 0)
+    (assert-eq (primitive/load (primitive/field state closed)) 1)
+    (assert (poll-is-closed (task-poll task cx)))
+    
+    ; Closing a pending task reports cancellation to its cleanup function.
+    (primitive/store! (primitive/field state polls) 0)
+    (primitive/store! (primitive/field state closed) 0)
+    (primitive/store! (primitive/field state cancelled) false)
+    (task-init task
+               (primitive/cast (ptr i8) state)
+               (primitive/fnptr-of count-poll)
+               (primitive/fnptr-of count-close))
+    (assert-eq (task-close task) 0)
+    (assert-eq (primitive/load (primitive/field state cancelled)) true)
+    
+    ; A parker failure is typed and leaves the pending task available for cleanup.
+    (primitive/store! (primitive/field state polls) 0)
+    (primitive/store! (primitive/field state closed) 0)
+    (primitive/store! (primitive/field state cancelled) false)
+    (primitive/store! (primitive/field park-state fail-code) 17)
+    (task-init task
+               (primitive/cast (ptr i8) state)
+               (primitive/fnptr-of count-poll)
+               (primitive/fnptr-of count-close))
+    (assert (run-is-park-failed-17 (task-run task cx parker)))
+    (assert-eq (task-close task) 0)
+    (assert-eq (primitive/load (primitive/field state cancelled)) true)
+    0))

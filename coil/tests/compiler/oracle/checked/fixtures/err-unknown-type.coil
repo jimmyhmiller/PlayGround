@@ -1,2 +1,3 @@
 (module errtest)
-(defn main [] (-> i64) (let [p (alloc-stack Nope)] 0))
+(import "alloc.coil" :as alloc)
+(defn main [] (-> i64) (let [p (alloc/stack Nope)] 0))

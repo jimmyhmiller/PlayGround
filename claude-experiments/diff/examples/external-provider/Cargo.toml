@@ -1,0 +1,12 @@
+[package]
+name = "diffpack-external-provider-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+diffpack-core = { path = "../../crates/diffpack-core" }
+diffpack-default-loader = { path = "../../crates/diffpack-default-loader" }
+
+[dev-dependencies]
+tempfile = "3.23.0"

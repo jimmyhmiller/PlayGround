@@ -1,5 +1,6 @@
 (module coil.simd)
-; SIMD as a *library* -- every operation is a macro over the `(llvm-ir ...)`
+(import "primitive.coil" :as primitive)
+; SIMD as a *library* -- every operation is a macro over the `(primitive/llvm-ir ...)`
 ; primitive, so nothing here is in the compiler. Each op is a raw-IR template;
 ; `$ret`/`$tN` expand to the result/operand LLVM type strings and `$N` to the
 ; operand SSA names, so one template serves every lane type and width. The LLVM
@@ -8,9 +9,9 @@
 ; This file targets <4 x float> (NEON / 128-bit). Widen by editing the lane
 ; count and intrinsic suffix, or generate per-target with a `target-arch` macro.
 
-; ---- construct a <4 x float> from four scalars (cast to f32) ----------------
+; ---- construct a <4 x float> from four scalars (primitive/cast to f32) ----------------
 (defn vec4f [(x0 Code) (x1 Code) (x2 Code) (x3 Code)] (-> Code)
-  `(llvm-ir (vec f32 4) [(cast :f32 ~x0) (cast :f32 ~x1) (cast :f32 ~x2) (cast :f32 ~x3)]
+  `(primitive/llvm-ir (vec f32 4) [(primitive/cast :f32 ~x0) (primitive/cast :f32 ~x1) (primitive/cast :f32 ~x2) (primitive/cast :f32 ~x3)]
      "%v0 = insertelement <4 x float> undef, $t0 $0, i32 0
 %v1 = insertelement <4 x float> %v0, $t1 $1, i32 1
 %v2 = insertelement <4 x float> %v1, $t2 $2, i32 2
@@ -19,32 +20,32 @@ ret $ret %r"))
 
 ; ---- broadcast one scalar across all four lanes ----------------------------
 (defn splat4f [(x Code)] (-> Code)
-  `(llvm-ir (vec f32 4) [(cast :f32 ~x)]
+  `(primitive/llvm-ir (vec f32 4) [(primitive/cast :f32 ~x)]
      "%v = insertelement <4 x float> undef, $t0 $0, i32 0
 %r = shufflevector <4 x float> %v, <4 x float> undef, <4 x i32> zeroinitializer
 ret $ret %r"))
 
 ; ---- elementwise arithmetic (one template per op; any lane type via $ret) ---
 (defn vadd4f [(a Code) (b Code)] (-> Code)
-  `(llvm-ir (vec f32 4) [~a ~b] "%r = fadd $ret $0, $1
+  `(primitive/llvm-ir (vec f32 4) [~a ~b] "%r = fadd $ret $0, $1
 ret $ret %r"))
 (defn vsub4f [(a Code) (b Code)] (-> Code)
-  `(llvm-ir (vec f32 4) [~a ~b] "%r = fsub $ret $0, $1
+  `(primitive/llvm-ir (vec f32 4) [~a ~b] "%r = fsub $ret $0, $1
 ret $ret %r"))
 (defn vmul4f [(a Code) (b Code)] (-> Code)
-  `(llvm-ir (vec f32 4) [~a ~b] "%r = fmul $ret $0, $1
+  `(primitive/llvm-ir (vec f32 4) [~a ~b] "%r = fmul $ret $0, $1
 ret $ret %r"))
 
 ; ---- fused multiply-add via the @llvm.fma intrinsic (declare is hoisted) ----
 (defn vfma4f [(a Code) (b Code) (c Code)] (-> Code)
-  `(llvm-ir (vec f32 4) [~a ~b ~c]
+  `(primitive/llvm-ir (vec f32 4) [~a ~b ~c]
      "declare <4 x float> @llvm.fma.v4f32(<4 x float>, <4 x float>, <4 x float>)
 %r = call $ret @llvm.fma.v4f32($t0 $0, $t1 $1, $t2 $2)
 ret $ret %r"))
 
 ; ---- horizontal sum of the four lanes -> scalar f32 ------------------------
 (defn reduce-add4f [(v Code)] (-> Code)
-  `(llvm-ir f32 [~v]
+  `(primitive/llvm-ir f32 [~v]
      "declare float @llvm.vector.reduce.fadd.v4f32(float, <4 x float>)
 %r = call $ret @llvm.vector.reduce.fadd.v4f32(float 0.0, $t0 $0)
 ret $ret %r"))

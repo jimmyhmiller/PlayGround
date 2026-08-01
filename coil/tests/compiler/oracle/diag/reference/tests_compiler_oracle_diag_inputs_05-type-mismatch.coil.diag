@@ -1,5 +1,5 @@
 error: in 'main': arithmetic on different types (f64 vs i64)
-  --> tests/compiler/oracle/diag/inputs/05-type-mismatch.coil:2:24
+  --> tests/compiler/oracle/diag/inputs/05-type-mismatch.coil:3:24
   |
-2 | (defn main [] (-> i64) (iadd 1 2.0))
-  |                        ^^^^^^^^^^^^
+3 | (defn main [] (-> i64) (primitive/iadd 1 2.0))
+  |                        ^^^^^^^^^^^^^^^^^^^^^^

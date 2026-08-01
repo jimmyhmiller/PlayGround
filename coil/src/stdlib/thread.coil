@@ -3,6 +3,7 @@
 ; C as a function pointer). PURE LIBRARY, no core feature. Hosted (links libpthread/
 ; libc) — concurrency is a hosted concern; bare-metal concurrency is a separate axis.
 (module coil.thread)
+(import "primitive.coil" :as primitive)
 
 ;; int pthread_create(pthread_t*, const pthread_attr_t*, void*(*)(void*), void*)
 (extern pthread_create :cc c [(ptr i8) (ptr i8) (fnptr c [(ptr i8)] (ptr i8)) (ptr i8)] (-> i32))
@@ -16,8 +17,8 @@
 ;; spawn: run `body(arg)` on a new thread, recording the handle into `th`. Returns the
 ;; pthread_create status (0 = ok).
 (defn thread-spawn [(th (ptr Thread)) (body (fnptr c [(ptr i8)] (ptr i8))) (arg (ptr i8))] (-> i32)
-  (pthread_create (cast (ptr i8) (field th handle)) (cast (ptr i8) 0) body arg))
+  (pthread_create (primitive/cast (ptr i8) (primitive/field th handle)) (primitive/cast (ptr i8) 0) body arg))
 
 ;; join: block until the thread finishes (discarding its return value). Returns status.
 (defn thread-join [(th (ptr Thread))] (-> i32)
-  (pthread_join (load (field th handle)) (cast (ptr i8) 0)))
+  (pthread_join (primitive/load (primitive/field th handle)) (primitive/cast (ptr i8) 0)))

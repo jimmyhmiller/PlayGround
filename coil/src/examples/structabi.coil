@@ -1,3 +1,5 @@
+(module example.structabi)
+(import "primitive.coil" :as primitive)
 ;; Struct-by-value across the C boundary, ABI-correct (SysV + AAPCS64).
 ;;   coil run src/examples/structabi.coil        (native arm64)
 ;; libc's div() returns `div_t { int quot; int rem; }` BY VALUE.
@@ -7,5 +9,5 @@
 
 (defn main [] (-> :i64)
   (let [d (div 47 5)]
-    (iadd (imul (cast :i64 (load (field d quot))) 10)
-          (cast :i64 (load (field d rem))))))
+    (primitive/iadd (primitive/imul (primitive/cast :i64 (primitive/load (primitive/field d quot))) 10)
+          (primitive/cast :i64 (primitive/load (primitive/field d rem))))))

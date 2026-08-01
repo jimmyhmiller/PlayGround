@@ -1,13 +1,14 @@
 (module stdlib-parsers-test)
+(import "primitive.coil" :as primitive)
 (import "../src/stdlib/json.coil" :as json)
-(import "../src/stdlib/http.coil" :as http)
+(import "../src/stdlib/http_server.coil" :as http)
 (import "../src/stdlib/alloc.coil" :as alloc)
 (import "../src/stdlib/str.coil" :as str)
 (import "../src/stdlib/slice.coil" :as slice)
 
 (defn test-crlf [(b (mut str/StrBuf))] (-> i64)
-  (str/sb-push-byte! (mut b) (cast u8 13))
-  (str/sb-push-byte! (mut b) (cast u8 10)))
+  (str/sb-push-byte! (mut b) (primitive/cast u8 13))
+  (str/sb-push-byte! (mut b) (primitive/cast u8 10)))
 (defn test-http-input [(a (ptr alloc/Allocator)) (short? bool)] (-> (slice u8))
   (let [(mut b) (str/sb-new a)]
     (str/sb-push-str! (mut b) (if short? "POST / HTTP/1.1" "POST /items?q=1 HTTP/1.1"))
@@ -53,9 +54,83 @@
                    (assert (str/str-eq (http/header req "HOST") "example.test"))
                    (assert (str/str-eq (http/body req) "hello"))
                    (assert (http/keep-alive? req))
-                   (assert-eq (http/consumed req) (isub (slice/slice-len input) 4)))))))
+                   (assert-eq (http/consumed req) (primitive/isub (slice/slice-len input) 4))
+                   (http/request-free req))))))
 
 (deftest http-rejects-short-body
          (match (http/parse-request (alloc/malloc-allocator) (test-http-input (alloc/malloc-allocator) true))
-           (Err [e] (assert-eq (http/error-code e) 5))
+           (Err [e] (assert-eq (http/error-code e) 14))
            (Ok [req] (assert false))))
+
+(defn http-lines [(a (ptr alloc/Allocator))
+                  (start (slice u8))
+                  (h1 (slice u8))
+                  (h2 (slice u8))
+                  (h3 (slice u8))
+                  (body (slice u8))] (-> (slice u8))
+  (let [(mut b) (str/sb-new a)]
+    (str/sb-push-str! (mut b) start)
+    (test-crlf (mut b))
+    (when (primitive/icmp-gt (slice/slice-len h1) 0)
+      (str/sb-push-str! (mut b) h1) (test-crlf (mut b)))
+    (when (primitive/icmp-gt (slice/slice-len h2) 0)
+      (str/sb-push-str! (mut b) h2) (test-crlf (mut b)))
+    (when (primitive/icmp-gt (slice/slice-len h3) 0)
+      (str/sb-push-str! (mut b) h3) (test-crlf (mut b)))
+    (test-crlf (mut b))
+    (str/sb-push-str! (mut b) body)
+    (str/sb-str b)))
+
+(defn http-chunked-input [(a (ptr alloc/Allocator))] (-> (slice u8))
+  (let [(mut b) (str/sb-new a)]
+    (str/sb-push-str! (mut b) "POST /chunks HTTP/1.1") (test-crlf (mut b))
+    (str/sb-push-str! (mut b) "Host: example.test") (test-crlf (mut b))
+    (str/sb-push-str! (mut b) "Transfer-Encoding: chunked") (test-crlf (mut b))
+    (test-crlf (mut b))
+    (str/sb-push-str! (mut b) "4") (test-crlf (mut b))
+    (str/sb-push-str! (mut b) "Wiki") (test-crlf (mut b))
+    (str/sb-push-str! (mut b) "5") (test-crlf (mut b))
+    (str/sb-push-str! (mut b) "pedia") (test-crlf (mut b))
+    (str/sb-push-str! (mut b) "0") (test-crlf (mut b)) (test-crlf (mut b))
+    (str/sb-push-str! (mut b) "GET /next HTTP/1.1") (test-crlf (mut b)) (test-crlf (mut b))
+    (str/sb-str b)))
+
+(deftest http-decodes-chunked-and-stops-at-next-request
+         (let [a (alloc/malloc-allocator)
+               input (http-chunked-input a)]
+           (match (http/parse-request a input)
+             (Err [e] (assert false))
+             (Ok [req]
+                 (do
+                   (assert (str/str-eq (http/body req) "Wikipedia"))
+                   (assert (primitive/icmp-lt (http/consumed req) (slice/slice-len input)))
+                   (http/request-free req))))))
+
+(deftest http-rejects-conflicting-framing
+         (let [a (alloc/malloc-allocator)
+               input (http-lines a
+                                  "POST / HTTP/1.1"
+                                  "Host: example.test"
+                                  "Content-Length: 4"
+                                  "Transfer-Encoding: chunked"
+                                  "0\r\n\r\n")]
+           (match (http/parse-request a input)
+             (Err [e] (assert (primitive/icmp-gt (http/error-code e) 0)))
+             (Ok [req] (do (http/request-free req) (assert false))))))
+
+(deftest http-rejects-duplicate-content-length
+         (let [a (alloc/malloc-allocator)
+               input (http-lines a
+                                  "POST / HTTP/1.1"
+                                  "Host: example.test" "Content-Length: 1" "Content-Length: 1"
+                                  "x")]
+           (match (http/parse-request a input)
+             (Err [e] (assert (primitive/icmp-gt (http/error-code e) 0)))
+             (Ok [req] (do (http/request-free req) (assert false))))))
+
+(deftest http-rejects-malformed-header
+         (let [a (alloc/malloc-allocator)
+               input (http-lines a "GET / HTTP/1.1" "Bad Header: value" "" "" "")]
+           (match (http/parse-request a input)
+             (Err [e] (assert (primitive/icmp-gt (http/error-code e) 0)))
+             (Ok [req] (do (http/request-free req) (assert false))))))

@@ -4,6 +4,8 @@
 ; fixed-buffer Writer formats into it, then we flush that buffer to stdout.
 ;   coil run src/examples/io.coil   prints: answer=42   => 0
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "src/stdlib/alloc.coil" :use *)
 (import "src/stdlib/io.coil" :use *)
 (import "src/stdlib/result.coil" :use *)   ; Ok/Err used in the match below
@@ -12,17 +14,17 @@
 (defn greet [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
   (do (print-str w "answer=")
       (print-int w n)
-      (write-byte w (cast :u8 10))))
+      (write-byte w (primitive/cast :u8 10))))
 
 (defn main [] (-> :i64)
   (let [a   (malloc-allocator)
         buf (unwrap-ptr (alloc-slice [i8] a 64))   ; allocator provides storage
-        fb  (alloc-static FixBuf)]
-    (store! (field fb data) buf)
-    (store! (field fb cap) 64)
-    (greet (fixed-buffer-writer (alloc-stack Writer) fb) 42)            ; format into the buffer
+        fb  (alloc/static FixBuf)]
+    (primitive/store! (primitive/field fb data) buf)
+    (primitive/store! (primitive/field fb cap) 64)
+    (greet (fixed-buffer-writer (alloc/stack Writer) fb) 42)            ; format into the buffer
     (match (write-all (stdout)                     ; flush the captured bytes
-                      (load (field fb data))
-                      (load (field fb len)))
+                      (primitive/load (primitive/field fb data))
+                      (primitive/load (primitive/field fb len)))
       (Ok  [n] 0)
       (Err [e] 1))))

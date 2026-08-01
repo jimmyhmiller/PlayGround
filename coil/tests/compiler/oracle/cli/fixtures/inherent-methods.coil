@@ -1,4 +1,6 @@
 (module inherent_methods)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "inherent-remote.coil" :use [Remote])
 (import "inherent-extension.coil")
 (import "slice.coil" :use [slice-len])
@@ -8,18 +10,18 @@
 (impl Point
   ; No receiver: associated function, called with `Point::new`.
   (new [(x i64) (y i64)] (-> Point)
-    (let [p (alloc-stack Point)]
-      (store! (field p x) x)
-      (store! (field p y) y)
-      (load p)))
+    (let [p (alloc/stack Point)]
+      (primitive/store! (primitive/field p x) x)
+      (primitive/store! (primitive/field p y) y)
+      (primitive/load p)))
 
   ; Receiver in argument zero: called bare and selected from `p`'s type.
   (sum [(p Point)] (-> i64)
-    (iadd (load (field p x)) (load (field p y))))
+    (primitive/iadd (primitive/load (primitive/field p x)) (primitive/load (primitive/field p y))))
 
   (shift! [(p (mut Point)) (d i64)] (-> i64)
-    (store! (field p x) (iadd (load (field p x)) d))
-    (store! (field p y) (iadd (load (field p y)) d))
+    (primitive/store! (primitive/field p x) (primitive/iadd (primitive/load (primitive/field p x)) d))
+    (primitive/store! (primitive/field p y) (primitive/iadd (primitive/load (primitive/field p y)) d))
     0)
 
   ; A pointer extension with this name must win before autoderef reaches Point.
@@ -42,11 +44,11 @@
 ; again from the receiver when `get` is called bare.
 (impl [T] (Box T)
   (box [(value T)] (-> (Box T))
-    (let [p (alloc-stack (Box T))]
-      (store! (field p value) value)
-      (load p)))
+    (let [p (alloc/stack (Box T))]
+      (primitive/store! (primitive/field p value) value)
+      (primitive/load p)))
   (get [(b (Box T))] (-> T)
-    (load (field b value))))
+    (primitive/load (primitive/field b value))))
 
 ; Ordered specialization uses the same specificity rule as trait impls.
 (impl (Box i64)
@@ -55,7 +57,7 @@
 ; Extension impls are not limited to local nominal types. Every type that can
 ; carry a trait impl can carry methods, including scalars and structural types.
 (impl i64
-  (twice [(x i64)] (-> i64) (imul x 2))
+  (twice [(x i64)] (-> i64) (primitive/imul x 2))
   (one [] (-> i64) 1))
 
 (impl [T] (ptr T)
@@ -70,7 +72,7 @@
 (impl [T] (vec T 2)
   (vec-mark [(xs (vec T 2))] (-> i64) 5))
 
-(defn plus-one [(x i64)] (-> i64) (iadd x 1))
+(defn plus-one [(x i64)] (-> i64) (primitive/iadd x 1))
 (impl (fnptr c [i64] i64)
   (fn-mark [(f (fnptr c [i64] i64))] (-> i64) 7))
 
@@ -89,24 +91,24 @@
   (let [(mut p) (Point::new 10 20)
         b (Box::box 7)
         c (Number 5)
-        pp (alloc-stack Point)
-        arr (zeroed (array i64 2))
-        vv (zeroed (vec i64 2))
-        fp (fnptr-of plus-one)
-        r (zeroed Remote)]
+        pp (alloc/stack Point)
+        arr (primitive/zeroed (array i64 2))
+        vv (primitive/zeroed (vec i64 2))
+        fp (primitive/fnptr-of plus-one)
+        r (primitive/zeroed Remote)]
     (shift! (mut p) 1)
     ; `sum p` is inherent; `Sum::sum c` remains explicit trait dispatch.
-    (iadd (sum p)
-          (iadd (Point::sum p)
-                (iadd (get b)
-                      (iadd (score c)
-                            (iadd (Sum::sum c)
-                                  (iadd (twice 4)
-                                        (iadd (i64::one)
-                                              (iadd (pointer-kind pp)
-                                                    (iadd (extent "hi")
-                                                          (iadd (array-mark arr)
-                                                                (iadd (vec-mark vv)
-                                                                      (iadd (fn-mark fp)
-                                                                            (iadd (via-code 8)
+    (primitive/iadd (sum p)
+          (primitive/iadd (Point::sum p)
+                (primitive/iadd (get b)
+                      (primitive/iadd (score c)
+                            (primitive/iadd (Sum::sum c)
+                                  (primitive/iadd (twice 4)
+                                        (primitive/iadd (i64::one)
+                                              (primitive/iadd (pointer-kind pp)
+                                                    (primitive/iadd (extent "hi")
+                                                          (primitive/iadd (array-mark arr)
+                                                                (primitive/iadd (vec-mark vv)
+                                                                      (primitive/iadd (fn-mark fp)
+                                                                            (primitive/iadd (via-code 8)
                                                                                   (remote-mark r))))))))))))))))

@@ -5,8 +5,9 @@ pub mod import_meta_env;
 pub mod import_meta_glob;
 pub mod source_policy;
 pub mod vite_config;
-pub mod vite_define;
+pub use diffpack_default_loader::define as vite_define;
 pub mod vite_manifest;
+pub mod web_config;
 
 // Transitional internal aliases keep the moved implementation's paths stable;
 // they point strictly downward into core, never back to the root package.

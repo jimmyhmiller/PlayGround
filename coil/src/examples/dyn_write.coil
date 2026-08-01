@@ -1,4 +1,6 @@
 (module dyn_write)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 ; Demo: one `greet` function that writes to either the screen (a File over an fd)
 ; or an in-memory buffer (MemBuf) — chosen at RUNTIME — via a `dyn Write` trait
 ; object. No hand-written vtables: `defdyn`/`dyn-impl` generate them by reflecting
@@ -21,7 +23,7 @@
 
 (impl Write File
   (emit [(self (ptr File)) (bytes (slice u8))] (-> i64)
-    (write (cast i32 (load (field self fd))) (cast (ptr i8) (slice-data bytes)) (cast isize (slice-len bytes)))))
+    (write (primitive/cast i32 (primitive/load (primitive/field self fd))) (primitive/cast (ptr i8) (slice-data bytes)) (primitive/cast isize (slice-len bytes)))))
 
 ; ---- another implementer: an in-memory buffer ------------------------------
 (defstruct MemBuf [(data (ptr u8)) (len i64) (cap i64)])
@@ -29,10 +31,10 @@
 (impl Write MemBuf
   (emit [(self (ptr MemBuf)) (bytes (slice u8))] (-> i64)
     (let [n   (slice-len bytes)
-          len (load (field self len))
-          end (index (load (field self data)) len)]
-      (memcpy (cast (ptr i8) end) (cast (ptr i8) (slice-data bytes)) n)
-      (store! (field self len) (iadd len n))
+          len (primitive/load (primitive/field self len))
+          end (primitive/index (primitive/load (primitive/field self data)) len)]
+      (memcpy (primitive/cast (ptr i8) end) (primitive/cast (ptr i8) (slice-data bytes)) n)
+      (primitive/store! (primitive/field self len) (primitive/iadd len n))
       n)))
 
 ; ---- code written ONCE, against any Write ----------------------------------
@@ -43,17 +45,17 @@
 
 (defn main [] (-> i64)
   ; 1) write to the screen — a (ptr File) auto-erases to the (dyn Write) param
-  (let [f  (alloc-stack File)]
-    (store! (field f fd) 1)
+  (let [f  (alloc/stack File)]
+    (primitive/store! (primitive/field f fd) 1)
     (greet f "world"))
 
   ; 2) write the SAME greeting into memory, then flush it to the screen to prove
-  (let [buf (alloc-stack (array u8 256))
-        mb  (alloc-stack MemBuf)]
-    (store! (field mb data) (index buf 0))
-    (store! (field mb len) 0)
-    (store! (field mb cap) 256)
+  (let [buf (alloc/stack (array u8 256))
+        mb  (alloc/stack MemBuf)]
+    (primitive/store! (primitive/field mb data) (primitive/index buf 0))
+    (primitive/store! (primitive/field mb len) 0)
+    (primitive/store! (primitive/field mb cap) 256)
     (greet mb "memory")              ; (ptr MemBuf) auto-erases too
     ; flush the buffer to fd 1
-    (write 1 (cast (ptr i8) (index buf 0)) (load (field mb len))))
+    (write 1 (primitive/cast (ptr i8) (primitive/index buf 0)) (primitive/load (primitive/field mb len))))
   0)

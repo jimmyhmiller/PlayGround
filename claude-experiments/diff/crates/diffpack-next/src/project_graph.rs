@@ -15,7 +15,7 @@
 //! that cannot be built is a hard error when a route can reach it, and is dropped
 //! (loudly, naming the file and the specifier) when nothing can.
 //!
-//! Resolution mirrors [`crate::bundler`]'s: the same extensions, extension aliases
+//! Resolution mirrors the default-loader bundler: the same extensions, extension aliases
 //! and tsconfig discovery, plus the caller's alias table (the adapter's `next/*`
 //! shims), so a specifier this module cannot resolve is one the build cannot resolve
 //! either. Node built-ins are external, never graph modules. Only files INSIDE the

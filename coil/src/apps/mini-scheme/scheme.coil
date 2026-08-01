@@ -1,4 +1,5 @@
 (module scheme)
+(import "primitive.coil" :as primitive)
 ; A metacircular Scheme evaluator, written in the TRANSPARENT-GC style: every
 ; value is `Val`, no pointers, no allocation calls beyond the primitives, NO
 ; rooting. gcauto2 (the transform) inserts all the GC plumbing. It reads a Scheme
@@ -18,12 +19,12 @@
 ; ---- Coil-Sexp -> Val ----
 (defn sexp->val [(x Sexp)] (-> Val)
   (let [tg (sx-tag x)]
-    (if (icmp-eq tg 0) (mk-int (sx-ival x))
-    (if (icmp-eq tg 2) (mk-sym (intern (sx-sval x)))
-    (if (or (icmp-eq tg 6) (icmp-eq tg 7)) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x)))
+    (if (primitive/icmp-eq tg 0) (mk-int (sx-ival x))
+    (if (primitive/icmp-eq tg 2) (mk-sym (intern (sx-sval x)))
+    (if (or (primitive/icmp-eq tg 6) (primitive/icmp-eq tg 7)) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x)))
         (mk-int 0))))))
 (defn sexp-list->val [(items (ptr (ArrayList Sexp))) (i i64) (n i64)] (-> Val)
-  (if (icmp-ge i n) (snil)
+  (if (primitive/icmp-ge i n) (snil)
     (cons (sexp->val (sx-at items i)) (sexp-list->val items (+ i 1) n))))
 
 ; ---- list helpers ----
@@ -102,7 +103,7 @@
 ; evaluate every top-level form (earlier ones for effect, e.g. define), returning
 ; the LAST result. Recursion (no reassigned mut) so the transform roots it soundly.
 (defn run-forms [(fs (ptr (ArrayList Sexp))) (i i64) (n i64)] (-> Val)
-  (if (icmp-ge i (- n 1)) (seval (sexp->val (forms-nth fs i)) (snil))
+  (if (primitive/icmp-ge i (- n 1)) (seval (sexp->val (forms-nth fs i)) (snil))
     (let [ignore (seval (sexp->val (forms-nth fs i)) (snil))]
       (run-forms fs (+ i 1) n))))
 (defn main [] (-> :i64)

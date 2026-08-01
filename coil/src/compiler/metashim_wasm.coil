@@ -16,6 +16,7 @@
 ; RULES (same as metashim.coil): no imports; everything crossing the boundary is
 ; (ptr …)/i64/f64; a `Code` value is an opaque (ptr i8) handle into compiler memory.
 (module metashim)
+(import "primitive.coil" :as primitive)
 
 ; ---- the host code-op callbacks, as env imports (bridged to metahost mh_*) ------
 ; Declared but not defined ⇒ codegen_wasm emits each as `env.<name>` (raw scalars).
@@ -52,20 +53,20 @@
 
 ; ---- slice primitives (u8-only copies of src/stdlib/slice.coil) ---------------------
 (defn mp-sdata [(s (slice u8))] (-> (ptr u8))
-  (llvm-ir (ptr u8) [s] "%d = extractvalue $t0 $0, 0
+  (primitive/llvm-ir (ptr u8) [s] "%d = extractvalue $t0 $0, 0
 ret $ret %d"))
 (defn mp-slen [(s (slice u8))] (-> i64)
-  (llvm-ir i64 [s] "%l = extractvalue $t0 $0, 1
+  (primitive/llvm-ir i64 [s] "%l = extractvalue $t0 $0, 1
 ret $ret %l"))
 (defn mp-mkslice [(p (ptr u8)) (n i64)] (-> (slice u8))
-  (llvm-ir (slice u8)
+  (primitive/llvm-ir (slice u8)
            [p n]
            "%s0 = insertvalue $ret undef, $t0 $0, 0
 %s1 = insertvalue $ret %s0, $t1 $1, 1
 ret $ret %s1"))
 (defn mp-buf->str [(r (ptr i8))] (-> (slice u8))
-  (let [b (cast (ptr MetaBuf) r)]
-    (mp-mkslice (load (field b p)) (load (field b n)))))
+  (let [b (primitive/cast (ptr MetaBuf) r)]
+    (mp-mkslice (primitive/load (primitive/field b p)) (primitive/load (primitive/field b n)))))
 
 ; ---- code-op argument builder -------------------------------------------------
 (defn mp-arg-new [] (-> (ptr i8))
@@ -85,7 +86,7 @@ ret $ret %s1"))
 (defn mp-op-int [(op i64) (b (ptr i8))] (-> i64)
   (mh_op_i op b))
 (defn mp-op-bool [(op i64) (b (ptr i8))] (-> bool)
-  (icmp-ne (mh_op_i op b) 0))
+  (primitive/icmp-ne (mh_op_i op b) 0))
 (defn mp-op-code [(op i64) (b (ptr i8))] (-> (ptr i8))
   (mh_op_h op b))
 (defn mp-op-str [(op i64) (b (ptr i8))] (-> (slice u8))
@@ -117,4 +118,4 @@ ret $ret %s1"))
 
 ; ---- interpreter-parity runtime failures --------------------------------------
 (defn mp-parity-fail [(code i64)] (-> (ptr i8))
-  (do (mh_fail code) (cast (ptr i8) 0)))
+  (do (mh_fail code) (primitive/cast (ptr i8) 0)))

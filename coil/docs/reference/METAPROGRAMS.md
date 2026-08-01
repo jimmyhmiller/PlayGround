@@ -22,7 +22,7 @@ Distinguished only by *what they receive* and *what they return*.
   `(transform desugar-inc)`. The compiler runs them during compilation. A **checker is
   handed the program as a list of modules** — `((name form…) …)`, one record per module
   (head = module name symbol, rest = its top-level forms). The checker owns the loop and
-  decides which modules to look at (e.g. skip the ones where `(code-from-user? (code-nth m 1))`
+  decides which modules to look at (e.g. skip the ones where `(primitive/code-from-user? (primitive/code-nth m 1))`
   is false). A **transformer** still gets the flat form list (it rewrites in place).
 - **Dialects** — *import* a module that contains those registrations: one
   `(import "safe_dialect.coil")` applies its whole stack.
@@ -47,9 +47,9 @@ Rust-like ownership dialect, a Scheme frontend).
   `code-field-count` accepts, is mangled deterministically (`(Box i64)` → `Box__i64`)
   so `derive` can name a helper over a generic instance), `code-str` (same, yielding a
   string), `gensym` (fresh hygienic name).
-- **Bytes ↔ names:** `(int->str N)` → the integer's decimal as a `(slice u8)`, so a
-  name minted from a counter/index is one call; `(str-bytes S)` → a Code list of a
-  string's byte values; `(bytes->str LIST)` → the inverse (list of ints → string).
+- **Bytes ↔ names:** `(primitive/int->str N)` → the integer's decimal as a `(slice u8)`, so a
+  name minted from a counter/index is one call; `(primitive/str-bytes S)` → a Code list of a
+  string's byte values; `(primitive/bytes->str LIST)` → the inverse (list of ints → string).
 - **Reflect on types:** `code-field-count/name/kind/type`, `code-variant-*`,
   `code-trait-*` (and value-form `field-count`, `struct?`, `field-name`, …).
   Kind tags: `0=int 1=float 2=bool 3=struct 4=sum 5=ptr 6=array 7=slice 8=other`.
@@ -58,7 +58,7 @@ Rust-like ownership dialect, a Scheme frontend).
 - **Fail / branch:** `error` (abort expansion with a message), `target-arch`,
   `target-os`.
 
-`(target-arch)` and `(target-os)` are nullary code ops that answer for the
+`(primitive/target-arch)` and `(primitive/target-os)` are nullary code ops that answer for the
 platform being **compiled for** — read from the resolved `--target` triple, not
 probed from the machine running the compiler. `target-arch` yields
 `aarch64`/`x86_64`/`wasm32`/`wasm64`; `target-os` yields `linux`/`darwin`/`wasm`.
@@ -72,7 +72,7 @@ and `O_TRUNC` on Linux), and it selects them with
 
 ```coil
 (defn os-pick [(linux Code) (darwin Code)] (-> Code)
-  (if (code-eq (target-os) `linux) linux darwin))
+  (if (primitive/code-eq (primitive/target-os) `linux) linux darwin))
 (defn gen-open-flags [] (-> Code)
   `(do (const O_CREAT ~(os-pick `64 `512))
        (const O_TRUNC ~(os-pick `512 `1024))))
@@ -86,13 +86,13 @@ the property is observable — a cross-built binary never runs on the builder.
 
 New API this project added (all shipped):
 
-- **`(report NODE MSG)`** — a located compile-time **error** at `NODE`. It **collects**:
+- **`(primitive/report NODE MSG)`** — a located compile-time **error** at `NODE`. It **collects**:
   a checker keeps running and surfaces EVERY error in one pass; the build fails after
   printing them all (see `tests/metaprogramming/located_multi.coil` → 2 errors, then failure).
-- **`(warn NODE MSG)`** — a located, **non-fatal** warning at `NODE`; collects and all
+- **`(primitive/warn NODE MSG)`** — a located, **non-fatal** warning at `NODE`; collects and all
   print, the build succeeds. What a *linter* wants — `tests/metaprogramming/lint.coil` warns at
   every `icmp-*`, suggesting `< > = …`.
-- **`(suggest NODE MSG REPLACEMENT)`** — a `warn` that also proposes a **rewrite**.
+- **`(primitive/suggest NODE MSG REPLACEMENT)`** — a `warn` that also proposes a **rewrite**.
   `REPLACEMENT` is a `Code` value, normally built from the author's own subnodes; the
   diagnostic gains a `help: try: …` line, and `coil lint --fix` (and only it) splices it
   into the file. Any node that came from source is written back as its ORIGINAL bytes,
@@ -101,7 +101,7 @@ New API this project added (all shipped):
   carried across the rewrite too, so a commented chain is fixed like any other. Demo:
   `src/examples/metaprogramming/condlint.coil` rewrites a chain of 3+ nested `if`s as a `cond` with
   `:else`. Full design + what changed on contact with reality: `docs/archive/AUTOFIX.md`.
-- **`(code-macro? NODE)` → bool** — true for a node the expander produced. Checkers run
+- **`(primitive/code-macro? NODE)` → bool** — true for a node the expander produced. Checkers run
   on the EXPANDED program, so every `cond`/`when`/`case` the author wrote is already
   nested `if`s by the time a rule sees it; this is how a rule about `if` tells the two
   apart. It is the same `ctxt ≠ 0` test autofix uses internally to refuse to edit
@@ -120,7 +120,7 @@ New API this project added (all shipped):
   tagged with that module, so a transform may EMIT new top-level defns (a GC dialect's
   per-type `trace-T`, a root table, a runtime import) or drop forms. Demo:
   `tests/metaprogramming/compile-and-run/addforms.coil` emits a whole new defn.
-- **`(binding-of NODE)` → the local-binding identity** a reference resolves to (an
+- **`(primitive/binding-of NODE)` → the local-binding identity** a reference resolves to (an
   i64; 0 = a global const/function), recorded by the type-checker per reference.
   Two references with the same positive id name the SAME local, so a checker
   distinguishes a **shadowed** local from its outer namesake — which name-matching
@@ -141,7 +141,7 @@ New API this project added (all shipped):
   both type-aware rewrites and syntactic desugarings. Demos: `tests/metaprogramming/retkind*.coil`
   (rewrites a marker by the wrapped call's real return type) and `dialect.coil`/`tx_test`
   (`inc`→`iadd`).
-- **`(code-decl NODE)` → a declaration record**, read from that authoritative checked
+- **`(primitive/code-decl NODE)` → a declaration record**, read from that authoritative checked
   program. `(decl MODULE fn [PARAM-TYPE…] RET)` for a function, `(decl MODULE KIND)` for
   a struct/sum/trait/const/extern, `:unresolved`, or `:ambiguous`. **Pass a resolved
   REFERENCE node and it resolves to the EXACT entity** the checker picked (via node
@@ -155,13 +155,13 @@ New API this project added (all shipped):
   `typecheck_test.coil` (a **type reference** `wb/Box` resolves to the right module even
   though `Box` is defined in both `wa` and `wb`). So calls, fn-ptrs, variants, AND named
   types all resolve exactly.
-- **`(type-of NODE)` → the expression's inferred type** as `Code` (e.g. `i64`,
+- **`(primitive/type-of NODE)` → the expression's inferred type** as `Code` (e.g. `i64`,
   `(ptr i64)`), or `:unknown`. This is the type the real type-checker inferred, not
   syntax — a call `(getf)` reports `f64` because `getf` returns `f64`. Demo:
   `tests/metaprogramming/nofloat*.coil` bans floating-point-typed expressions.
-- **`(code-file NODE)` → the source file name** of a node, and **`(code-from-user? NODE)`
+- **`(primitive/code-file NODE)` → the source file name** of a node, and **`(primitive/code-from-user? NODE)`
   → bool** (true for a real file, false for a bundled `<…>` source). So a linter can
-  *scope itself* — `tests/metaprogramming/lint.coil` warns only where `(code-from-user? f)`, which
+  *scope itself* — `tests/metaprogramming/lint.coil` warns only where `(primitive/code-from-user? f)`, which
   skips the standard library while still linting the user's own modules. (Checkers can't
   call imported string functions — the closure doesn't include them — so `code-from-user?`
   does the check in the compiler and hands the checker a bool.)
@@ -229,7 +229,7 @@ of the project. What remains:
 ## Still open
 
 ### Core-form demotion
-**Demote `store!` first** — the parser would emit an interceptable `(store! …)` call
+**Demote `store!` first** — the parser would emit an interceptable `(primitive/store! …)` call
 over a `%store!` primitive so transforms can rewrite it on idiomatic code. This is the
 one change that re-blesses the oracle snapshots. Unlocks write barriers and
 bounds-checking on unmodified Coil.

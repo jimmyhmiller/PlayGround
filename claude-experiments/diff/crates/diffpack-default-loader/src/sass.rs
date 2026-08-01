@@ -59,8 +59,7 @@ pub struct ScssOptions {
 /// The result of compiling one root `.scss` file.
 #[derive(Debug, Clone)]
 pub struct CompiledScss {
-    /// Plain CSS, ready for [`crate::css::process_global_css`] or
-    /// [`crate::css::process_css_module`].
+    /// Plain CSS, ready for the loader's global-CSS or CSS-module processor.
     pub css: String,
     /// Every OTHER physical file whose content contributed (`@use`/`@import`
     /// targets, transitively). The caller records these so edits invalidate.

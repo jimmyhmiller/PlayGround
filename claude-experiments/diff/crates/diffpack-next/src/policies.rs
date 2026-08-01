@@ -9,7 +9,7 @@ impl diffpack_core::runtime::RuntimeIntegrationPolicy for NextRuntimePolicy {
     fn configure(
         &self,
         request: diffpack_core::runtime::RuntimePolicyRequest<'_>,
-    ) -> diffpack_core::runtime::RuntimePolicyOutput {
+    ) -> Result<diffpack_core::runtime::RuntimePolicyOutput, String> {
         let compatibility_prelude = (request.is_main
             && request.format == diffpack_core::ModuleFormat::BrowserEsm)
             .then(|| {
@@ -24,10 +24,16 @@ impl diffpack_core::runtime::RuntimeIntegrationPolicy for NextRuntimePolicy {
                 )
             })
             .flatten();
-        diffpack_core::runtime::RuntimePolicyOutput {
-            compatibility_prelude,
+        Ok(diffpack_core::runtime::RuntimePolicyOutput {
+            compatibility_prelude: compatibility_prelude.map(|value| {
+                diffpack_core::runtime::RuntimeContribution::new(
+                    "framework-compatibility",
+                    "diffpack-next",
+                    value,
+                )
+            }),
             ..Default::default()
-        }
+        })
     }
 }
 
@@ -52,5 +58,55 @@ impl diffpack_default_loader::module_policy::SpecialModulePolicy for NextSpecial
             responsive_variants,
             |source| compile(Path::new("diffpack-image-import.js"), source),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use diffpack_core::runtime::{
+        RuntimeIntegrationPolicy, RuntimePolicyChain, RuntimePolicyModule, RuntimePolicyRequest,
+    };
+
+    use super::NextRuntimePolicy;
+
+    fn snapshot(format: diffpack_core::ModuleFormat) -> Vec<String> {
+        let modules = [RuntimePolicyModule {
+            id: "client.js",
+            source: "'use client'; export default function Client(){}",
+        }];
+        RuntimePolicyChain::new(vec![
+            std::sync::Arc::new(NextRuntimePolicy),
+            std::sync::Arc::new(diffpack_web::policies::WebRuntimePolicy),
+        ])
+        .configure(RuntimePolicyRequest {
+            format,
+            is_main: true,
+            hmr: false,
+            entry_id: "entry",
+            entry_runtime_id: 0,
+            any_async: false,
+            base: "/",
+            chunk_files: &[],
+            modules: &modules,
+            browser_process_shim: true,
+        })
+        .unwrap()
+        .describe()
+    }
+
+    #[test]
+    fn next_client_and_server_runtime_profile_snapshots() {
+        assert_eq!(
+            snapshot(diffpack_core::ModuleFormat::BrowserEsm),
+            [
+                "browser-process-compatibility@diffpack-web",
+                "framework-compatibility@diffpack-next",
+                "browser-require-native@diffpack-web",
+            ]
+        );
+        assert_eq!(
+            snapshot(diffpack_core::ModuleFormat::Esm),
+            ["browser-require-native@diffpack-web"]
+        );
     }
 }

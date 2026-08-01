@@ -1,4 +1,5 @@
 (module ifcombine)
+(import "primitive.coil" :as primitive)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 
@@ -32,27 +33,27 @@
 ; A `;` inside a string literal reads as a comment here. That is deliberate: a false
 ; positive only downgrades a fix to advice, which is the safe direction.
 (defn ifc-commented? [(x Code)] (-> bool)
-  (let [s (code-src x)
+  (let [s (primitive/code-src x)
         n (slice-len [u8] s)
         (mut i) 0
         (mut r) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
-              (if (icmp-eq (cast i64 (slice-get [u8] s (load i))) 59)
-                  (do (store! r true) (break))
-                  (store! i (iadd (load i) 1)))))
-    (load r)))
+              (if (primitive/icmp-eq (primitive/cast i64 (slice-get [u8] s (primitive/load i))) 59)
+                  (do (primitive/store! r true) (break))
+                  (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load r)))
 
 (defn ifc-hand-if? [(f Code)] (-> bool)
-  (if (code-list? f)
-      (if (icmp-eq (code-count f) 4)
-          (if (code-eq (code-nth f 0) `if) (not (code-macro? f)) false)
+  (if (primitive/code-list? f)
+      (if (primitive/icmp-eq (primitive/code-count f) 4)
+          (if (primitive/code-eq (primitive/code-nth f 0) `if) (not (primitive/code-macro? f)) false)
           false)
       false))
 
-(defn ifc-test [(f Code)] (-> Code) (code-nth f 1))
-(defn ifc-then [(f Code)] (-> Code) (code-nth f 2))
-(defn ifc-else [(f Code)] (-> Code) (code-nth f 3))
+(defn ifc-test [(f Code)] (-> Code) (primitive/code-nth f 1))
+(defn ifc-then [(f Code)] (-> Code) (primitive/code-nth f 2))
+(defn ifc-else [(f Code)] (-> Code) (primitive/code-nth f 3))
 
 ; ---- purity, for the one rewrite that DROPS a test --------------------------
 ; Collapsing `(if T X X)` to `X` stops evaluating T, so it is only sound when T
@@ -61,8 +62,8 @@
 ; pure". A call to an ordinary function is not on it, even an obvious accessor: this
 ; rule cannot see the callee's body, and guessing is how a fix tool loses trust.
 (defn ifc-pure-head? [(h Code)] (-> bool)
-  (if (code-sym? h)
-      (let [s (code-sym h)]
+  (if (primitive/code-sym? h)
+      (let [s (primitive/code-sym h)]
         (or (starts-with s "icmp-")
             (or (starts-with s "fcmp-")
                 (or (str-eq s "and")
@@ -71,13 +72,13 @@
       false))
 
 (defn ifc-pure-args? [(x Code) (i i64) (n i64)] (-> bool)
-  (if (icmp-ge i n) true (if (ifc-pure? (code-nth x i)) (ifc-pure-args? x (iadd i 1) n) false)))
+  (if (primitive/icmp-ge i n) true (if (ifc-pure? (primitive/code-nth x i)) (ifc-pure-args? x (primitive/iadd i 1) n) false)))
 
 (defn ifc-pure? [(x Code)] (-> bool)
-  (if (code-list? x)
-      (if (icmp-eq (code-count x) 0)
+  (if (primitive/code-list? x)
+      (if (primitive/icmp-eq (primitive/code-count x) 0)
           true
-          (if (ifc-pure-head? (code-nth x 0)) (ifc-pure-args? x 1 (code-count x)) false))
+          (if (ifc-pure-head? (primitive/code-nth x 0)) (ifc-pure-args? x 1 (primitive/code-count x)) false))
       true))   ; an atom — a literal or a name — evaluates to itself
 
 ; ---- the shapes -------------------------------------------------------------
@@ -88,21 +89,21 @@
 
 (defn ifc-and-shape? [(f Code)] (-> bool)
   (let [th (ifc-then f)]
-    (if (ifc-hand-if? th) (code-eq (ifc-else th) (ifc-else f)) false)))
+    (if (ifc-hand-if? th) (primitive/code-eq (ifc-else th) (ifc-else f)) false)))
 
 (defn ifc-or-shape? [(f Code)] (-> bool)
   (let [el (ifc-else f)]
-    (if (ifc-hand-if? el) (code-eq (ifc-then el) (ifc-then f)) false)))
+    (if (ifc-hand-if? el) (primitive/code-eq (ifc-then el) (ifc-then f)) false)))
 
 (defn ifc-same-shape? [(f Code)] (-> bool)
-  (code-eq (ifc-then f) (ifc-else f)))
+  (primitive/code-eq (ifc-then f) (ifc-else f)))
 
 (defn ifc-report-and [(f Code)] (-> Code)
   (let [th (ifc-then f)]
     ; dropped: the OUTER else. The inner one is emitted in its place.
     (if (ifc-commented? (ifc-else f))
-        (warn f "both branches of the inner if end in the same else — an (and), but the outer else carries a comment; combine by hand")
-        (suggest f
+        (primitive/warn f "both branches of the inner if end in the same else — an (and), but the outer else carries a comment; combine by hand")
+        (primitive/suggest f
                  "nested if with a shared else — this is (and)"
                  `(if (and ~(ifc-test f) ~(ifc-test th)) ~(ifc-then th) ~(ifc-else th))))))
 
@@ -111,17 +112,17 @@
     ; dropped: the OUTER then, which sits BETWEEN the two tests in the source, so its
     ; comments would be pulled into the middle of the (or …) if it had any.
     (if (ifc-commented? (ifc-then f))
-        (warn f "two tests share a body — an (or), but the first copy carries a comment; combine by hand")
-        (suggest f
+        (primitive/warn f "two tests share a body — an (or), but the first copy carries a comment; combine by hand")
+        (primitive/suggest f
                  "two tests reaching the same body — this is (or)"
                  `(if (or ~(ifc-test f) ~(ifc-test el)) ~(ifc-then el) ~(ifc-else el))))))
 
 (defn ifc-report-same [(f Code)] (-> Code)
   (if (not (ifc-pure? (ifc-test f)))
-      (warn f "both branches are identical, so the test decides nothing — but it may have effects, so it is not dropped automatically")
+      (primitive/warn f "both branches are identical, so the test decides nothing — but it may have effects, so it is not dropped automatically")
       (if (or (ifc-commented? (ifc-test f)) (ifc-commented? (ifc-else f)))
-          (warn f "both branches are identical, so the test decides nothing — the dead part carries a comment, so remove it by hand")
-          (suggest f "both branches are identical — the test decides nothing" (ifc-then f)))))
+          (primitive/warn f "both branches are identical, so the test decides nothing — the dead part carries a comment, so remove it by hand")
+          (primitive/suggest f "both branches are identical — the test decides nothing" (ifc-then f)))))
 
 ; ---- the walk ---------------------------------------------------------------
 ; Reported at the OUTERMOST match and the walk does not descend into it: the inner
@@ -129,30 +130,30 @@
 ; overlapping edits for one form. `--fix` re-analyses to a fixpoint, so a form that
 ; is still combinable after this round is caught on the next one.
 (defn ifc-walk [(f Code)] (-> Code)
-  (if (code-list? f)
+  (if (primitive/code-list? f)
       (if (ifc-hand-if? f)
           (cond (ifc-same-shape? f) (do (ifc-report-same f) `0)
                 (ifc-and-shape? f)  (do (ifc-report-and f) `0)
                 (ifc-or-shape? f)   (do (ifc-report-or f) `0)
-                :else               (ifc-kids f 0 (code-count f)))
-          (ifc-kids f 0 (code-count f)))
+                :else               (ifc-kids f 0 (primitive/code-count f)))
+          (ifc-kids f 0 (primitive/code-count f)))
       `0))
 
 (defn ifc-kids [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0 (do (ifc-walk (code-nth f i)) (ifc-kids f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `0 (do (ifc-walk (primitive/code-nth f i)) (ifc-kids f (primitive/iadd i 1) n))))
 
 (defn ifc-look-at? [(m Code)] (-> bool)
-  (if (icmp-gt (code-count m) 1) (code-from-user? (code-nth m 1)) false))
+  (if (primitive/icmp-gt (primitive/code-count m) 1) (primitive/code-from-user? (primitive/code-nth m 1)) false))
 
 (defn ifc-forms [(m Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0 (do (ifc-walk (code-nth m i)) (ifc-forms m (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `0 (do (ifc-walk (primitive/code-nth m i)) (ifc-forms m (primitive/iadd i 1) n))))
 
 (defn ifc-mods [(ms Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n)
+  (if (primitive/icmp-ge i n)
       `0
       (do
-        (let [m (code-nth ms i)] (if (ifc-look-at? m) (ifc-forms m 1 (code-count m)) `0))
-        (ifc-mods ms (iadd i 1) n))))
+        (let [m (primitive/code-nth ms i)] (if (ifc-look-at? m) (ifc-forms m 1 (primitive/code-count m)) `0))
+        (ifc-mods ms (primitive/iadd i 1) n))))
 
 (defn lint-combine-ifs [(modules Code)] (-> Code)
-  (ifc-mods modules 0 (code-count modules)))
+  (ifc-mods modules 0 (primitive/code-count modules)))

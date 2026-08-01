@@ -1,6 +1,8 @@
 ; Atomic op return-value semantics (single-threaded determinism) and
 ; static globals shared across calls.
 (module t)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "src/stdlib/alloc.coil" :use *)
 (import "src/stdlib/io.coil" :use *)
 (import "src/stdlib/fmt.coil" :use *)
@@ -10,14 +12,14 @@
   (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
 
 (defn counter [] (-> i64)
-  (let [c (alloc-static i64)]
-    (store! c (iadd (load c) 1))
-    (load c)))
+  (let [c (alloc/static i64)]
+    (primitive/store! c (primitive/iadd (primitive/load c) 1))
+    (primitive/load c)))
 
 (defn main [] (-> i64)
   (let [w (stdout) a (malloc-allocator)
-        cell (cast (ptr i64) (unwrap-ptr (raw-alloc a 8 8)))]
-    (store! cell 100)
+        cell (primitive/cast (ptr i64) (unwrap-ptr (raw-alloc a 8 8)))]
+    (primitive/store! cell 100)
     (out w "add-old" (atomic-add cell 5))       ; returns OLD value
     (out w "after-add" (atomic-load cell))
     (out w "sub-old" (atomic-sub cell 30))

@@ -1,3 +1,4 @@
 (module minrep)
+(import "primitive.coil" :as primitive)
 (defn simple-check [(prog Code)] (-> Code)
-  (report (code-nth prog 0) "always report at the first form"))
+  (primitive/report (primitive/code-nth prog 0) "always report at the first form"))

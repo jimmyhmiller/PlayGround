@@ -6,6 +6,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
+use oxc_allocator::Allocator;
+use oxc_ast_visit::{Visit, walk};
+use oxc_parser::Parser;
+use oxc_span::{SourceType, Span};
 use rayon::prelude::*;
 
 use crate::async_graph::{AsyncModules, rewrite_imports as await_async_imports};
@@ -21,6 +25,46 @@ use crate::tree_shake::{Demand, ExportDemand as _, shake};
 use oxc_sourcemap::SourceMapBuilder;
 
 pub type DenseModuleId = usize;
+
+struct ImportMetaSpans(Vec<Span>);
+
+impl<'a> Visit<'a> for ImportMetaSpans {
+    fn visit_meta_property(&mut self, meta: &oxc_ast::ast::MetaProperty<'a>) {
+        if meta.meta.name == "import" && meta.property.name == "meta" {
+            self.0.push(meta.span);
+        }
+        walk::walk_meta_property(self, meta);
+    }
+}
+
+fn lower_cjs_import_meta(code: &str, module_id: &str) -> Option<String> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if parsed.panicked {
+        return None;
+    }
+    let mut spans = ImportMetaSpans(Vec::new());
+    spans.visit_program(&parsed.program);
+    if spans.0.is_empty() {
+        return None;
+    }
+    let mut output = code.to_string();
+    for span in spans.0.into_iter().rev() {
+        output.replace_range(
+            span.start as usize..span.end as usize,
+            "__diffpackImportMeta",
+        );
+    }
+    let escaped_path = module_id
+        .replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('#', "%23")
+        .replace('?', "%3F");
+    Some(format!(
+        "const __diffpackImportMeta={{url:{},env:Object.create(null)}};\n{output}",
+        quote(&format!("file://{escaped_path}"))
+    ))
+}
 
 #[derive(Debug, Clone)]
 pub struct ChunkPlan {
@@ -78,6 +122,7 @@ pub struct ModuleMapping {
 
 /// Borrowed module data required to render one registry-runtime factory.
 pub struct RuntimeRenderModule<'a> {
+    pub id: &'a str,
     pub code: &'a str,
     pub dependencies: &'a [(String, DenseModuleId, DependencyDemand)],
     pub pruned_imports: &'a HashSet<String>,
@@ -245,6 +290,12 @@ pub fn render_runtime_fragments(
                         lowered = std::borrow::Cow::Owned(rewritten);
                     }
                 }
+            }
+            if format == ModuleFormat::Cjs
+                && let Some(rewritten) = lower_cjs_import_meta(&lowered, module.id)
+            {
+                lowered = std::borrow::Cow::Owned(rewritten);
+                track = None;
             }
             let (code, shake_lines) = shake_module_code(
                 &lowered,
@@ -1175,6 +1226,7 @@ mod tests {
         let pruned = HashSet::new();
         let modules = vec![
             Some(RuntimeRenderModule {
+                id: "/entry.js",
                 code: "const lazy=require.dynamic(\"./lazy\");",
                 dependencies: &dependencies,
                 pruned_imports: &pruned,
@@ -1182,6 +1234,7 @@ mod tests {
                 uses_dirname: true,
             }),
             Some(RuntimeRenderModule {
+                id: "/lazy.js",
                 code: "exports.value=1;",
                 dependencies: &no_dependencies,
                 pruned_imports: &pruned,

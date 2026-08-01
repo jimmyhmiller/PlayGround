@@ -13,8 +13,9 @@
 ; only what those definitions name, so it sits BELOW every module that uses it and
 ; introduces no cycle: comptime.coil ← ctval.coil, never the reverse.
 (module ctval)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :use *)
 (import "result.coil" :use *)  ; Option
 (import "slice.coil" :use *)
 (import "arraylist.coil" :use *)
@@ -37,7 +38,7 @@
   (CRef [(cell (ptr CtVal))]))
 
 (defn new-cell [(c CtVal)] (-> (ptr CtVal))
-  (let [p (unwrap-ptr [CtVal] (create [CtVal] (malloc-allocator)))] (store! p c) p))
+  (let [p (unwrap-ptr [CtVal] (create [CtVal] (malloc-allocator)))] (primitive/store! p c) p))
 
 (defstruct EnvBind [(name (slice u8)) (val CtVal)])
 

@@ -17,12 +17,8 @@
 //! at compile time, so the helper the transform was written against is the helper that
 //! ships (see `runtime_helpers/README.md` for their provenance and license).
 
-/// The package name diffpack hands oxc's helper loader. Scoped and diffpack-specific
-/// so it cannot collide with anything installable, and so a `@diffpack/runtime/...`
-/// specifier appearing in a stack trace is unambiguously ours.
-pub const HELPER_PACKAGE: &str = "@diffpack/runtime";
-
-/// The specifier prefix oxc builds from [`HELPER_PACKAGE`]: `<package>/helpers/<name>`.
+/// The specifier prefix oxc builds for its helper imports:
+/// `<package>/helpers/<name>`.
 const HELPER_SPECIFIER_PREFIX: &str = "@diffpack/runtime/helpers/";
 
 /// The helper `specifier` names, or `None` when the specifier is not a helper at all.
@@ -75,7 +71,7 @@ mod tests {
     #[test]
     fn every_helper_the_decorator_lowering_emits_is_carried_and_default_exports() {
         for name in ["decorate", "decorateMetadata", "decorateParam"] {
-            let specifier = format!("{HELPER_PACKAGE}/helpers/{name}");
+            let specifier = format!("{HELPER_SPECIFIER_PREFIX}{name}");
             let source = helper_source(&specifier)
                 .unwrap_or_else(|| panic!("no embedded source for the `{name}` helper"));
             assert!(
@@ -90,7 +86,7 @@ mod tests {
     /// being reported as a missing npm package the user is told to install.
     #[test]
     fn an_unknown_helper_is_still_recognized_as_a_helper_and_refused_by_name() {
-        let specifier = format!("{HELPER_PACKAGE}/helpers/objectSpread2");
+        let specifier = format!("{HELPER_SPECIFIER_PREFIX}objectSpread2");
         assert_eq!(helper_name(&specifier), Some("objectSpread2"));
         assert!(helper_source(&specifier).is_none());
         let error = unknown_helper_error(&specifier);

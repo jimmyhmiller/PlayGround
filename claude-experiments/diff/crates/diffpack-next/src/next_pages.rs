@@ -76,6 +76,40 @@ struct Discovery {
     error: Option<PathBuf>,
 }
 
+/// Framework-owned route inventory shared with native Next output.
+///
+/// This deliberately exposes route semantics without leaking the standalone
+/// adapter's matcher representation or generated runtime files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PagesRouteArtifact {
+    pub pathname: String,
+    pub source_path: PathBuf,
+    pub is_api: bool,
+}
+
+/// Discover Pages Router entries for either a Pages-only or hybrid project.
+pub fn discover_route_artifacts(root: &Path) -> Result<Vec<PagesRouteArtifact>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot open project root {}: {error}", root.display()))?;
+    let Some(dir) = pages_dir(&root) else {
+        return Ok(Vec::new());
+    };
+    let discovery = discover(&dir)?;
+    let mut routes = Vec::with_capacity(discovery.pages.len() + discovery.api.len());
+    routes.extend(discovery.pages.into_iter().map(|route| PagesRouteArtifact {
+        pathname: route.pattern,
+        source_path: route.module,
+        is_api: false,
+    }));
+    routes.extend(discovery.api.into_iter().map(|route| PagesRouteArtifact {
+        pathname: route.pattern,
+        source_path: route.module,
+        is_api: true,
+    }));
+    Ok(routes)
+}
+
 /// The `pages/` directory for `root`, checking `pages/` then `src/pages/`.
 fn pages_dir(root: &Path) -> Option<PathBuf> {
     [root.join("pages"), root.join("src").join("pages")]
@@ -619,7 +653,7 @@ pub const ORCHESTRATOR: &str = include_str!("../../../scripts/pages/pages-server
 pub const PRERENDER_DRIVER: &str = include_str!("../../../scripts/pages/pages-prerender.mjs");
 
 /// If `root` is a pages-router project, scaffold `.diffpack-next-pages/` (runtime +
-/// shims + generated route-table manifests) and return the [`AppConfig`] for
+/// shims + generated route-table manifests) and return the [`PagesAppConfig`] for
 /// `environment` (`client` -> the browser build, anything else -> the Node server
 /// build). Returns `Ok(None)` for a non-pages project.
 pub fn configure(
@@ -737,12 +771,10 @@ pub fn configure(
             virtual_modules: Vec::new(),
             private_chunk_names: Vec::new(),
             target,
-            source_policy: std::sync::Arc::new(
-                diffpack_vite_compat::source_policy::ViteSourcePolicy {
-                    defines,
-                    ..Default::default()
-                },
-            ),
+            source_policy: std::sync::Arc::new(crate::source_policy::NextSourcePolicy {
+                defines,
+                ..Default::default()
+            }),
             hmr: dev,
             // Next's own source-map policy, applied to this router too — it is a
             // property of `next build`, not of a router. See

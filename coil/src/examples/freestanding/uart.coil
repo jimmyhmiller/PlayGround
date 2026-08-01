@@ -6,6 +6,7 @@
 ; real way you drive hardware — using only macro-generated, named register accessors.
 ;   python3 scripts/dev.py example freestanding --build-only uart   ->  "PL011 via typed registers"
 (module bare)
+(import "primitive.coil" :as primitive)
 (import "src/stdlib/mmio.coil" :use *)
 
 ; PL011 UART on the qemu `virt` machine:
@@ -16,19 +17,19 @@
 
 ; write one byte the RIGHT way: spin until the TX FIFO isn't full, then write DR.
 (defn uart-putc [(c i64)] (-> i64)
-  (loop (if (icmp-eq (UARTFR-txff) (cast u32 0)) (break) 0))   ; TXFF clear => room to write
-  (UARTDR-write (cast u32 c))
+  (loop (if (primitive/icmp-eq (UARTFR-txff) (primitive/cast u32 0)) (break) 0))   ; TXFF clear => room to write
+  (UARTDR-write (primitive/cast u32 c))
   0)
 (defn uart-puts [(s (ptr i8)) (n i64)] (-> i64)
   (let [(mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
-              (do (uart-putc (cast i64 (load (index s (load i)))))
-                  (store! i (iadd (load i) 1))))))
+              (do (uart-putc (primitive/cast i64 (primitive/load (primitive/index s (primitive/load i)))))
+                  (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 
 (defn poweroff [] (-> i64)
-  (llvm-ir i64 []
+  (primitive/llvm-ir i64 []
 "call void asm sideeffect \"movz x0, #0x8400, lsl #16 ; movk x0, #8 ; hvc #0\", \"~{x0}\"()
 ret i64 0"))
 

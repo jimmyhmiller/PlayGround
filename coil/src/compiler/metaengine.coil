@@ -11,11 +11,12 @@
 ;      metahost.coil exports resolve) -> dlsym each coil_mp_<k> entry.
 ;
 ; Every entry call runs on ITS OWN pthread: metahost's mh-halt implements
-; `(error ...)` as record-the-Diag + pthread_exit, so the pipeline thread just
+; `(primitive/error ...)` as record-the-Diag + pthread_exit, so the pipeline thread just
 ; joins, reads the Diag, and reports it as a located build error.
 (module metaengine)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 (import "arraylist.coil" :use *)
@@ -59,28 +60,28 @@
 ; glibc and 64 on Darwin, pthread_cond_t 48 on both — 64 covers every host.
 (defstruct MESem [(mtx (ptr i8)) (cnd (ptr i8)) (count i64)])
 (defn me-sem-create [(value i64)] (-> (ptr i8))
-  (let [s (cast (ptr MESem) (malloc (cast isize (sizeof MESem))))]
-    (store! (field s mtx) (malloc 64))
-    (store! (field s cnd) (malloc 64))
-    (pthread_mutex_init (load (field s mtx)) (cast (ptr i8) 0))
-    (pthread_cond_init (load (field s cnd)) (cast (ptr i8) 0))
-    (store! (field s count) value)
-    (cast (ptr i8) s)))
+  (let [s (primitive/cast (ptr MESem) (malloc (primitive/cast isize (primitive/sizeof MESem))))]
+    (primitive/store! (primitive/field s mtx) (malloc 64))
+    (primitive/store! (primitive/field s cnd) (malloc 64))
+    (pthread_mutex_init (primitive/load (primitive/field s mtx)) (primitive/cast (ptr i8) 0))
+    (pthread_cond_init (primitive/load (primitive/field s cnd)) (primitive/cast (ptr i8) 0))
+    (primitive/store! (primitive/field s count) value)
+    (primitive/cast (ptr i8) s)))
 (defn me-sem-wait [(sp (ptr i8)) (timeout i64)] (-> i64)
-  (let [s (cast (ptr MESem) sp)]
-    (pthread_mutex_lock (load (field s mtx)))
-    (loop (if (icmp-gt (load (field s count)) 0)
+  (let [s (primitive/cast (ptr MESem) sp)]
+    (pthread_mutex_lock (primitive/load (primitive/field s mtx)))
+    (loop (if (primitive/icmp-gt (primitive/load (primitive/field s count)) 0)
               (break)
-              (do (pthread_cond_wait (load (field s cnd)) (load (field s mtx))) 0)))
-    (store! (field s count) (isub (load (field s count)) 1))
-    (pthread_mutex_unlock (load (field s mtx)))
+              (do (pthread_cond_wait (primitive/load (primitive/field s cnd)) (primitive/load (primitive/field s mtx))) 0)))
+    (primitive/store! (primitive/field s count) (primitive/isub (primitive/load (primitive/field s count)) 1))
+    (pthread_mutex_unlock (primitive/load (primitive/field s mtx)))
     0))
 (defn me-sem-signal [(sp (ptr i8))] (-> i64)
-  (let [s (cast (ptr MESem) sp)]
-    (pthread_mutex_lock (load (field s mtx)))
-    (store! (field s count) (iadd (load (field s count)) 1))
-    (pthread_cond_signal (load (field s cnd)))
-    (pthread_mutex_unlock (load (field s mtx)))
+  (let [s (primitive/cast (ptr MESem) sp)]
+    (pthread_mutex_lock (primitive/load (primitive/field s mtx)))
+    (primitive/store! (primitive/field s count) (primitive/iadd (primitive/load (primitive/field s count)) 1))
+    (pthread_cond_signal (primitive/load (primitive/field s cnd)))
+    (pthread_mutex_unlock (primitive/load (primitive/field s mtx)))
     0))
 
 ; ---- host-OS probe ----------------------------------------------------------------
@@ -89,7 +90,7 @@
 ; never on macOS; on macOS the probe is false and every branch below is exactly the
 ; historical mach-o one.
 (defn me-host-linux? [] (-> bool)
-  (icmp-eq (cast i64 (access c"/proc/self/maps" 0)) 0))
+  (primitive/icmp-eq (primitive/cast i64 (access c"/proc/self/maps" 0)) 0))
 (defn me-dylib-ext [] (-> (slice u8))
   (if (me-host-linux?) ".so" ".dylib"))
 (defn me-dylib-link-cmd [] (-> (slice u8))
@@ -105,7 +106,7 @@
 ; (decision 7). A build with no registered builder cannot expand macros and fails
 ; loudly at engine setup.
 (defn meta-compiled? [] (-> bool)
-  (icmp-ne (load (field (meta-build-box) isset)) 0))
+  (primitive/icmp-ne (primitive/load (primitive/field (meta-build-box) isset)) 0))
 
 ; ---- engine state ----------------------------------------------------------------
 ; An entry carries ITS build's quasiquote registry: the engine grows ADDITIVELY
@@ -125,68 +126,68 @@
   [(active i64)
    (entries (ptr (ArrayList MEEntry)))])
 (defn meta-engine [] (-> (ptr MetaEngine))
-  (alloc-static MetaEngine))
+  (alloc/static MetaEngine))
 (defn meta-engine-active? [] (-> bool)
-  (icmp-ne (load (field (meta-engine) active)) 0))
+  (primitive/icmp-ne (primitive/load (primitive/field (meta-engine) active)) 0))
 ; entry lookup by qual name; null when unknown. Deliberately NOT gated on `active`:
 ; a staged entry serves finish-macro during the tower rounds BEFORE the batch
 ; engine comes up (with staging off, entries only ever exist once active=1, so the
 ; behavior is unchanged there).
 (defn meta-engine-entry [(name (slice u8))] (-> (ptr MEEntry))
   (let [b (meta-engine)
-        es (load (field b entries))
-        (mut r) (cast (ptr MEEntry) 0)]
-    (if (icmp-eq (cast i64 es) 0)
-        (load r)
-        (let [n (al-len [MEEntry] (load es))
+        es (primitive/load (primitive/field b entries))
+        (mut r) (primitive/cast (ptr MEEntry) 0)]
+    (if (primitive/icmp-eq (primitive/cast i64 es) 0)
+        (primitive/load r)
+        (let [n (al-len [MEEntry] (primitive/load es))
               (mut i) 0]
-          (loop (if (icmp-ge (load i) n)
+          (loop (if (primitive/icmp-ge (primitive/load i) n)
                     (break)
                     (do
-                      (when (str-eq (load (field (al-elem [MEEntry] es (load i)) name)) name)
-                            (store! r (al-elem [MEEntry] es (load i)))
+                      (when (str-eq (primitive/load (primitive/field (al-elem [MEEntry] es (primitive/load i)) name)) name)
+                            (primitive/store! r (al-elem [MEEntry] es (primitive/load i)))
                             (break))
-                      (store! i (iadd (load i) 1)))))
-          (load r)))))
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+          (primitive/load r)))))
 
 ; ---- MAIN-THREAD execution (COIL_META_MAIN=1) --------------------------------------
 ; AppKit windows only work on the process main thread, so a GUI metaprogram cannot
 ; run on the engine's per-call worker thread. With COIL_META_MAIN=1, the driver's
 ; main thread (normally parked in pthread_join) runs this job loop instead, and
-; every metaprogram entry is dispatched to it. The trade: `(error ...)` in this
+; every metaprogram entry is dispatched to it. The trade: `(primitive/error ...)` in this
 ; mode prints its diagnostic and exits the process (there is no thread to end),
 ; which is behaviorally the same failed build, minus multi-metaprogram continuation.
 (defn meta-main? [] (-> bool)
   (let [v (getenv c"COIL_META_MAIN")]
-    (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
+    (if (primitive/icmp-eq (primitive/cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
 (defstruct MainSvc [(isinit i64) (jobsem (ptr i8)) (donesem (ptr i8)) (finished i64) (call (ptr i8))])
 (defn main-svc [] (-> (ptr MainSvc))
-  (alloc-static MainSvc))
+  (alloc/static MainSvc))
 (defn main-svc-init! [] (-> i64)
   (let [b (main-svc)]
-    (unless (icmp-ne (load (field b isinit)) 0)
-            (store! (field b jobsem) (me-sem-create 0))
-            (store! (field b donesem) (me-sem-create 0))
-            (store! (field b isinit) 1)
+    (unless (primitive/icmp-ne (primitive/load (primitive/field b isinit)) 0)
+            (primitive/store! (primitive/field b jobsem) (me-sem-create 0))
+            (primitive/store! (primitive/field b donesem) (me-sem-create 0))
+            (primitive/store! (primitive/field b isinit) 1)
             0)))
 ; the driver's main thread sits here servicing metaprogram calls until the
 ; pipeline thread signals it is done (no-op unless main-svc-init! ran)
 (defn main-svc-loop [] (-> i64)
   (let [b (main-svc)]
-    (unless (icmp-eq (load (field b isinit)) 0)
+    (unless (primitive/icmp-eq (primitive/load (primitive/field b isinit)) 0)
             (loop (do
-                    (me-sem-wait (load (field b jobsem)) -1)
-                    (when (icmp-ne (load (field b finished)) 0) (break 0))
-                    (me-tramp (load (field b call)))
-                    (me-sem-signal (load (field b donesem))))))))
+                    (me-sem-wait (primitive/load (primitive/field b jobsem)) -1)
+                    (when (primitive/icmp-ne (primitive/load (primitive/field b finished)) 0) (break 0))
+                    (me-tramp (primitive/load (primitive/field b call)))
+                    (me-sem-signal (primitive/load (primitive/field b donesem))))))))
 (defn main-svc-finish! [] (-> i64)
   (let [b (main-svc)]
-    (unless (icmp-eq (load (field b isinit)) 0) (store! (field b finished) 1) (me-sem-signal (load (field b jobsem))) 0)))
+    (unless (primitive/icmp-eq (primitive/load (primitive/field b isinit)) 0) (primitive/store! (primitive/field b finished) 1) (me-sem-signal (primitive/load (primitive/field b jobsem))) 0)))
 (defn main-svc-run [(c (ptr i8))] (-> i64)
   (let [b (main-svc)]
-    (store! (field b call) c)
-    (me-sem-signal (load (field b jobsem)))
-    (me-sem-wait (load (field b donesem)) -1)
+    (primitive/store! (primitive/field b call) c)
+    (me-sem-signal (primitive/load (primitive/field b jobsem)))
+    (me-sem-wait (primitive/load (primitive/field b donesem)) -1)
     0))
 
 ; ---- the program's --link-flag list (set by the driver) ----------------------------
@@ -195,14 +196,14 @@
 ; are part of the dylib cache key.
 (defstruct MetaLinkBox [(isset i64) (flags (ptr (ArrayList (slice u8))))])
 (defn meta-link-box [] (-> (ptr MetaLinkBox))
-  (alloc-static MetaLinkBox))
+  (alloc/static MetaLinkBox))
 (defn set-meta-link-flags! [(fl (ptr (ArrayList (slice u8))))] (-> i64)
-  (let [b (meta-link-box)] (store! (field b flags) fl) (store! (field b isset) 1) 0))
+  (let [b (meta-link-box)] (primitive/store! (primitive/field b flags) fl) (primitive/store! (primitive/field b isset) 1) 0))
 
 ; ---- backend object-builder injection (main.coil / main_a64.coil register one) ---
 (defstruct MetaBuildBox [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))])
 (defn meta-build-box [] (-> (ptr MetaBuildBox))
-  (alloc-static MetaBuildBox))
+  (alloc/static MetaBuildBox))
 
 ; ---- the -O level (driver sets it from -O0/-O1/-O2/-O3, default 3) -----------------
 ; One value per process, like the sanitize flag. main.coil::build-object reads it for
@@ -222,11 +223,11 @@
 ; even in the LLVM build; see main.coil::meta-build-mobj-llvm).
 (defstruct OptLevelBox [(isset i64) (level i64)])
 (defn opt-level-box [] (-> (ptr OptLevelBox))
-  (alloc-static OptLevelBox))
+  (alloc/static OptLevelBox))
 (defn set-opt-level! [(n i64)] (-> i64)
-  (let [b (opt-level-box)] (store! (field b level) n) (store! (field b isset) 1) 0))
+  (let [b (opt-level-box)] (primitive/store! (primitive/field b level) n) (primitive/store! (primitive/field b isset) 1) 0))
 (defn opt-level [] (-> i64)
-  (let [b (opt-level-box)] (if (icmp-eq (load (field b isset)) 0) 3 (load (field b level)))))
+  (let [b (opt-level-box)] (if (primitive/icmp-eq (primitive/load (primitive/field b isset)) 0) 3 (primitive/load (primitive/field b level)))))
 ; `--meta-opt=<n>` — the level for METAPROGRAM objects (the dylib built below, and the
 ; comptime objects comptime_eval builds through the same hook), independent of the -O
 ; the program itself gets. Unset = follow -O, so this changes nothing unless asked for.
@@ -238,16 +239,16 @@
 ; and its level trades build time against a runtime you may not care about at all.
 (defstruct MetaOptBox [(isset i64) (level i64)])
 (defn meta-opt-box [] (-> (ptr MetaOptBox))
-  (alloc-static MetaOptBox))
+  (alloc/static MetaOptBox))
 (defn set-meta-opt-level! [(n i64)] (-> i64)
-  (let [b (meta-opt-box)] (store! (field b level) n) (store! (field b isset) 1) 0))
+  (let [b (meta-opt-box)] (primitive/store! (primitive/field b level) n) (primitive/store! (primitive/field b isset) 1) 0))
 (defn meta-opt-level [] (-> i64)
-  (let [b (meta-opt-box)] (if (icmp-eq (load (field b isset)) 0) (opt-level) (load (field b level)))))
+  (let [b (meta-opt-box)] (if (primitive/icmp-eq (primitive/load (primitive/field b isset)) 0) (opt-level) (primitive/load (primitive/field b level)))))
 (defn opt-level-tag [] (-> (slice u8))
   (let [n (meta-opt-level)]
-    (cond (icmp-eq n 0) "O0|" (icmp-eq n 1) "O1|" (icmp-eq n 2) "O2|" :else "O3|")))
+    (cond (primitive/icmp-eq n 0) "O0|" (primitive/icmp-eq n 1) "O1|" (primitive/icmp-eq n 2) "O2|" :else "O3|")))
 (defn set-meta-build-obj! [(fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))] (-> i64)
-  (let [b (meta-build-box)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+  (let [b (meta-build-box)] (primitive/store! (primitive/field b fp) fp) (primitive/store! (primitive/field b isset) 1) 0))
 
 ; ---- in-memory object builder (the JIT path) --------------------------------------
 ; A backend that can hand back the object as an MObj instead of a file lets
@@ -259,11 +260,11 @@
 ; the bytes reach memory differs.
 (defstruct MetaMobjBox [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Program)] MObj))])
 (defn meta-mobj-box [] (-> (ptr MetaMobjBox))
-  (alloc-static MetaMobjBox))
+  (alloc/static MetaMobjBox))
 (defn set-meta-build-mobj! [(fp (fnptr c [(ptr Allocator) (ptr Program)] MObj))] (-> i64)
-  (let [b (meta-mobj-box)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+  (let [b (meta-mobj-box)] (primitive/store! (primitive/field b fp) fp) (primitive/store! (primitive/field b isset) 1) 0))
 (defn meta-mobj-available? [] (-> bool)
-  (icmp-ne (load (field (meta-mobj-box) isset)) 0))
+  (primitive/icmp-ne (primitive/load (primitive/field (meta-mobj-box) isset)) 0))
 
 ; ---- WASM meta path: side-module builder + entry runner (registered by main_wasm) --
 ; When this compiler is itself hosted in a wasm sandbox it cannot dlopen a dylib or
@@ -300,7 +301,7 @@
                (ptr i8)))
    (run-ct (fnptr c [(ptr u8) i64 (ptr i8) (ptr i8) i64 (ptr i8)] i64))])
 (defn meta-wasm-box [] (-> (ptr MetaWasmBox))
-  (alloc-static MetaWasmBox))
+  (alloc/static MetaWasmBox))
 (defn set-meta-wasm! [(build (fnptr c [(ptr Allocator) (ptr Program)] (slice u8)))
                       (run (fnptr c
                                   [(ptr u8)
@@ -318,13 +319,13 @@
                                   (ptr i8)))
                       (run-ct (fnptr c [(ptr u8) i64 (ptr i8) (ptr i8) i64 (ptr i8)] i64))] (-> i64)
   (let [b (meta-wasm-box)]
-    (store! (field b build) build)
-    (store! (field b run) run)
-    (store! (field b run-ct) run-ct)
-    (store! (field b isset) 1)
+    (primitive/store! (primitive/field b build) build)
+    (primitive/store! (primitive/field b run) run)
+    (primitive/store! (primitive/field b run-ct) run-ct)
+    (primitive/store! (primitive/field b isset) 1)
     0))
 (defn meta-wasm-active? [] (-> bool)
-  (icmp-ne (load (field (meta-wasm-box) isset)) 0))
+  (primitive/icmp-ne (primitive/load (primitive/field (meta-wasm-box) isset)) 0))
 
 ; ---- INTERPRETER meta path (registered by main*, gated on COIL_META_INTERP) ---------
 ; The simplest execution option: run a metaprogram by INTERPRETING its mono'd
@@ -343,18 +344,18 @@
    (run (fnptr c [(ptr i8) (ptr i8) (ptr i64) i64] (ptr i8)))
    (run-ct (fnptr c [(ptr i8) i64 (ptr i8)] i64))])
 (defn meta-interp-box [] (-> (ptr MetaInterpBox))
-  (alloc-static MetaInterpBox))
+  (alloc/static MetaInterpBox))
 (defn set-meta-interp! [(build (fnptr c [(ptr Allocator) (ptr Program)] (ptr i8)))
                         (run (fnptr c [(ptr i8) (ptr i8) (ptr i64) i64] (ptr i8)))
                         (run-ct (fnptr c [(ptr i8) i64 (ptr i8)] i64))] (-> i64)
   (let [b (meta-interp-box)]
-    (store! (field b build) build)
-    (store! (field b run) run)
-    (store! (field b run-ct) run-ct)
-    (store! (field b isset) 1)
+    (primitive/store! (primitive/field b build) build)
+    (primitive/store! (primitive/field b run) run)
+    (primitive/store! (primitive/field b run-ct) run-ct)
+    (primitive/store! (primitive/field b isset) 1)
     0))
 (defn meta-interp-active? [] (-> bool)
-  (icmp-ne (load (field (meta-interp-box) isset)) 0))
+  (primitive/icmp-ne (primitive/load (primitive/field (meta-interp-box) isset)) 0))
 
 ; ---- wasm-sandbox flag: no pthread. Set by the wasm-hosted entry (main_wasm); makes
 ; run-on-big-stack run the pipeline inline (the sandbox is single-threaded and the
@@ -362,24 +363,24 @@
 ; a NATIVE build may set (COIL_META_INTERP=1) while still wanting the 512 MiB pthread.
 (defstruct WasmSandboxBox [(on i64)])
 (defn wasm-sandbox-box [] (-> (ptr WasmSandboxBox))
-  (alloc-static WasmSandboxBox))
+  (alloc/static WasmSandboxBox))
 (defn set-wasm-sandbox! [(v i64)] (-> i64)
-  (store! (field (wasm-sandbox-box) on) v)
+  (primitive/store! (primitive/field (wasm-sandbox-box) on) v)
   0)
 (defn wasm-sandbox? [] (-> bool)
-  (icmp-ne (load (field (wasm-sandbox-box) on)) 0))
+  (primitive/icmp-ne (primitive/load (primitive/field (wasm-sandbox-box) on)) 0))
 
 ; ---- unique scratch paths ---------------------------------------------------------
 ; per-process uniqueness from the static box's (ASLR-randomized) address, plus a
 ; counter for multiple engine builds in one process. No extra libc externs needed.
 (defstruct MECounter [(n i64)])
 (defn me-counter [] (-> (ptr MECounter))
-  (alloc-static MECounter))
+  (alloc/static MECounter))
 (defn me-unique [(a (ptr Allocator))] (-> (slice u8))
   (let [c (me-counter)
-        k (load (field c n))]
-    (store! (field c n) (iadd k 1))
-    (sconcat3 a (dec->str a (udiv (cast i64 (me-counter)) 16)) "-" (dec->str a k))))
+        k (primitive/load (primitive/field c n))]
+    (primitive/store! (primitive/field c n) (primitive/iadd k 1))
+    (sconcat3 a (dec->str a (primitive/udiv (primitive/cast i64 (me-counter)) 16)) "-" (dec->str a k))))
 
 ; ---- the sub-program's form list (BEFORE its resolve) ------------------------------
 ; ALWAYS a FRESH list: both the shim (compiled engine) and the definition-time
@@ -393,15 +394,15 @@
 (defn meta-sub-forms [(a (ptr Allocator)) (s (mut LS)) (base (ptr (ArrayList TaggedForm)))] (-> (Result (ptr (ArrayList TaggedForm))
                                                                                                         Diag))
   (let [(mut out) (al-new [TaggedForm] a)
-        nb (al-len [TaggedForm] (load base))
+        nb (al-len [TaggedForm] (primitive/load base))
         (mut k) 0]
-    (loop (if (icmp-ge (load k) nb)
+    (loop (if (primitive/icmp-ge (primitive/load k) nb)
               (break)
               (do
-                (al-push! (mut out) (al-get [TaggedForm] (load base) (load k)))
-                (store! k (iadd (load k) 1)))))
+                (al-push! (mut out) (al-get [TaggedForm] (primitive/load base) (primitive/load k)))
+                (primitive/store! k (primitive/iadd (primitive/load k) 1)))))
     (if (not (meta-compiled?))
-        (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out)))
+        (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (primitive/load out)))
         ; The wasm AND interpreter meta paths inject metashim_wasm.coil (mp-* call the
         ; mh_* callbacks as externs — env imports in wasm, interp-hook dispatch in the
         ; interpreter) instead of metashim.coil (mp-* call through the in-process vtable).
@@ -409,46 +410,46 @@
                 (if (or (meta-wasm-active?) (meta-interp-active?))
                     (include-str "metashim_wasm.coil")
                     (include-str "metashim.coil"))
-              sid (load (field s srccount))]
-          (store! (field s srccount) (iadd sid 1))
+              sid (primitive/load (primitive/field s srccount))]
+          (primitive/store! (primitive/field s srccount) (primitive/iadd sid 1))
           (register-source! (mut s) "<metashim>" text)
           (match (read-all a text sid)
             (Err [d] (Err [(ptr (ArrayList TaggedForm)) Diag] d))
             (Ok [forms]
-                (let [n (al-len [Sexp] (load forms))
+                (let [n (al-len [Sexp] (primitive/load forms))
                       (mut i) 0]
-                  (loop (if (icmp-ge (load i) n)
+                  (loop (if (primitive/icmp-ge (primitive/load i) n)
                             (break)
                             (do
-                              (let [f (al-elem [Sexp] forms (load i))
-                                    ismod
-                                      (and (icmp-eq (sx-tag (load f)) 6)
-                                           (and (icmp-ge (sx-len (sx-items (load f))) 1)
-                                                (and (icmp-eq (sx-tag (sx-at (sx-items (load f)) 0)) 2)
-                                                     (str-eq (sx-sval (sx-at (sx-items (load f)) 0)) "module"))))]
-                                (unless ismod (al-push! (mut out) (mk-tagged (load f) (Some "metashim"))) 0))
-                              (store! i (iadd (load i) 1)))))
-                  (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out))))))))))
+                              (let [f (al-elem [Sexp] forms (primitive/load i))
+                                    head (l-list-head f)
+                                    ismod (match head (Some [h] (str-eq h "module")) (None [] false))
+                                    isimport (match head (Some [h] (str-eq h "import")) (None [] false))]
+                                (if isimport
+                                    (process-import (mut s) f (bundled-base) (Some "metashim"))
+                                    (unless ismod (al-push! (mut out) (mk-tagged (primitive/load f) (Some "metashim"))) 0)))
+                              (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+                  (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (primitive/load out))))))))))
 
 ; closure seeds for the engine: the metaprogram entries PLUS every metashim
 ; function (the lowering's calls to them are created after the closure walk runs).
 (defn meta-shim-seeds [(a (ptr Allocator)) (macroctx (ptr Program)) (quals (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList (slice u8))))
   (let [(mut out) (al-new [(slice u8)] a)
-        nq (al-len [(slice u8)] (load quals))
+        nq (al-len [(slice u8)] (primitive/load quals))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) nq)
+    (loop (if (primitive/icmp-ge (primitive/load i) nq)
               (break)
-              (do (al-push! (mut out) (al-get [(slice u8)] (load quals) (load i))) (store! i (iadd (load i) 1)))))
-    (let [fs (load (field macroctx funcs))
-          nf (al-len [Func] (load fs))
+              (do (al-push! (mut out) (al-get [(slice u8)] (primitive/load quals) (primitive/load i))) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (let [fs (primitive/load (primitive/field macroctx funcs))
+          nf (al-len [Func] (primitive/load fs))
           (mut j) 0]
-      (loop (if (icmp-ge (load j) nf)
+      (loop (if (primitive/icmp-ge (primitive/load j) nf)
                 (break)
                 (do
-                  (let [nm (func-name (al-get [Func] (load fs) (load j)))]
+                  (let [nm (func-name (al-get [Func] (primitive/load fs) (primitive/load j)))]
                     (when (starts-with nm "metashim.") (al-push! (mut out) nm) 0))
-                  (store! j (iadd (load j) 1))))))
-    (box-al [(slice u8)] a (load out))))
+                  (primitive/store! j (primitive/iadd (primitive/load j) 1))))))
+    (box-al [(slice u8)] a (primitive/load out))))
 
 ; ---- the content-addressed dylib cache ---------------------------------------------
 ; Key = FNV-1a over the DUMPED mono'd metaprogram program (astdump's d-program, the
@@ -458,91 +459,91 @@
 ; Location: $HOME/.cache/coil/metaprog/. Kill switch: COIL_META_CACHE=0.
 (defstruct FnvCell [(h i64)])
 (defn me-fnv-write [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> (Result i64 IoError))
-  (let [c (cast (ptr FnvCell) ctx)
+  (let [c (primitive/cast (ptr FnvCell) ctx)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (store! (field c h)
-                        (imul (ixor (load (field c h)) (iand (cast i64 (load (index buf (load i)))) 255))
+                (primitive/store! (primitive/field c h)
+                        (primitive/imul (primitive/ixor (primitive/load (primitive/field c h)) (primitive/iand (primitive/cast i64 (primitive/load (primitive/index buf (primitive/load i)))) 255))
                               1099511628211))
-                (store! i (iadd (load i) 1)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
     (Ok [i64 IoError] n)))
 (defn me-fnv-str [(c (ptr FnvCell)) (s (slice u8))] (-> i64)
   (let [n (slice-len s)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (store! (field c h)
-                        (imul (ixor (load (field c h)) (cast i64 (slice-get s (load i))))
+                (primitive/store! (primitive/field c h)
+                        (primitive/imul (primitive/ixor (primitive/load (primitive/field c h)) (primitive/cast i64 (slice-get s (primitive/load i))))
                               1099511628211))
-                (store! i (iadd (load i) 1)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
     0))
 (defn me-hex [(a (ptr Allocator)) (v i64)] (-> (slice u8))
-  (let [buf (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 16 1)))
+  (let [buf (primitive/cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 16 1)))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) 16)
+    (loop (if (primitive/icmp-ge (primitive/load i) 16)
               (break)
               (do
-                (let [d (iand (ishr v (imul (isub 15 (load i)) 4)) 15)]
-                  (store! (index buf (load i)) (cast u8 (if (icmp-lt d 10) (iadd 48 d) (iadd 87 d)))))
-                (store! i (iadd (load i) 1)))))
+                (let [d (primitive/iand (primitive/ishr v (primitive/imul (primitive/isub 15 (primitive/load i)) 4)) 15)]
+                  (primitive/store! (primitive/index buf (primitive/load i)) (primitive/cast u8 (if (primitive/icmp-lt d 10) (primitive/iadd 48 d) (primitive/iadd 87 d)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
     (slice-new buf 16)))
 (defn me-program-key [(a (ptr Allocator)) (mp (ptr Program)) (entries (ptr (ArrayList MLEntry)))] (-> (slice u8))
-  (let [c (alloc-stack FnvCell)
-        w (alloc-stack Writer)]
-    (store! (field c h) -3750763034362895579)  ; FNV-1a offset basis
+  (let [c (alloc/stack FnvCell)
+        w (alloc/stack Writer)]
+    (primitive/store! (primitive/field c h) -3750763034362895579)  ; FNV-1a offset basis
     (me-fnv-str c "coil-metaprog-v1|")
     (me-fnv-str c (opt-level-tag))  ; same program at a different -O is a different dylib
-    (store! (field w write-fn) (fnptr-of me-fnv-write))
-    (store! (field w ctx) (cast (ptr i8) c))
+    (primitive/store! (primitive/field w write-fn) (primitive/fnptr-of me-fnv-write))
+    (primitive/store! (primitive/field w ctx) (primitive/cast (ptr i8) c))
     (d-program w mp a)
-    (let [n (al-len [MLEntry] (load entries))
+    (let [n (al-len [MLEntry] (primitive/load entries))
           (mut i) 0]
-      (loop (if (icmp-ge (load i) n)
+      (loop (if (primitive/icmp-ge (primitive/load i) n)
                 (break)
                 (do
-                  (me-fnv-str c (load (field (al-elem [MLEntry] entries (load i)) name)))
+                  (me-fnv-str c (primitive/load (primitive/field (al-elem [MLEntry] entries (primitive/load i)) name)))
                   (me-fnv-str c "=")
-                  (me-fnv-str c (load (field (al-elem [MLEntry] entries (load i)) symbol)))
+                  (me-fnv-str c (primitive/load (primitive/field (al-elem [MLEntry] entries (primitive/load i)) symbol)))
                   (me-fnv-str c ";")
-                  (store! i (iadd (load i) 1))))))
+                  (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
     ; the link flags are part of what the dylib IS (frameworks a metaprogram binds)
     (let [lb (meta-link-box)]
-      (unless (icmp-eq (load (field lb isset)) 0)
-              (let [fl (load (field lb flags))
-                    n (al-len [(slice u8)] (load fl))
+      (unless (primitive/icmp-eq (primitive/load (primitive/field lb isset)) 0)
+              (let [fl (primitive/load (primitive/field lb flags))
+                    n (al-len [(slice u8)] (primitive/load fl))
                     (mut i) 0]
-                (loop (if (icmp-ge (load i) n)
+                (loop (if (primitive/icmp-ge (primitive/load i) n)
                           (break)
                           (do
-                            (me-fnv-str c (al-get [(slice u8)] (load fl) (load i)))
+                            (me-fnv-str c (al-get [(slice u8)] (primitive/load fl) (primitive/load i)))
                             (me-fnv-str c "|")
-                            (store! i (iadd (load i) 1)))))
+                            (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
                 0)))
-    (me-hex a (load (field c h)))))
+    (me-hex a (primitive/load (primitive/field c h)))))
 ; the program's --link-flag list, space-joined (empty string if none)
 (defn me-link-flags-str [(a (ptr Allocator))] (-> (slice u8))
   (let [lb (meta-link-box)]
-    (if (icmp-eq (load (field lb isset)) 0)
+    (if (primitive/icmp-eq (primitive/load (primitive/field lb isset)) 0)
         ""
-        (let [fl (load (field lb flags))
-              n (al-len [(slice u8)] (load fl))
+        (let [fl (primitive/load (primitive/field lb flags))
+              n (al-len [(slice u8)] (primitive/load fl))
               (mut out) ""
               (mut i) 0]
-          (loop (if (icmp-ge (load i) n)
+          (loop (if (primitive/icmp-ge (primitive/load i) n)
                     (break)
                     (do
-                      (store! out (sconcat a (sconcat a (load out) " ") (al-get [(slice u8)] (load fl) (load i))))
-                      (store! i (iadd (load i) 1)))))
-          (load out)))))
+                      (primitive/store! out (sconcat a (sconcat a (primitive/load out) " ") (al-get [(slice u8)] (primitive/load fl) (primitive/load i))))
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+          (primitive/load out)))))
 (defn me-cache-on? [] (-> bool)
   (let [v (getenv c"COIL_META_CACHE")]
-    (if (icmp-eq (cast i64 v) 0) true (not (str-eq (cstr->slice v) "0")))))
+    (if (primitive/icmp-eq (primitive/cast i64 v) 0) true (not (str-eq (cstr->slice v) "0")))))
 (defn me-cache-dir [(a (ptr Allocator))] (-> (Option (slice u8)))
   (let [h (getenv c"HOME")]
-    (if (icmp-eq (cast i64 h) 0)
+    (if (primitive/icmp-eq (primitive/cast i64 h) 0)
         (None [(slice u8)])
         (Some (sconcat a (cstr->slice h) "/.cache/coil/metaprog")))))
 
@@ -550,13 +551,13 @@
 ; entry can run — see metashim.coil coil_mp_init)
 (defn me-open-dylib [(a (ptr Allocator)) (path (slice u8))] (-> (Result (ptr i8) Diag))
   (let [h (dlopen (slice->cstr a path) 2)]
-    (if (icmp-eq (cast i64 h) 0)
+    (if (primitive/icmp-eq (primitive/cast i64 h) 0)
         (Err [(ptr i8) Diag] (derr "metaengine: dlopen of the metaprogram dylib failed"))
         (let [ini (dlsym h (slice->cstr a "coil_mp_init"))]
-          (if (icmp-eq (cast i64 ini) 0)
+          (if (primitive/icmp-eq (primitive/cast i64 ini) 0)
               (Err [(ptr i8) Diag] (derr "metaengine: coil_mp_init missing from the metaprogram dylib (compiler bug)"))
               (do
-                (call-ptr (cast (fnptr c [(ptr i8)] i64) ini) (meta-vtable))
+                (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8)] i64) ini) (meta-vtable))
                 (Ok [(ptr i8) Diag] h)))))))
 
 ; ---- build the metaprogram dylib ---------------------------------------------------
@@ -564,7 +565,7 @@
                                                                                                                      Diag))
   (try (do
          (let [bb (meta-build-box)]
-           (when (icmp-eq (load (field bb isset)) 0)
+           (when (primitive/icmp-eq (primitive/load (primitive/field bb isset)) 0)
                  (break :try
                         (Err [(ptr i8) Diag]
                              (derr "metaengine: this compiler build has no backend object builder registered, so it cannot compile metaprograms (compiler bug)"))))
@@ -578,19 +579,19 @@
                ; cache hit: the dylib for this exact program already exists
                (match cpath
                  (Some [p]
-                       (when (icmp-eq (cast i64 (access (slice->cstr a p) 0)) 0) (break :try (me-open-dylib a p))))
+                       (when (primitive/icmp-eq (primitive/cast i64 (access (slice->cstr a p) 0)) 0) (break :try (me-open-dylib a p))))
                  (None [] 0))
                (let [id (me-unique a)
                      obj-s (sconcat3 a "/tmp/coil-mp-" id ".o")
                      tmp-s (sconcat3 a "/tmp/coil-mp-" id (me-dylib-ext))]
-                 (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
+                 (primitive/call-ptr (primitive/load (primitive/field bb fp)) a mp (slice->cstr a obj-s))
                  (let [cmd
                          (sconcat a
                                   (sconcat a
                                            (sconcat3 a (me-dylib-link-cmd) obj-s " -o ")
                                            (sconcat a tmp-s (me-dylib-undef-flag)))
                                   (me-link-flags-str a))]
-                   (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
+                   (if (primitive/icmp-ne (primitive/cast i64 (system (slice->cstr a cmd))) 0)
                        (Err [(ptr i8) Diag] (derr "metaengine: linking the metaprogram dylib failed"))
                        (do
                          (unlink (slice->cstr a obj-s))
@@ -601,7 +602,7 @@
                                    (Some [d]
                                          (do
                                            (system (slice->cstr a (sconcat a "mkdir -p " d)))
-                                           (when (icmp-eq (cast i64 (rename (slice->cstr a tmp-s) (slice->cstr a p))) 0)
+                                           (when (primitive/icmp-eq (primitive/cast i64 (rename (slice->cstr a tmp-s) (slice->cstr a p))) 0)
                                                  (break :try (me-open-dylib a p)))))
                                    (None [] 0)))
                            (None [] 0))
@@ -612,40 +613,40 @@
 ; monomorphize+build+dlopen the metaprogram dylib, then dlsym each coil_mp_<k> entry
 ; into an MEEntry carrying its native function pointer.
 (defn me-setup-native [(a (ptr Allocator)) (mo (ptr MLOut))] (-> (Result (ptr (ArrayList MEEntry)) Diag))
-  (match (meta-build-dylib a (load (field mo prog)) (load (field mo entries)))
+  (match (meta-build-dylib a (primitive/load (primitive/field mo prog)) (primitive/load (primitive/field mo entries)))
     (Err [d] (Err [(ptr (ArrayList MEEntry)) Diag] d))
     (Ok [h]
-        (let [es (load (field mo entries))
-              n (al-len [MLEntry] (load es))
+        (let [es (primitive/load (primitive/field mo entries))
+              n (al-len [MLEntry] (primitive/load es))
               (mut out) (al-new [MEEntry] a)
               (mut i) 0
               (mut failed) (None [Diag])]
-          (loop (if (or (diag-some? (load failed)) (icmp-ge (load i) n))
+          (loop (if (or (diag-some? (primitive/load failed)) (primitive/icmp-ge (primitive/load i) n))
                     (break)
                     (do
-                      (let [ep (al-elem [MLEntry] es (load i))
-                            fp (dlsym h (slice->cstr a (load (field ep symbol))))]
-                        (if (icmp-eq (cast i64 fp) 0)
+                      (let [ep (al-elem [MLEntry] es (primitive/load i))
+                            fp (dlsym h (slice->cstr a (primitive/load (primitive/field ep symbol))))]
+                        (if (primitive/icmp-eq (primitive/cast i64 fp) 0)
                             (do
-                              (store! failed
+                              (primitive/store! failed
                                       (Some (derr (sconcat3 a
                                                             "metaengine: entry '"
-                                                            (load (field ep name))
+                                                            (primitive/load (primitive/field ep name))
                                                             "' missing from the metaprogram dylib (compiler bug)"))))
                               0)
-                            (let [me (alloc-stack MEEntry)]
-                              (store! (field me name) (load (field ep name)))
-                              (store! (field me fp) fp)
-                              (store! (field me registry) (load (field mo registry)))
-                              (store! (field me symbol) (load (field ep symbol)))
-                              (store! (field me modbytes) "")
-                              (store! (field me interpcx) (cast (ptr i8) 0))
-                              (al-push! (mut out) (load me))
+                            (let [me (alloc/stack MEEntry)]
+                              (primitive/store! (primitive/field me name) (primitive/load (primitive/field ep name)))
+                              (primitive/store! (primitive/field me fp) fp)
+                              (primitive/store! (primitive/field me registry) (primitive/load (primitive/field mo registry)))
+                              (primitive/store! (primitive/field me symbol) (primitive/load (primitive/field ep symbol)))
+                              (primitive/store! (primitive/field me modbytes) "")
+                              (primitive/store! (primitive/field me interpcx) (primitive/cast (ptr i8) 0))
+                              (al-push! (mut out) (primitive/load me))
                               0)))
-                      (store! i (iadd (load i) 1)))))
-          (match (load failed)
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+          (match (primitive/load failed)
             (Some [d] (Err [(ptr (ArrayList MEEntry)) Diag] d))
-            (None [] (Ok [(ptr (ArrayList MEEntry)) Diag] (box-al [MEEntry] a (load out)))))))))
+            (None [] (Ok [(ptr (ArrayList MEEntry)) Diag] (box-al [MEEntry] a (primitive/load out)))))))))
 
 ; ---- entry-set construction: wasm side-module path ---------------------------------
 ; monomorphize + codegen_wasm into ONE side-module (bytes shared by every entry of
@@ -653,27 +654,27 @@
 ; run later via meta_run_wasm. No dlopen, no fp.
 (defn me-setup-wasm [(a (ptr Allocator)) (mo (ptr MLOut))] (-> (Result (ptr (ArrayList MEEntry)) Diag))
   (try (do
-         (let [mp (try! (monomorphize a (load (field mo prog))))]
+         (let [mp (try! (monomorphize a (primitive/load (primitive/field mo prog))))]
            (sort-mono-program a mp)
-           (let [bytes (call-ptr (load (field (meta-wasm-box) build)) a mp)
-                 es (load (field mo entries))
-                 n (al-len [MLEntry] (load es))
+           (let [bytes (primitive/call-ptr (primitive/load (primitive/field (meta-wasm-box) build)) a mp)
+                 es (primitive/load (primitive/field mo entries))
+                 n (al-len [MLEntry] (primitive/load es))
                  (mut out) (al-new [MEEntry] a)
                  (mut i) 0]
-             (loop (if (icmp-ge (load i) n)
+             (loop (if (primitive/icmp-ge (primitive/load i) n)
                        (break)
                        (do
-                         (let [ep (al-elem [MLEntry] es (load i))
-                               me (alloc-stack MEEntry)]
-                           (store! (field me name) (load (field ep name)))
-                           (store! (field me fp) (cast (ptr i8) 0))
-                           (store! (field me registry) (load (field mo registry)))
-                           (store! (field me symbol) (load (field ep symbol)))
-                           (store! (field me modbytes) bytes)
-                           (store! (field me interpcx) (cast (ptr i8) 0))
-                           (al-push! (mut out) (load me)))
-                         (store! i (iadd (load i) 1)))))
-             (Ok [(ptr (ArrayList MEEntry)) Diag] (box-al [MEEntry] a (load out))))))))
+                         (let [ep (al-elem [MLEntry] es (primitive/load i))
+                               me (alloc/stack MEEntry)]
+                           (primitive/store! (primitive/field me name) (primitive/load (primitive/field ep name)))
+                           (primitive/store! (primitive/field me fp) (primitive/cast (ptr i8) 0))
+                           (primitive/store! (primitive/field me registry) (primitive/load (primitive/field mo registry)))
+                           (primitive/store! (primitive/field me symbol) (primitive/load (primitive/field ep symbol)))
+                           (primitive/store! (primitive/field me modbytes) bytes)
+                           (primitive/store! (primitive/field me interpcx) (primitive/cast (ptr i8) 0))
+                           (al-push! (mut out) (primitive/load me)))
+                         (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+             (Ok [(ptr (ArrayList MEEntry)) Diag] (box-al [MEEntry] a (primitive/load out))))))))
 
 ; ---- entry-set construction: interpreter path --------------------------------------
 ; monomorphize + sort, then build ONE persistent interpreter context (shared by every
@@ -681,27 +682,27 @@
 ; the entry is run by interpreting it. No dylib, no side-module, no fp.
 (defn me-setup-interp [(a (ptr Allocator)) (mo (ptr MLOut))] (-> (Result (ptr (ArrayList MEEntry)) Diag))
   (try (do
-         (let [mp (try! (monomorphize a (load (field mo prog))))]
+         (let [mp (try! (monomorphize a (primitive/load (primitive/field mo prog))))]
            (sort-mono-program a mp)
-           (let [cx (call-ptr (load (field (meta-interp-box) build)) a mp)
-                 es (load (field mo entries))
-                 n (al-len [MLEntry] (load es))
+           (let [cx (primitive/call-ptr (primitive/load (primitive/field (meta-interp-box) build)) a mp)
+                 es (primitive/load (primitive/field mo entries))
+                 n (al-len [MLEntry] (primitive/load es))
                  (mut out) (al-new [MEEntry] a)
                  (mut i) 0]
-             (loop (if (icmp-ge (load i) n)
+             (loop (if (primitive/icmp-ge (primitive/load i) n)
                        (break)
                        (do
-                         (let [ep (al-elem [MLEntry] es (load i))
-                               me (alloc-stack MEEntry)]
-                           (store! (field me name) (load (field ep name)))
-                           (store! (field me fp) (cast (ptr i8) 0))
-                           (store! (field me registry) (load (field mo registry)))
-                           (store! (field me symbol) (load (field ep symbol)))
-                           (store! (field me modbytes) "")
-                           (store! (field me interpcx) cx)
-                           (al-push! (mut out) (load me)))
-                         (store! i (iadd (load i) 1)))))
-             (Ok [(ptr (ArrayList MEEntry)) Diag] (box-al [MEEntry] a (load out))))))))
+                         (let [ep (al-elem [MLEntry] es (primitive/load i))
+                               me (alloc/stack MEEntry)]
+                           (primitive/store! (primitive/field me name) (primitive/load (primitive/field ep name)))
+                           (primitive/store! (primitive/field me fp) (primitive/cast (ptr i8) 0))
+                           (primitive/store! (primitive/field me registry) (primitive/load (primitive/field mo registry)))
+                           (primitive/store! (primitive/field me symbol) (primitive/load (primitive/field ep symbol)))
+                           (primitive/store! (primitive/field me modbytes) "")
+                           (primitive/store! (primitive/field me interpcx) cx)
+                           (al-push! (mut out) (primitive/load me)))
+                         (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+             (Ok [(ptr (ArrayList MEEntry)) Diag] (box-al [MEEntry] a (primitive/load out))))))))
 
 ; ---- one-time engine setup (from expand-stage3, after check-program) ----------------
 (defn meta-engine-setup [(a (ptr Allocator)) (checked (ptr Program)) (quals (ptr (ArrayList (slice u8))))] (-> (Option Diag))
@@ -713,27 +714,27 @@
                    (if (meta-wasm-active?) (me-setup-wasm a mo) (me-setup-native a mo)))
           (Err [d] (Some d))
           (Ok [outl]
-              (let [out (load outl)]
+              (let [out (primitive/load outl)]
                 ; ADDITIVE: append entries whose name isn't served yet (staged
                 ; per-qual builds land first; the batch build fills in the rest).
                 ; An existing entry wins — it is the same macro, already compiled.
                 (let [b (meta-engine)]
-                  (when (icmp-eq (cast i64 (load (field b entries))) 0)
-                        (store! (field b entries) (box-al [MEEntry] a (al-new [MEEntry] a)))
+                  (when (primitive/icmp-eq (primitive/cast i64 (primitive/load (primitive/field b entries))) 0)
+                        (primitive/store! (primitive/field b entries) (box-al [MEEntry] a (al-new [MEEntry] a)))
                         0)
                   (let [no (al-len [MEEntry] out)
                         (mut k) 0]
-                    (loop (if (icmp-ge (load k) no)
+                    (loop (if (primitive/icmp-ge (primitive/load k) no)
                               (break)
                               (do
-                                (let [mev (al-get [MEEntry] out (load k))
-                                      mep (alloc-stack MEEntry)]
-                                  (store! mep mev)
-                                  (when (icmp-eq (cast i64 (meta-engine-entry (load (field mep name)))) 0)
-                                        (al-push! (mut (load (field b entries))) (load mep))
+                                (let [mev (al-get [MEEntry] out (primitive/load k))
+                                      mep (alloc/stack MEEntry)]
+                                  (primitive/store! mep mev)
+                                  (when (primitive/icmp-eq (primitive/cast i64 (meta-engine-entry (primitive/load (primitive/field mep name)))) 0)
+                                        (al-push! (mut (primitive/load (primitive/field b entries))) (primitive/load mep))
                                         0))
-                                (store! k (iadd (load k) 1))))))
-                  (store! (field b active) 1)
+                                (primitive/store! k (primitive/iadd (primitive/load k) 1))))))
+                  (primitive/store! (primitive/field b active) 1)
                   (None [Diag]))))))))
 
 ; ---- invoking an entry ---------------------------------------------------------------
@@ -753,71 +754,71 @@
    (a6 (ptr i8))
    (a7 (ptr i8))])
 (defn me-tramp [(arg (ptr i8))] (-> (ptr i8))
-  (let [c (cast (ptr MPCall) arg)
-        fp (load (field c fp))
-        n (load (field c argc))]
-    (store! (field c ret)
-            (cond (icmp-eq n 0) (call-ptr (cast (fnptr c [] (ptr i8)) fp))
-                  (icmp-eq n 1) (call-ptr (cast (fnptr c [(ptr i8)] (ptr i8)) fp) (load (field c a0)))
-                  (icmp-eq n 2)
-                    (call-ptr (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) fp) (load (field c a0)) (load (field c a1)))
-                  (icmp-eq n 3)
-                    (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp)
-                              (load (field c a0))
-                              (load (field c a1))
-                              (load (field c a2)))
-                  (icmp-eq n 4)
-                    (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp)
-                              (load (field c a0))
-                              (load (field c a1))
-                              (load (field c a2))
-                              (load (field c a3)))
-                  (icmp-eq n 5)
-                    (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp)
-                              (load (field c a0))
-                              (load (field c a1))
-                              (load (field c a2))
-                              (load (field c a3))
-                              (load (field c a4)))
-                  (icmp-eq n 6)
-                    (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp)
-                              (load (field c a0))
-                              (load (field c a1))
-                              (load (field c a2))
-                              (load (field c a3))
-                              (load (field c a4))
-                              (load (field c a5)))
-                  (icmp-eq n 7)
-                    (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8))
+  (let [c (primitive/cast (ptr MPCall) arg)
+        fp (primitive/load (primitive/field c fp))
+        n (primitive/load (primitive/field c argc))]
+    (primitive/store! (primitive/field c ret)
+            (cond (primitive/icmp-eq n 0) (primitive/call-ptr (primitive/cast (fnptr c [] (ptr i8)) fp))
+                  (primitive/icmp-eq n 1) (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8)] (ptr i8)) fp) (primitive/load (primitive/field c a0)))
+                  (primitive/icmp-eq n 2)
+                    (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) fp) (primitive/load (primitive/field c a0)) (primitive/load (primitive/field c a1)))
+                  (primitive/icmp-eq n 3)
+                    (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp)
+                              (primitive/load (primitive/field c a0))
+                              (primitive/load (primitive/field c a1))
+                              (primitive/load (primitive/field c a2)))
+                  (primitive/icmp-eq n 4)
+                    (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp)
+                              (primitive/load (primitive/field c a0))
+                              (primitive/load (primitive/field c a1))
+                              (primitive/load (primitive/field c a2))
+                              (primitive/load (primitive/field c a3)))
+                  (primitive/icmp-eq n 5)
+                    (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp)
+                              (primitive/load (primitive/field c a0))
+                              (primitive/load (primitive/field c a1))
+                              (primitive/load (primitive/field c a2))
+                              (primitive/load (primitive/field c a3))
+                              (primitive/load (primitive/field c a4)))
+                  (primitive/icmp-eq n 6)
+                    (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp)
+                              (primitive/load (primitive/field c a0))
+                              (primitive/load (primitive/field c a1))
+                              (primitive/load (primitive/field c a2))
+                              (primitive/load (primitive/field c a3))
+                              (primitive/load (primitive/field c a4))
+                              (primitive/load (primitive/field c a5)))
+                  (primitive/icmp-eq n 7)
+                    (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8))
                                     fp)
-                              (load (field c a0))
-                              (load (field c a1))
-                              (load (field c a2))
-                              (load (field c a3))
-                              (load (field c a4))
-                              (load (field c a5))
-                              (load (field c a6)))
-                  (call-ptr (cast (fnptr c
+                              (primitive/load (primitive/field c a0))
+                              (primitive/load (primitive/field c a1))
+                              (primitive/load (primitive/field c a2))
+                              (primitive/load (primitive/field c a3))
+                              (primitive/load (primitive/field c a4))
+                              (primitive/load (primitive/field c a5))
+                              (primitive/load (primitive/field c a6)))
+                  (primitive/call-ptr (primitive/cast (fnptr c
                                          [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)]
                                          (ptr i8))
                                   fp)
-                            (load (field c a0))
-                            (load (field c a1))
-                            (load (field c a2))
-                            (load (field c a3))
-                            (load (field c a4))
-                            (load (field c a5))
-                            (load (field c a6))
-                            (load (field c a7)))))
-    (cast (ptr i8) 0)))
+                            (primitive/load (primitive/field c a0))
+                            (primitive/load (primitive/field c a1))
+                            (primitive/load (primitive/field c a2))
+                            (primitive/load (primitive/field c a3))
+                            (primitive/load (primitive/field c a4))
+                            (primitive/load (primitive/field c a5))
+                            (primitive/load (primitive/field c a6))
+                            (primitive/load (primitive/field c a7)))))
+    (primitive/cast (ptr i8) 0)))
 
 (defn me-box-arg [(a (ptr Allocator)) (s Sexp)] (-> (ptr i8))
-  (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (store! p s) (cast (ptr i8) p)))
+  (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (primitive/store! p s) (primitive/cast (ptr i8) p)))
 
 ; run one metaprogram entry by INTERPRETING it (in-process, single-threaded). The
 ; boxed Sexp arg pointers go into an i64 arg-cell buffer; the interpreter runs the
 ; entry, its metashim mh_* callbacks dispatched back into this process. A
-; metaprogram-level (error …) sets mh-halt's abort flag, which the VM polls and
+; metaprogram-level (primitive/error …) sets mh-halt's abort flag, which the VM polls and
 ; unwinds cleanly — errset then carries the diagnostic (meta-host-err), reported here.
 (defn meta-engine-invoke-interp [(a (ptr Allocator))
                                  (symbol (slice u8))
@@ -825,35 +826,35 @@
                                  (reg (ptr (ArrayList (ptr Sexp))))
                                  (cx (ptr CtCtx))
                                  (argv (ptr (ArrayList Sexp)))] (-> (Result Sexp Diag))
-  (let [n (al-len [Sexp] (load argv))]
-    (if (icmp-gt n 8)
+  (let [n (al-len [Sexp] (primitive/load argv))]
+    (if (primitive/icmp-gt n 8)
         (Err [Sexp Diag] (derr "metaengine: metaprogram entries with more than 8 parameters are not supported yet"))
         (do
           (meta-host-set! cx reg)
           (meta-host-interp! 1)  ; enable interp-mode mh-halt + clear the abort flag
-          (let [argbuf (alloc-stack (array i64 8))
+          (let [argbuf (alloc/stack (array i64 8))
                 (mut i) 0]
-            (loop (if (icmp-ge (load i) n)
+            (loop (if (primitive/icmp-ge (primitive/load i) n)
                       (break)
                       (do
-                        (store! (index (cast (ptr i64) argbuf) (load i))
-                                (cast i64 (me-box-arg a (al-get [Sexp] (load argv) (load i)))))
-                        (store! i (iadd (load i) 1)))))
+                        (primitive/store! (primitive/index (primitive/cast (ptr i64) argbuf) (primitive/load i))
+                                (primitive/cast i64 (me-box-arg a (al-get [Sexp] (primitive/load argv) (primitive/load i)))))
+                        (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
             (let [rp
-                    (call-ptr (load (field (meta-interp-box) run))
+                    (primitive/call-ptr (primitive/load (primitive/field (meta-interp-box) run))
                               interpcx
                               (slice->cstr a symbol)
-                              (cast (ptr i64) argbuf)
+                              (primitive/cast (ptr i64) argbuf)
                               n)]
               (match (meta-host-err)
                 (Some [d] (do (meta-host-interp! 0) (Err [Sexp Diag] d)))
                 (None []
                       (do
                         (meta-host-interp! 0)
-                        (if (icmp-eq (cast i64 rp) 0)
+                        (if (primitive/icmp-eq (primitive/cast i64 rp) 0)
                             (Err [Sexp Diag]
                                  (derr "metaengine: interpreted metaprogram returned a null Code handle (compiler bug)"))
-                            (Ok [Sexp Diag] (load (cast (ptr Sexp) rp)))))))))))))
+                            (Ok [Sexp Diag] (primitive/load (primitive/cast (ptr Sexp) rp)))))))))))))
 
 ; run one metaprogram entry as a wasm side-module (single-threaded, no pthread).
 ; The side-module bytes + entry symbol come from the MEEntry; args are boxed Sexp
@@ -866,21 +867,21 @@
                                (reg (ptr (ArrayList (ptr Sexp))))
                                (cx (ptr CtCtx))
                                (argv (ptr (ArrayList Sexp)))] (-> (Result Sexp Diag))
-  (let [n (al-len [Sexp] (load argv))]
-    (if (icmp-gt n 8)
+  (let [n (al-len [Sexp] (primitive/load argv))]
+    (if (primitive/icmp-gt n 8)
         (Err [Sexp Diag] (derr "metaengine: metaprogram entries with more than 8 parameters are not supported yet"))
         (do
           (meta-host-set! cx reg)
-          (let [a0 (if (icmp-gt n 0) (me-box-arg a (al-get [Sexp] (load argv) 0)) (cast (ptr i8) 0))
-                a1 (if (icmp-gt n 1) (me-box-arg a (al-get [Sexp] (load argv) 1)) (cast (ptr i8) 0))
-                a2 (if (icmp-gt n 2) (me-box-arg a (al-get [Sexp] (load argv) 2)) (cast (ptr i8) 0))
-                a3 (if (icmp-gt n 3) (me-box-arg a (al-get [Sexp] (load argv) 3)) (cast (ptr i8) 0))
-                a4 (if (icmp-gt n 4) (me-box-arg a (al-get [Sexp] (load argv) 4)) (cast (ptr i8) 0))
-                a5 (if (icmp-gt n 5) (me-box-arg a (al-get [Sexp] (load argv) 5)) (cast (ptr i8) 0))
-                a6 (if (icmp-gt n 6) (me-box-arg a (al-get [Sexp] (load argv) 6)) (cast (ptr i8) 0))
-                a7 (if (icmp-gt n 7) (me-box-arg a (al-get [Sexp] (load argv) 7)) (cast (ptr i8) 0))
+          (let [a0 (if (primitive/icmp-gt n 0) (me-box-arg a (al-get [Sexp] (primitive/load argv) 0)) (primitive/cast (ptr i8) 0))
+                a1 (if (primitive/icmp-gt n 1) (me-box-arg a (al-get [Sexp] (primitive/load argv) 1)) (primitive/cast (ptr i8) 0))
+                a2 (if (primitive/icmp-gt n 2) (me-box-arg a (al-get [Sexp] (primitive/load argv) 2)) (primitive/cast (ptr i8) 0))
+                a3 (if (primitive/icmp-gt n 3) (me-box-arg a (al-get [Sexp] (primitive/load argv) 3)) (primitive/cast (ptr i8) 0))
+                a4 (if (primitive/icmp-gt n 4) (me-box-arg a (al-get [Sexp] (primitive/load argv) 4)) (primitive/cast (ptr i8) 0))
+                a5 (if (primitive/icmp-gt n 5) (me-box-arg a (al-get [Sexp] (primitive/load argv) 5)) (primitive/cast (ptr i8) 0))
+                a6 (if (primitive/icmp-gt n 6) (me-box-arg a (al-get [Sexp] (primitive/load argv) 6)) (primitive/cast (ptr i8) 0))
+                a7 (if (primitive/icmp-gt n 7) (me-box-arg a (al-get [Sexp] (primitive/load argv) 7)) (primitive/cast (ptr i8) 0))
                 rp
-                  (call-ptr (load (field (meta-wasm-box) run))
+                  (primitive/call-ptr (primitive/load (primitive/field (meta-wasm-box) run))
                             (slice-data modbytes)
                             (slice-len modbytes)
                             (slice->cstr a symbol)
@@ -893,89 +894,89 @@
                             a5
                             a6
                             a7)]
-            (if (icmp-eq (cast i64 rp) 0)
+            (if (primitive/icmp-eq (primitive/cast i64 rp) 0)
                 (match (meta-host-err)
                   (Some [d] (Err [Sexp Diag] d))
                   (None []
                         (Err [Sexp Diag]
                              (derr "metaengine: wasm metaprogram returned a null Code handle (compiler bug)"))))
-                (Ok [Sexp Diag] (load (cast (ptr Sexp) rp)))))))))
+                (Ok [Sexp Diag] (primitive/load (primitive/cast (ptr Sexp) rp)))))))))
 
 (defn meta-engine-invoke [(a (ptr Allocator))
                           (fp (ptr i8))
                           (reg (ptr (ArrayList (ptr Sexp))))
                           (cx (ptr CtCtx))
                           (argv (ptr (ArrayList Sexp)))] (-> (Result Sexp Diag))
-  (let [n (al-len [Sexp] (load argv))]
-    (if (icmp-gt n 8)
+  (let [n (al-len [Sexp] (primitive/load argv))]
+    (if (primitive/icmp-gt n 8)
         (Err [Sexp Diag] (derr "metaengine: metaprogram entries with more than 8 parameters are not supported yet"))
-        (let [c (alloc-stack MPCall)]
+        (let [c (alloc/stack MPCall)]
           (meta-host-set! cx reg)
-          (store! (field c fp) fp)
-          (store! (field c argc) n)
-          (store! (field c ret) (cast (ptr i8) 0))
-          (store! (field c a0) (if (icmp-gt n 0) (me-box-arg a (al-get [Sexp] (load argv) 0)) (cast (ptr i8) 0)))
-          (store! (field c a1) (if (icmp-gt n 1) (me-box-arg a (al-get [Sexp] (load argv) 1)) (cast (ptr i8) 0)))
-          (store! (field c a2) (if (icmp-gt n 2) (me-box-arg a (al-get [Sexp] (load argv) 2)) (cast (ptr i8) 0)))
-          (store! (field c a3) (if (icmp-gt n 3) (me-box-arg a (al-get [Sexp] (load argv) 3)) (cast (ptr i8) 0)))
-          (store! (field c a4) (if (icmp-gt n 4) (me-box-arg a (al-get [Sexp] (load argv) 4)) (cast (ptr i8) 0)))
-          (store! (field c a5) (if (icmp-gt n 5) (me-box-arg a (al-get [Sexp] (load argv) 5)) (cast (ptr i8) 0)))
-          (store! (field c a6) (if (icmp-gt n 6) (me-box-arg a (al-get [Sexp] (load argv) 6)) (cast (ptr i8) 0)))
-          (store! (field c a7) (if (icmp-gt n 7) (me-box-arg a (al-get [Sexp] (load argv) 7)) (cast (ptr i8) 0)))
+          (primitive/store! (primitive/field c fp) fp)
+          (primitive/store! (primitive/field c argc) n)
+          (primitive/store! (primitive/field c ret) (primitive/cast (ptr i8) 0))
+          (primitive/store! (primitive/field c a0) (if (primitive/icmp-gt n 0) (me-box-arg a (al-get [Sexp] (primitive/load argv) 0)) (primitive/cast (ptr i8) 0)))
+          (primitive/store! (primitive/field c a1) (if (primitive/icmp-gt n 1) (me-box-arg a (al-get [Sexp] (primitive/load argv) 1)) (primitive/cast (ptr i8) 0)))
+          (primitive/store! (primitive/field c a2) (if (primitive/icmp-gt n 2) (me-box-arg a (al-get [Sexp] (primitive/load argv) 2)) (primitive/cast (ptr i8) 0)))
+          (primitive/store! (primitive/field c a3) (if (primitive/icmp-gt n 3) (me-box-arg a (al-get [Sexp] (primitive/load argv) 3)) (primitive/cast (ptr i8) 0)))
+          (primitive/store! (primitive/field c a4) (if (primitive/icmp-gt n 4) (me-box-arg a (al-get [Sexp] (primitive/load argv) 4)) (primitive/cast (ptr i8) 0)))
+          (primitive/store! (primitive/field c a5) (if (primitive/icmp-gt n 5) (me-box-arg a (al-get [Sexp] (primitive/load argv) 5)) (primitive/cast (ptr i8) 0)))
+          (primitive/store! (primitive/field c a6) (if (primitive/icmp-gt n 6) (me-box-arg a (al-get [Sexp] (primitive/load argv) 6)) (primitive/cast (ptr i8) 0)))
+          (primitive/store! (primitive/field c a7) (if (primitive/icmp-gt n 7) (me-box-arg a (al-get [Sexp] (primitive/load argv) 7)) (primitive/cast (ptr i8) 0)))
           (let [failed
                   (if (meta-main?)
                       ; COIL_META_MAIN=1: run on the process MAIN thread (AppKit
-                      ; metaprograms); an (error ...) there prints and exits.
-                      (do (meta-host-onmain! 1) (main-svc-run (cast (ptr i8) c)) false)
-                      (let [attr (alloc-stack (array i8 64))
-                            tid (alloc-stack (ptr i8))
-                            rv (alloc-stack (ptr i8))]
-                        (pthread_attr_init (cast (ptr i8) attr))
-                        (pthread_attr_setstacksize (cast (ptr i8) attr) 536870912)  ; 512 MiB, like run-on-big-stack
-                        (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr) (fnptr-of me-tramp) (cast (ptr i8) c))
-                        (pthread_join (load tid) (cast (ptr i8) rv))
-                        (icmp-ne (cast i64 (load rv)) 0)))]
+                      ; metaprograms); an (primitive/error ...) there prints and exits.
+                      (do (meta-host-onmain! 1) (main-svc-run (primitive/cast (ptr i8) c)) false)
+                      (let [attr (alloc/stack (array i8 64))
+                            tid (alloc/stack (ptr i8))
+                            rv (alloc/stack (ptr i8))]
+                        (pthread_attr_init (primitive/cast (ptr i8) attr))
+                        (pthread_attr_setstacksize (primitive/cast (ptr i8) attr) 536870912)  ; 512 MiB, like run-on-big-stack
+                        (pthread_create (primitive/cast (ptr i8) tid) (primitive/cast (ptr i8) attr) (primitive/fnptr-of me-tramp) (primitive/cast (ptr i8) c))
+                        (pthread_join (primitive/load tid) (primitive/cast (ptr i8) rv))
+                        (primitive/icmp-ne (primitive/cast i64 (primitive/load rv)) 0)))]
             (if failed
                 (match (meta-host-err)
                   (Some [d] (Err [Sexp Diag] d))
                   (None []
                         (Err [Sexp Diag]
                              (derr "metaengine: metaprogram thread failed without recording a diagnostic (compiler bug)"))))
-                (let [ret (load (field c ret))]
-                  (if (icmp-eq (cast i64 ret) 0)
+                (let [ret (primitive/load (primitive/field c ret))]
+                  (if (primitive/icmp-eq (primitive/cast i64 ret) 0)
                       (Err [Sexp Diag] (derr "metaengine: metaprogram returned a null Code handle (compiler bug)"))
-                      (Ok [Sexp Diag] (load (cast (ptr Sexp) ret)))))))))))
+                      (Ok [Sexp Diag] (primitive/load (primitive/cast (ptr Sexp) ret)))))))))))
 
 ; ---- the finish-macro fast path -------------------------------------------------------
 ; The interpreter's env (param -> CCode arg, variadic already packed) IS the packed
 ; argument list; extract it and run the compiled entry instead of eval-seq.
 (defn meta-engine-run-env [(a (ptr Allocator)) (e (ptr MEEntry)) (cx (ptr CtCtx)) (env (ptr (ArrayList EnvBind)))] (-> (Result Sexp
                                                                                                                                Diag))
-  (let [n (al-len [EnvBind] (load env))
+  (let [n (al-len [EnvBind] (primitive/load env))
         (mut argv) (al-new [Sexp] a)
         (mut i) 0
         (mut bad) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [v (load (field (al-elem [EnvBind] env (load i)) val))]
-                  (if (is-ccode v) (do (al-push! (mut argv) (ccode-of v)) 0) (do (store! bad true) (break))))
-                (store! i (iadd (load i) 1)))))
-    (cond (load bad) (Err [Sexp Diag] (derr "metaengine: non-Code value in a metaprogram argument env (compiler bug)"))
+                (let [v (primitive/load (primitive/field (al-elem [EnvBind] env (primitive/load i)) val))]
+                  (if (is-ccode v) (do (al-push! (mut argv) (ccode-of v)) 0) (do (primitive/store! bad true) (break))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (cond (primitive/load bad) (Err [Sexp Diag] (derr "metaengine: non-Code value in a metaprogram argument env (compiler bug)"))
           (meta-interp-active?)  ; the interpreter looks the entry up by its coil FUNCTION name (the qual
           ; name), not the export-c symbol (coil_mp_<k>) the compiled backends emit.
           (meta-engine-invoke-interp a
-                                     (load (field e name))
-                                     (load (field e interpcx))
-                                     (load (field e registry))
+                                     (primitive/load (primitive/field e name))
+                                     (primitive/load (primitive/field e interpcx))
+                                     (primitive/load (primitive/field e registry))
                                      cx
-                                     (box-al [Sexp] a (load argv)))
+                                     (box-al [Sexp] a (primitive/load argv)))
             (meta-wasm-active?)
           (meta-engine-invoke-wasm a
-                                   (load (field e symbol))
-                                   (load (field e modbytes))
-                                   (load (field e registry))
+                                   (primitive/load (primitive/field e symbol))
+                                   (primitive/load (primitive/field e modbytes))
+                                   (primitive/load (primitive/field e registry))
                                    cx
-                                   (box-al [Sexp] a (load argv)))
+                                   (box-al [Sexp] a (primitive/load argv)))
             :else
-          (meta-engine-invoke a (load (field e fp)) (load (field e registry)) cx (box-al [Sexp] a (load argv))))))
+          (meta-engine-invoke a (primitive/load (primitive/field e fp)) (primitive/load (primitive/field e registry)) cx (box-al [Sexp] a (primitive/load argv))))))

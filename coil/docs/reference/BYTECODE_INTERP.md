@@ -49,7 +49,7 @@ Pointers are **real addresses in this process**. There is no sandboxed linear
 memory — the interpreter runs in-process, so a pointer handed to `printf` or read
 by pointer arithmetic is a genuine address.
 
-- **Heap** (`(alloc … :heap)`, storage 2): real `malloc(size)`; `(free p)` is
+- **Heap** (`(alloc … :heap)`, storage 2): real `malloc(size)`; `(primitive/free p)` is
   real `free`.
 - **Static** (`alloc-static`, storage 1): a `malloc`'d, zeroed region (leaked for
   the process lifetime — statics live forever).
@@ -73,7 +73,7 @@ return:
 - **locals**: an `i64[nlocals]` array. Parameters occupy locals `0..nparams`;
   every `let`/temporary binding gets the next slot. A local holds a value cell
   directly. A `(mut x)` binding instead holds a **pointer** to a frame-buffer cell
-  (see `MUTCELL`), so `(load x)`/`(store! x v)` lower to real `ELoad`/`EStore` —
+  (see `MUTCELL`), so `(primitive/load x)`/`(primitive/store! x v)` lower to real `ELoad`/`EStore` —
   exactly as the type-checker already rewrote them.
 - **frame buffer**: a 1 MiB malloc'd region with a bump pointer, backing
   `alloc-stack`, `(mut …)` cells, spilled refs, and string-literal slices.

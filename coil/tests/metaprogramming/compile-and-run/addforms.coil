@@ -1,4 +1,5 @@
 (module addforms)
+(import "primitive.coil" :as primitive)
 ; A transform that ADDS TOP-LEVEL FORMS — the capability a GC dialect needs (emit
 ; a per-type `trace-T`, a runtime import, a root table). Here, minimally: for each
 ; user module containing a `(gen-answer)` marker, EMIT a new top-level function
@@ -13,47 +14,47 @@
 
 ; does form `f` contain a (gen-answer) marker anywhere?
 (defn has-gen? [(f Code)] (-> bool)
-  (if (code-list? f)
-      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `gen-answer)) true
-        (has-gen-kids? f 0 (code-count f)))
+  (if (primitive/code-list? f)
+      (if (and (primitive/icmp-gt (primitive/code-count f) 0) (primitive/code-eq (primitive/code-nth f 0) `gen-answer)) true
+        (has-gen-kids? f 0 (primitive/code-count f)))
     false))
 (defn has-gen-kids? [(f Code) (i i64) (n i64)] (-> bool)
-  (if (icmp-ge i n) false (if (has-gen? (code-nth f i)) true (has-gen-kids? f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) false (if (has-gen? (primitive/code-nth f i)) true (has-gen-kids? f (primitive/iadd i 1) n))))
 
 ; rewrite (gen-answer) -> (the-answer); leave marker-free subtrees exactly as-is
 (defn rw [(f Code)] (-> Code)
-  (if (code-list? f)
-      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `gen-answer))
+  (if (primitive/code-list? f)
+      (if (and (primitive/icmp-gt (primitive/code-count f) 0) (primitive/code-eq (primitive/code-nth f 0) `gen-answer))
           `(the-answer)
-        (if (has-gen? f) `(~@(rw-kids f 0 (code-count f))) f))
+        (if (has-gen? f) `(~@(rw-kids f 0 (primitive/code-count f))) f))
     f))
 (defn rw-kids [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `()
-    `(~(rw (code-nth f i)) ~@(rw-kids f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `()
+    `(~(rw (primitive/code-nth f i)) ~@(rw-kids f (primitive/iadd i 1) n))))
 
 ; does this module (name form…) use the marker? (idempotence: after we rewrite it
 ; away AND add the-answer, a second pass finds no marker and adds nothing)
 (defn mod-uses-gen? [(m Code) (i i64) (n i64)] (-> bool)
-  (if (icmp-ge i n) false (if (has-gen? (code-nth m i)) true (mod-uses-gen? m (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) false (if (has-gen? (primitive/code-nth m i)) true (mod-uses-gen? m (primitive/iadd i 1) n))))
 ; already has a `the-answer` defn? (don't add twice)
 (defn defines-answer? [(m Code) (i i64) (n i64)] (-> bool)
-  (if (icmp-ge i n) false
-    (let [f (code-nth m i)]
-      (if (and (code-list? f)
-           (and (icmp-ge (code-count f) 2)
-            (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) `the-answer)))) true
-        (defines-answer? m (iadd i 1) n)))))
+  (if (primitive/icmp-ge i n) false
+    (let [f (primitive/code-nth m i)]
+      (if (and (primitive/code-list? f)
+           (and (primitive/icmp-ge (primitive/code-count f) 2)
+            (and (primitive/code-eq (primitive/code-nth f 0) `defn) (primitive/code-eq (primitive/code-nth f 1) `the-answer)))) true
+        (defines-answer? m (primitive/iadd i 1) n)))))
 
 ; rewrite a module's forms; if it used the marker and doesn't yet define the-answer,
 ; APPEND the new top-level defn
 (defn xform-mod [(m Code)] (-> Code)
-  (let [rewritten `(~(code-nth m 0) ~@(rw-kids m 1 (code-count m)))]
-    (if (and (mod-uses-gen? m 1 (code-count m)) (not (defines-answer? m 1 (code-count m))))
+  (let [rewritten `(~(primitive/code-nth m 0) ~@(rw-kids m 1 (primitive/code-count m)))]
+    (if (and (mod-uses-gen? m 1 (primitive/code-count m)) (not (defines-answer? m 1 (primitive/code-count m))))
         `(~@rewritten (defn the-answer [] (-> i64) 42))
       rewritten)))
 (defn xform-mods [(ms Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `()
-    `(~(xform-mod (code-nth ms i)) ~@(xform-mods ms (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `()
+    `(~(xform-mod (primitive/code-nth ms i)) ~@(xform-mods ms (primitive/iadd i 1) n))))
 (defn add-answer [(modules Code)] (-> Code)
-  `(do ~@(xform-mods modules 0 (code-count modules))))
+  `(do ~@(xform-mods modules 0 (primitive/code-count modules))))
 (transform add-answer)

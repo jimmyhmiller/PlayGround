@@ -1,4 +1,5 @@
 (module borrowlike_bad)
+(import "primitive.coil" :as primitive)
 ; The binding-id checker must report EXACTLY the two real use-after-free sites and
 ; NOT be fooled by shadowing. `bad` frees p then uses it twice (2 errors). `ok`
 ; frees the OUTER p, then SHADOWS p with a fresh inner binding and uses THAT — a
@@ -18,4 +19,4 @@
     (my-free p)
     (let [p 99]
       (use1 p))))
-(defn main [] (-> :i64) (iadd (bad) (ok)))
+(defn main [] (-> :i64) (primitive/iadd (bad) (ok)))

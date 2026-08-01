@@ -1,3 +1,6 @@
+(module example.layout)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 ; Explicit control of struct layout, like calling conventions: :layout c | packed
 ; | (align N), with compile-time sizeof / alignof / offsetof and static-assert to
 ; pin the layout down (drift becomes a compile error).
@@ -10,16 +13,16 @@
    (flags   :u8)      ; offset 3
    (length  :u32)])   ; offset 4   -> total 8 bytes
 
-(static-assert (icmp-eq (sizeof Header) 8)      "header must be 8 bytes")
-(static-assert (icmp-eq (offsetof Header length) 4) "length at offset 4")
+(static-assert (primitive/icmp-eq (primitive/sizeof Header) 8)      "header must be 8 bytes")
+(static-assert (primitive/icmp-eq (primitive/offsetof Header length) 4) "length at offset 4")
 
 ; The same fields under the C ABI would be padded differently:
 (defstruct HeaderC [(magic :u16) (version :u8) (flags :u8) (length :u32)])
-(static-assert (icmp-eq (sizeof HeaderC) 8) "this one happens to also be 8")
+(static-assert (primitive/icmp-eq (primitive/sizeof HeaderC) 8) "this one happens to also be 8")
 
 (defn main [] (-> :i64)
-  (let [h (alloc-stack Header)]
-    (store! (field h length) (cast :u32 40))
-    (store! (field h version) (cast :u8 2))
-    (iadd (cast :i64 (load (field h length)))
-          (cast :i64 (load (field h version))))))   ; 40 + 2 = 42
+  (let [h (alloc/stack Header)]
+    (primitive/store! (primitive/field h length) (primitive/cast :u32 40))
+    (primitive/store! (primitive/field h version) (primitive/cast :u8 2))
+    (primitive/iadd (primitive/cast :i64 (primitive/load (primitive/field h length)))
+          (primitive/cast :i64 (primitive/load (primitive/field h version))))))   ; 40 + 2 = 42

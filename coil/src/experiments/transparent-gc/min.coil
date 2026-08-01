@@ -1,4 +1,5 @@
 (module min)
+(import "primitive.coil" :as primitive)
 (import "gcrun.coil" :use *)
 (import "gcauto.coil" :use *)
 (defn build [(k i64) (i i64)] (-> Pair)

@@ -1,0 +1,132 @@
+(module llhttp-coil-test)
+(import "../src/stdlib/llhttp.coil" :as ll :use [HTTP_REQUEST HPE_OK])
+(import "../src/stdlib/llhttp_types.coil" :as types)
+(import "../src/stdlib/alloc.coil" :as alloc)
+(import "../src/stdlib/str.coil" :as str)
+(import "primitive.coil" :as primitive)
+(import "slice.coil" :as slice)
+
+(defstruct Trace
+  [(method-bytes i64)
+   (url-bytes i64)
+   (header-field-bytes i64)
+   (header-value-bytes i64)
+   (body-bytes i64)
+   (messages i64)])
+
+(defn crlf [(b (mut str/StrBuf))] (-> i64)
+  (str/sb-push-byte! (mut b) (primitive/cast u8 13))
+  (str/sb-push-byte! (mut b) (primitive/cast u8 10)))
+
+(defn request-input [(start (slice u8))
+                     (header-one (slice u8))
+                     (header-two (slice u8))
+                     (body (slice u8))] (-> (slice u8))
+  (let [(mut b) (str/sb-new (alloc/malloc-allocator))]
+    (str/sb-push-str! (mut b) start)
+    (crlf (mut b))
+    (when (primitive/icmp-gt (slice/slice-len header-one) 0)
+      (str/sb-push-str! (mut b) header-one)
+      (crlf (mut b)))
+    (when (primitive/icmp-gt (slice/slice-len header-two) 0)
+      (str/sb-push-str! (mut b) header-two)
+      (crlf (mut b)))
+    (crlf (mut b))
+    (str/sb-push-str! (mut b) body)
+    (str/sb-str b)))
+
+(defn trace-of [(p (ptr types/Parser))] (-> (ptr Trace))
+  (primitive/cast (ptr Trace) (primitive/load (primitive/field p data))))
+
+(defn add-method [(p (ptr types/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [t (trace-of p)]
+    (primitive/store! (primitive/field t method-bytes)
+      (primitive/iadd (primitive/load (primitive/field t method-bytes)) len)))
+  0)
+(defn add-url [(p (ptr types/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [t (trace-of p)]
+    (primitive/store! (primitive/field t url-bytes)
+      (primitive/iadd (primitive/load (primitive/field t url-bytes)) len)))
+  0)
+(defn add-header-field [(p (ptr types/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [t (trace-of p)]
+    (primitive/store! (primitive/field t header-field-bytes)
+      (primitive/iadd (primitive/load (primitive/field t header-field-bytes)) len)))
+  0)
+(defn add-header-value [(p (ptr types/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [t (trace-of p)]
+    (primitive/store! (primitive/field t header-value-bytes)
+      (primitive/iadd (primitive/load (primitive/field t header-value-bytes)) len)))
+  0)
+(defn add-body [(p (ptr types/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [t (trace-of p)]
+    (primitive/store! (primitive/field t body-bytes)
+      (primitive/iadd (primitive/load (primitive/field t body-bytes)) len)))
+  0)
+(defn complete [(p (ptr types/Parser))] (-> i64)
+  (let [t (trace-of p)]
+    (primitive/store! (primitive/field t messages)
+      (primitive/iadd (primitive/load (primitive/field t messages)) 1)))
+  0)
+
+(defn configure [(settings (ptr types/Settings))] (-> i64)
+  (ll/settings-init settings)
+  (ll/set-span-callback! settings 4 (primitive/fnptr-of add-method))
+  (ll/set-span-callback! settings 2 (primitive/fnptr-of add-url))
+  (ll/set-span-callback! settings 6 (primitive/fnptr-of add-header-field))
+  (ll/set-span-callback! settings 7 (primitive/fnptr-of add-header-value))
+  (ll/set-span-callback! settings 11 (primitive/fnptr-of add-body))
+  (ll/set-simple-callback! settings 12 (primitive/fnptr-of complete)))
+
+(deftest request-one-buffer
+  (let [parser (primitive/alloc-stack types/Parser)
+        settings (primitive/alloc-stack types/Settings)
+        trace (primitive/alloc-stack Trace)
+        input (request-input "POST /items HTTP/1.1"
+                             "Host: example.test"
+                             "Content-Length: 5"
+                             "hello")]
+    (primitive/store! trace (primitive/zeroed Trace))
+    (configure settings)
+    (ll/init parser HTTP_REQUEST settings)
+    (primitive/store! (primitive/field parser data) (primitive/cast (ptr i8) trace))
+    (let [err (ll/execute parser input)]
+      (println "err={d} off={d} byte={d} reason={s}" err
+        (primitive/isub (primitive/cast i64 (ll/get-error-pos parser))
+                        (primitive/cast i64 (slice/slice-data input)))
+        (primitive/cast i64 (primitive/load (ll/get-error-pos parser)))
+        (ll/get-error-reason parser))
+      (assert-eq err HPE_OK))
+    (assert-eq (ll/get-method parser) 3)
+    (assert-eq (ll/get-http-major parser) 1)
+    (assert-eq (ll/get-http-minor parser) 1)
+    (assert-eq (primitive/load (primitive/field trace method-bytes)) 4)
+    (assert-eq (primitive/load (primitive/field trace url-bytes)) 6)
+    (assert-eq (primitive/load (primitive/field trace header-field-bytes)) 18)
+    (assert-eq (primitive/load (primitive/field trace header-value-bytes)) 13)
+    (assert-eq (primitive/load (primitive/field trace body-bytes)) 5)
+    (assert-eq (primitive/load (primitive/field trace messages)) 1)))
+
+(deftest request-one-byte-chunks
+  (let [parser (primitive/alloc-stack types/Parser)
+        settings (primitive/alloc-stack types/Settings)
+        trace (primitive/alloc-stack Trace)
+        input (request-input "GET /stream HTTP/1.1" "Host: x" "" "")
+        (mut i) 0]
+    (primitive/store! trace (primitive/zeroed Trace))
+    (configure settings)
+    (ll/init parser HTTP_REQUEST settings)
+    (primitive/store! (primitive/field parser data) (primitive/cast (ptr i8) trace))
+    (loop (if (primitive/icmp-ge (primitive/load i) (slice/slice-len input))
+              (break)
+              (do
+                (let [err (ll/execute parser
+                            (slice/subslice input (primitive/load i) (primitive/iadd (primitive/load i) 1)))]
+                  (if (primitive/icmp-ne err HPE_OK)
+                      (do (println "err={d} reason={s}" err (ll/get-error-reason parser)) 0)
+                      0)
+                  (assert-eq err HPE_OK))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (assert-eq (primitive/load (primitive/field trace method-bytes)) 3)
+    (assert-eq (primitive/load (primitive/field trace url-bytes)) 7)
+    (assert-eq (primitive/load (primitive/field trace messages)) 1)))

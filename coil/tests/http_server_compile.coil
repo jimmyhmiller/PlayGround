@@ -1,0 +1,8 @@
+(module http-server-compile)
+(import "http_server.coil" :as http)
+(import "alloc.coil" :as alloc)
+
+(defn main [] (-> i64)
+  (match (http/parse-request (alloc/malloc-allocator) "GET / HTTP/1.1\r\n\r\n")
+    (Err [e] 1)
+    (Ok [request] (do (http/request-free request) 0))))

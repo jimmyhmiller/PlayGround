@@ -1,11 +1,13 @@
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "checker.coil" :use *)
 (defstruct Node [(val :i64)])
 (defn use-ok [(p (ptr Node))] (-> :i64)
   (check-uaf
-    (store! (field p val) 7)
-    (load (field p val))     ; used BEFORE free — fine
-    (free p)                 ; free last, nothing after
+    (primitive/store! (primitive/field p val) 7)
+    (primitive/load (primitive/field p val))     ; used BEFORE free — fine
+    (primitive/free p)                 ; free last, nothing after
     0))
 (defn main [] (-> :i64)
-  (let [n (alloc-heap Node)] (do (use-ok n) 42)))
+  (let [n (alloc/heap Node)] (do (use-ok n) 42)))

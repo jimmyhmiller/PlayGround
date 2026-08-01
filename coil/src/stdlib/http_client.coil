@@ -1,0 +1,276 @@
+; Blocking outbound HTTP client backed by libcurl. The public surface keeps curl's
+; variadic, option-number API private: callers provide typed Coil values and own the
+; returned body through the allocator passed to `request`.
+(module coil.http.client)
+(import "primitive.coil" :as primitive)
+
+(import "alloc.coil" :as alloc)
+(import "arraylist.coil" :as arraylist)
+(import "result.coil" :use *)
+(import "slice.coil" :as slice)
+(import "str.coil" :as str)
+(import "mem.coil" :as mem)
+
+(export Header
+        Request
+        Response
+        HttpError
+        request
+        response-free
+        response-status
+        response-body
+        response-header-count
+        response-header-at)
+
+(extern curl_easy_init :cc c [] (-> (ptr i8)))
+(extern curl_easy_cleanup :cc c [(ptr i8)] (-> void))
+(extern curl_easy_perform :cc c [(ptr i8)] (-> i32))
+(extern curl_easy_setopt :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_easy_getinfo :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_easy_strerror :cc c [i32] (-> (ptr i8)))
+(extern curl_slist_append :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern curl_slist_free_all :cc c [(ptr i8)] (-> void))
+
+; Stable values from curl/curl.h. They are part of libcurl's public ABI. Keeping them
+; here (behind typed helpers) prevents application code from depending on them.
+(const CURLOPT_WRITEDATA 10001)
+(const CURLOPT_URL 10002)
+(const CURLOPT_WRITEFUNCTION 20011)
+(const CURLOPT_POSTFIELDS 10015)
+(const CURLOPT_HTTPHEADER 10023)
+(const CURLOPT_CUSTOMREQUEST 10036)
+(const CURLOPT_FOLLOWLOCATION 52)
+(const CURLOPT_NOSIGNAL 99)
+(const CURLOPT_POSTFIELDSIZE_LARGE 30120)
+(const CURLOPT_TIMEOUT_MS 155)
+(const CURLOPT_CONNECTTIMEOUT_MS 156)
+(const CURLOPT_HEADERFUNCTION 20079)
+(const CURLOPT_HEADERDATA 10029)
+(const CURLINFO_RESPONSE_CODE 2097154)
+
+(defstruct Header [(name (slice u8)) (value (slice u8))])
+(defstruct Request
+  [(method (slice u8))
+   (url (slice u8))
+   (headers (slice Header))
+   (body (slice u8))
+   (connect-timeout-ms i64)
+   (timeout-ms i64)
+   (follow-redirects bool)])
+(defstruct Response [(status i64) (headers (slice Header)) (body (slice u8))])
+(defstruct HeaderCapture
+  [(a (ptr alloc/Allocator)) (headers (arraylist/ArrayList Header))])
+(defsum HttpError
+  (InvalidRequest)
+  (OutOfMemory)
+  (Transport [(code i64) (message (slice u8))]))
+
+(defn curl-ok? [(code i32)] (-> bool)
+  (primitive/icmp-eq (primitive/cast i64 code) 0))
+(defn curl-set-ptr [(easy (ptr i8)) (option i32) (value (ptr i8))] (-> i32)
+  (curl_easy_setopt easy option value))
+(defn curl-set-i64 [(easy (ptr i8)) (option i32) (value i64)] (-> i32)
+  (curl_easy_setopt easy option value))
+(defn curl-set-write-fn [(easy (ptr i8))
+                         (value (fnptr c [(ptr i8) isize isize (ptr i8)] isize))] (-> i32)
+  (curl_easy_setopt easy CURLOPT_WRITEFUNCTION value))
+(defn curl-set-write-data [(easy (ptr i8)) (value (ptr (arraylist/ArrayList u8)))] (-> i32)
+  (curl_easy_setopt easy CURLOPT_WRITEDATA (primitive/cast (ptr i8) value)))
+(defn curl-set-header-fn [(easy (ptr i8))
+                          (value (fnptr c [(ptr i8) isize isize (ptr i8)] isize))] (-> i32)
+  (curl_easy_setopt easy CURLOPT_HEADERFUNCTION value))
+(defn curl-set-header-data [(easy (ptr i8)) (value (ptr HeaderCapture))] (-> i32)
+  (curl_easy_setopt easy CURLOPT_HEADERDATA (primitive/cast (ptr i8) value)))
+(defn curl-response-code [(easy (ptr i8)) (value (ptr i64))] (-> i32)
+  (curl_easy_getinfo easy CURLINFO_RESPONSE_CODE value))
+
+(defn curl-cstr-len [(p (ptr i8))] (-> i64)
+  (let [(mut n) 0]
+    (loop (if (primitive/icmp-eq (primitive/cast i64 (primitive/load (primitive/index p (primitive/load n)))) 0)
+              (break)
+              (primitive/store! n (primitive/iadd (primitive/load n) 1))))
+    (primitive/load n)))
+(defn curl-cstr-slice [(p (ptr i8))] (-> (slice u8))
+  (slice/slice-new [u8] (primitive/cast (ptr u8) p) (curl-cstr-len p)))
+
+(defn curl-write-body [(data (ptr i8)) (size isize) (count isize) (ctx (ptr i8))] (-> isize)
+  (let [n (primitive/imul (primitive/cast i64 size) (primitive/cast i64 count))
+        out (primitive/cast (ptr (arraylist/ArrayList u8)) ctx)]
+    (arraylist/al-extend! [u8] (mut out) (primitive/cast (ptr u8) data) n)
+    (primitive/cast isize n)))
+
+(defn owned-copy [(a (ptr alloc/Allocator)) (s (slice u8))] (-> (slice u8))
+  (let [n (slice/slice-len s)]
+    (if (primitive/icmp-eq n 0)
+        (slice/slice-new [u8] (primitive/cast (ptr u8) 0) 0)
+        (match (alloc/raw-alloc a n 1)
+          (None [] (slice/slice-new [u8] (primitive/cast (ptr u8) 0) 0))
+          (Some [p]
+                (do
+                  (mem/mem-copy [u8] (primitive/cast (ptr u8) p) (slice/slice-data s) n)
+                  (slice/slice-new [u8] (primitive/cast (ptr u8) p) n)))))))
+
+(defn free-header! [(a (ptr alloc/Allocator)) (h Header)] (-> i64)
+  (let [name (primitive/load (primitive/field h name))
+        value (primitive/load (primitive/field h value))]
+    (if (primitive/icmp-gt (slice/slice-len name) 0)
+        (alloc/raw-free a (primitive/cast (ptr i8) (slice/slice-data name)) (slice/slice-len name) 1)
+        0)
+    (if (primitive/icmp-gt (slice/slice-len value) 0)
+        (alloc/raw-free a (primitive/cast (ptr i8) (slice/slice-data value)) (slice/slice-len value) 1)
+        0)))
+
+(defn clear-captured-headers! [(capture (ptr HeaderCapture))] (-> i64)
+  (let [(mut i) 0
+        hs (primitive/load (primitive/field capture headers))]
+    (loop (if (primitive/icmp-ge (primitive/load i) (arraylist/al-len [Header] hs))
+              (break)
+              (do
+                (free-header! (primitive/load (primitive/field capture a)) (arraylist/al-get [Header] hs (primitive/load i)))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (arraylist/al-free! [Header] (mut (primitive/field capture headers)))
+    (primitive/store! (primitive/field capture headers) (arraylist/al-new [Header] (primitive/load (primitive/field capture a))))
+    0))
+
+(defn curl-header-line [(data (ptr i8)) (size isize) (count isize) (ctx (ptr i8))] (-> isize)
+  (let [n (primitive/imul (primitive/cast i64 size) (primitive/cast i64 count))
+        capture (primitive/cast (ptr HeaderCapture) ctx)
+        raw (slice/slice-new [u8] (primitive/cast (ptr u8) data) n)]
+    ; A new status line begins the final-or-redirect response. Discard the prior
+    ; block so Response.headers always describes the response whose status we return.
+    (if (and (primitive/icmp-ge n 5) (str/str-eq (slice/subslice raw 0 5) "HTTP/"))
+        (clear-captured-headers! capture)
+        (let [(mut colon) -1
+              (mut i) 0]
+          (loop (if (primitive/icmp-ge (primitive/load i) n)
+                    (break)
+                    (if (primitive/icmp-eq (primitive/cast i64 (slice/slice-get raw (primitive/load i))) 58)
+                        (do (primitive/store! colon (primitive/load i)) (break))
+                        (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+          (when (primitive/icmp-gt (primitive/load colon) 0)
+            (let [(mut end) n
+                  (mut start) (primitive/iadd (primitive/load colon) 1)]
+              (loop (if (and (primitive/icmp-gt (primitive/load end) (primitive/load start))
+                             (or (primitive/icmp-eq (primitive/cast i64 (slice/slice-get raw (primitive/isub (primitive/load end) 1))) 13)
+                                 (primitive/icmp-eq (primitive/cast i64 (slice/slice-get raw (primitive/isub (primitive/load end) 1))) 10)))
+                        (primitive/store! end (primitive/isub (primitive/load end) 1))
+                        (break)))
+              (loop (if (and (primitive/icmp-lt (primitive/load start) (primitive/load end))
+                             (or (primitive/icmp-eq (primitive/cast i64 (slice/slice-get raw (primitive/load start))) 32)
+                                 (primitive/icmp-eq (primitive/cast i64 (slice/slice-get raw (primitive/load start))) 9)))
+                        (primitive/store! start (primitive/iadd (primitive/load start) 1))
+                        (break)))
+              (let [hp (alloc/stack Header)]
+                (primitive/store! (primitive/field hp name)
+                        (owned-copy (primitive/load (primitive/field capture a)) (slice/subslice raw 0 (primitive/load colon))))
+                (primitive/store! (primitive/field hp value)
+                        (owned-copy (primitive/load (primitive/field capture a)) (slice/subslice raw (primitive/load start) (primitive/load end))))
+                (arraylist/al-push! [Header] (mut (primitive/field capture headers)) (primitive/load hp)))))))
+    (primitive/cast isize n)))
+
+(defn append-header [(a (ptr alloc/Allocator)) (list (ptr i8)) (h Header)] (-> (ptr i8))
+  (let [(mut b) (str/sb-new a)]
+    (str/sb-push-str! (mut b) (primitive/load (primitive/field h name)))
+    (str/sb-push-str! (mut b) ": ")
+    (str/sb-push-str! (mut b) (primitive/load (primitive/field h value)))
+    (let [line (str/sb-str b)
+          c-line (str/str->cstr a line)
+          appended (curl_slist_append list c-line)]
+      (alloc/raw-free a c-line (primitive/iadd (slice/slice-len line) 1) 1)
+      (str/sb-free! (mut b))
+      appended)))
+
+(defn build-headers [(a (ptr alloc/Allocator)) (hs (slice Header))] (-> (ptr i8))
+  (let [(mut list) (primitive/cast (ptr i8) 0)
+        (mut i) 0]
+    (loop (if (primitive/icmp-ge (primitive/load i) (slice/slice-len hs))
+              (break)
+              (do
+                (primitive/store! list (append-header a (primitive/load list) (slice/slice-get hs (primitive/load i))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load list)))
+
+(defn transport-error [(code i32)] (-> HttpError)
+  (Transport (primitive/cast i64 code) (curl-cstr-slice (curl_easy_strerror code))))
+
+;; Perform one blocking request. The response body is allocator-owned and must be
+;; released with `response-free`. HTTP error statuses are successful responses;
+;; only request construction and transport failures produce `HttpError`.
+(defn request [(a (ptr alloc/Allocator)) (req (ptr Request))] (-> (Result Response HttpError))
+  (let [easy (curl_easy_init)]
+    (if (primitive/icmp-eq (primitive/cast i64 easy) 0)
+        (Err (OutOfMemory))
+        (let [(mut bytes) (arraylist/al-new [u8] a)
+              capture (alloc/stack HeaderCapture)
+              url (str/str->cstr a (primitive/load (primitive/field req url)))
+              method (str/str->cstr a (primitive/load (primitive/field req method)))
+              hs (build-headers a (primitive/load (primitive/field req headers)))
+              body (primitive/load (primitive/field req body))
+              (mut code) 0]
+          (primitive/store! (primitive/field capture a) a)
+          (primitive/store! (primitive/field capture headers) (arraylist/al-new [Header] a))
+          (curl-set-ptr easy CURLOPT_URL url)
+          (curl-set-ptr easy CURLOPT_CUSTOMREQUEST method)
+          (curl-set-ptr easy CURLOPT_HTTPHEADER hs)
+          (curl-set-ptr easy CURLOPT_POSTFIELDS (primitive/cast (ptr i8) (slice/slice-data body)))
+          (curl-set-i64 easy CURLOPT_POSTFIELDSIZE_LARGE (slice/slice-len body))
+          (curl-set-write-fn easy (primitive/fnptr-of curl-write-body))
+          (curl-set-write-data easy (mut bytes))
+          (curl-set-header-fn easy (primitive/fnptr-of curl-header-line))
+          (curl-set-header-data easy capture)
+          (curl-set-i64 easy CURLOPT_NOSIGNAL 1)
+          (curl-set-i64 easy CURLOPT_FOLLOWLOCATION (if (primitive/load (primitive/field req follow-redirects)) 1 0))
+          (curl-set-i64 easy CURLOPT_CONNECTTIMEOUT_MS (primitive/load (primitive/field req connect-timeout-ms)))
+          (curl-set-i64 easy CURLOPT_TIMEOUT_MS (primitive/load (primitive/field req timeout-ms)))
+          (let [performed (curl_easy_perform easy)]
+            (alloc/raw-free a url (primitive/iadd (slice/slice-len (primitive/load (primitive/field req url))) 1) 1)
+            (alloc/raw-free a method (primitive/iadd (slice/slice-len (primitive/load (primitive/field req method))) 1) 1)
+            (if (curl-ok? performed)
+                (do
+                  (curl-response-code easy (mut code))
+                  (let [p (alloc/stack Response)]
+                    (primitive/store! (primitive/field p status) (primitive/load code))
+                    (primitive/store! (primitive/field p headers)
+                            (arraylist/al-into-slice [Header] (mut (primitive/field capture headers))))
+                    (primitive/store! (primitive/field p body) (arraylist/al-into-slice [u8] (mut bytes)))
+                    (curl_slist_free_all hs)
+                    (curl_easy_cleanup easy)
+                    (Ok (primitive/load p))))
+                (do
+                  (arraylist/al-free! [u8] (mut bytes))
+                  (clear-captured-headers! capture)
+                  (curl_slist_free_all hs)
+                  (curl_easy_cleanup easy)
+                  (Err (transport-error performed)))))))))
+
+(defn response-status [(response Response)] (-> i64)
+  (primitive/load (primitive/field response status)))
+(defn response-body [(response Response)] (-> (slice u8))
+  (primitive/load (primitive/field response body)))
+
+;; Release the allocator-owned response body and headers.
+(defn response-header-count [(response Response)] (-> i64)
+  (slice/slice-len (primitive/load (primitive/field response headers))))
+
+(defn response-header-at [(response Response) (index i64)] (-> Header)
+  (slice/slice-get (primitive/load (primitive/field response headers)) index))
+
+(defn response-free [(a (ptr alloc/Allocator)) (response Response)] (-> i64)
+  (let [body (primitive/load (primitive/field response body))
+        hs (primitive/load (primitive/field response headers))
+        (mut i) 0]
+    (loop (if (primitive/icmp-ge (primitive/load i) (slice/slice-len hs))
+              (break)
+              (do
+                (free-header! a (slice/slice-get hs (primitive/load i)))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/icmp-gt (slice/slice-len hs) 0)
+        (alloc/raw-free a
+                        (primitive/cast (ptr i8) (slice/slice-data hs))
+                        (primitive/imul (slice/slice-len hs) (primitive/sizeof Header))
+                        (primitive/alignof Header))
+        0)
+    (alloc/raw-free a
+                    (primitive/cast (ptr i8) (slice/slice-data body))
+                    (slice/slice-len body)
+                    1)))

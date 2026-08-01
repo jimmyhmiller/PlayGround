@@ -3,6 +3,7 @@
 ; `(return-from :s …)` early exit.
 ;   coil run src/examples/defer.coil; echo $?   => 42
 (module app)
+(import "primitive.coil" :as primitive)
 (import "src/stdlib/control.coil" :use *)
 
 ; A `scope :s` whose two defers run in reverse (LIFO) when the scope exits — even
@@ -10,8 +11,8 @@
 (defn main [] (-> :i64)
   (let [(mut n) 20]
     (scope :s
-      (defer (store! n (iadd (load n) 2)))    ; registered 1st → runs LAST  (40 → 42)
-      (defer (store! n (imul (load n) 2)))     ; registered 2nd → runs FIRST (20 → 40)
-      (store! n 20)
+      (defer (primitive/store! n (primitive/iadd (primitive/load n) 2)))    ; registered 1st → runs LAST  (40 → 42)
+      (defer (primitive/store! n (primitive/imul (primitive/load n) 2)))     ; registered 2nd → runs FIRST (20 → 40)
+      (primitive/store! n 20)
       (return-from :s 0))                       ; early exit; both defers still fire
-    (load n)))                                  ; => 42
+    (primitive/load n)))                                  ; => 42

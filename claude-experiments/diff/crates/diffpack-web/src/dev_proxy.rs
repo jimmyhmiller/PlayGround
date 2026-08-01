@@ -3,7 +3,14 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-pub use diffpack_vite_compat::vite_config::ProxyRule;
+/// Framework-neutral HTTP/WebSocket proxy rule consumed by the Web dev server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyRule {
+    pub context: String,
+    pub target: String,
+    pub change_origin: bool,
+    pub ws: bool,
+}
 
 pub fn match_rule<'a>(rules: &'a [ProxyRule], path: &str) -> Option<&'a ProxyRule> {
     rules.iter().find(|rule| {

@@ -1,0 +1,107 @@
+(module coil.async)
+(import "primitive.coil" :as primitive)
+; Explicit asynchronous tasks. This is the backend-independent contract that readiness,
+; timers, processes, and HTTP clients can build on. There is no ambient executor and no
+; compiler magic: Task and Context are capabilities supplied and owned by their callers,
+; like Allocator and io.Reader/io.Writer.
+;
+; A Task does not own its Task cell. Its `state` is owned according to the constructor
+; that produced the task, and `task-close` releases that state exactly once. Closing a
+; pending task means cancellation; closing a completed task releases retained resources.
+
+;; The result of making progress on an asynchronous operation.
+(defsum Poll [T]
+  (Pending)
+  (Ready [(value T)]))
+
+;; Errors in the task protocol itself. Operation errors belong in T, normally as a
+;; `(Result Value OperationError)`.
+(defsum TaskError
+  (AlreadyCompleted)
+  (Closed)
+  (ParkFailed [(code i64)]))
+
+;; Context passed to every poll. `user` belongs to the executor/backend. A future event
+;; runtime can point it at task identity and wake-registration state without changing
+;; Task's representation.
+(defstruct Context [(user (ptr i8))])
+
+;; Type-erased, explicitly owned asynchronous operation. `poll-fn` may be called
+;; repeatedly until Ready. `close-fn` tolerates pending or completed cleanup; Task
+;; guarantees it is called at most once.
+(defstruct Task [T]
+  [(poll-fn (fnptr c [(ptr i8) (ptr Context)] (Poll T)))
+   (close-fn (fnptr c [(ptr i8) bool] i64))
+   (state (ptr i8))
+   (status i64)])
+
+;; A blocking executor's parking capability. After Pending, `park-fn` waits until
+;; progress may be possible. It returns 0 on success or a backend-specific error code.
+(defstruct Parker
+  [(park-fn (fnptr c [(ptr i8)] i64))
+   (state (ptr i8))])
+
+(const TASK-ACTIVE 0)
+(const TASK-COMPLETED 1)
+(const TASK-CLOSED 2)
+
+;; Initialize caller-owned Task storage. The state remains exclusively owned by this
+;; task until `task-close`; do not free or reuse it earlier.
+(defn task-init [T] [(task (ptr (Task T)))
+                     (state (ptr i8))
+                     (poll-fn (fnptr c [(ptr i8) (ptr Context)] (Poll T)))
+                     (close-fn (fnptr c [(ptr i8) bool] i64))] (-> (ptr (Task T)))
+  (do
+    (primitive/store! (primitive/field task poll-fn) poll-fn)
+    (primitive/store! (primitive/field task close-fn) close-fn)
+    (primitive/store! (primitive/field task state) state)
+    (primitive/store! (primitive/field task status) TASK-ACTIVE)
+    task))
+
+;; Poll once. Ready permanently completes the task; its value is returned exactly once.
+(defn task-poll [T] [(task (ptr (Task T))) (cx (ptr Context))] (-> (Result (Poll T) TaskError))
+  (let [status (primitive/load (primitive/field task status))]
+    (if (= status TASK-CLOSED)
+        (Err (Closed))
+        (if (= status TASK-COMPLETED)
+            (Err (AlreadyCompleted))
+            (let [result
+                    (primitive/call-ptr (primitive/load (primitive/field task poll-fn))
+                              (primitive/load (primitive/field task state))
+                              cx)]
+              (match result
+                (Pending [] (Ok (Pending)))
+                (Ready [value]
+                       (do
+                         (primitive/store! (primitive/field task status) TASK-COMPLETED)
+                         (Ok (Ready value))))))))))
+
+;; Close and release a task. Idempotent. `close-fn` receives true when this closes a
+;; still-pending task, making the cancellation policy explicit to the operation.
+(defn task-close [T] [(task (ptr (Task T)))] (-> i64)
+  (let [status (primitive/load (primitive/field task status))]
+    (if (= status TASK-CLOSED)
+        0
+        (let [cancelled (= status TASK-ACTIVE)
+              code
+                (primitive/call-ptr (primitive/load (primitive/field task close-fn))
+                          (primitive/load (primitive/field task state))
+                          cancelled)]
+          (primitive/store! (primitive/field task status) TASK-CLOSED)
+          code))))
+
+;; Run one task to completion. This consumes its Ready value but does not close the task;
+;; call `task-close` afterward (including when this returns Err) to release its state.
+(defn task-run [T] [(task (ptr (Task T))) (cx (ptr Context)) (parker (ptr Parker))] (-> (Result T TaskError))
+  (loop (match (task-poll task cx)
+          (Err [error] (break (Err error)))
+          (Ok [progress]
+              (match progress
+                (Ready [value] (break (Ok value)))
+                (Pending []
+                         (let [code
+                                 (primitive/call-ptr (primitive/load (primitive/field parker park-fn))
+                                           (primitive/load (primitive/field parker state)))]
+                           (if (= code 0)
+                               (continue)
+                               (break (Err (ParkFailed code)))))))))))

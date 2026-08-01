@@ -27,6 +27,10 @@ check_formatting() {
   done
 }
 
+check_public_api() {
+  ./scripts/check-public-api.sh
+}
+
 check_core_neutrality() {
   local forbidden='diffpack_(next|tanstack|vite_compat|web|default_loader)::|JsxExtensions::NextJs|Target::ReactServer|LoaderKind|SourceLanguage::Css|tsr-split|TSS_SERVER_FN_BASE|node:module|node:url|node:path'
   if rg -n "$forbidden" crates/diffpack-core/src crates/diffpack-core/Cargo.toml; then
@@ -53,6 +57,7 @@ case "$mode" in
     ./scripts/check-crate-boundaries.sh
     check_core_neutrality
     check_formatting
+    check_public_api
     cargo check --workspace
     for crate in "${extracted_crates[@]}"; do
       cargo test -p "$crate"
@@ -63,6 +68,7 @@ case "$mode" in
     "$0" phase
     cargo test --workspace --lib
     cargo test --workspace --tests
+    check_public_api
     check_core_neutrality
     ;;
   *) usage ;;

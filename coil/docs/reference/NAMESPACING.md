@@ -163,8 +163,9 @@ Covered by `tests/compiler/oracle`:
   arbitrary CWD, the bundled prelude reaching bundled `io` despite a same-named decoy
   in the entry directory, and `(:use [name])` of a symbol a module does not export
   being a located error that names the symbol and the module.
-- **`python3 scripts/oracle.py gate resolved|expand`** — snapshot the resolver's and expander's
-  output over the whole corpus, so any drift in name resolution or macro hygiene
+- **`python3 scripts/oracle.py gate resolved|expand`** — snapshot focused resolver and
+  expander fixtures, so any drift in name resolution or macro hygiene
   (including the second-order cross-module case) shows up as a diff.
-- **`python3 scripts/oracle.py gate full`** — emitted IR, byte-exact, which catches a resolution change that
+- **`python3 scripts/oracle.py gate full`** — emitted IR for a compact cross-platform set,
+  byte-exact, which catches a resolution change that
   survives to codegen.

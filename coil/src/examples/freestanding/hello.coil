@@ -10,18 +10,20 @@
 ; — no main, no crt0. NOTHING from the libc-coupled stdlib is imported (it would drag
 ; abort/malloc — see README): every capability here is self-provided.
 (module bare)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 
 ; ---- raw machine access (the only `llvm-ir` escape hatches) -----------------
 ; Volatile byte store to the qemu virt PL011 UART data register (MMIO 0x09000000).
 (defn uart-byte [(c i64)] (-> i64)
-  (llvm-ir i64 [c]
+  (primitive/llvm-ir i64 [c]
 "%p = inttoptr i64 150994944 to ptr
 %b = trunc i64 $0 to i8
 store volatile i8 %b, ptr %p
 ret i64 0"))
 ; PSCI SYSTEM_OFF (function id 0x84000008) via `hvc` — qemu virt's conduit. Halts.
 (defn poweroff [] (-> i64)
-  (llvm-ir i64 []
+  (primitive/llvm-ir i64 []
 "call void asm sideeffect \"movz x0, #0x8400, lsl #16 ; movk x0, #8 ; hvc #0\", \"~{x0}\"()
 ret i64 0"))
 
@@ -29,20 +31,20 @@ ret i64 0"))
 ; Identical shape to src/stdlib/io.coil's Writer — but self-contained, with a UART backend.
 (defstruct Writer [(write-fn (fnptr c [(ptr i8) (ptr i8) i64] i64)) (ctx (ptr i8))])
 (defn w-write [(w (ptr Writer)) (buf (ptr i8)) (n i64)] (-> i64)
-  (call-ptr (load (field w write-fn)) (load (field w ctx)) buf n))
+  (primitive/call-ptr (primitive/load (primitive/field w write-fn)) (primitive/load (primitive/field w ctx)) buf n))
 (defn w-str [(w (ptr Writer)) (s (ptr i8)) (n i64)] (-> i64) (w-write w s n))
 
 ; the UART backend: a write-fn that bytes-out to the UART (ctx unused)
 (defn uart-write [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> i64)
   (let [(mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
-              (do (uart-byte (cast i64 (load (index buf (load i)))))
-                  (store! i (iadd (load i) 1))))))
+              (do (uart-byte (primitive/cast i64 (primitive/load (primitive/index buf (primitive/load i)))))
+                  (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   n)
 (defn uart-writer [(w (ptr Writer))] (-> i64)
-  (store! (field w write-fn) (fnptr-of uart-write))
-  (store! (field w ctx) (cast (ptr i8) 0))
+  (primitive/store! (primitive/field w write-fn) (primitive/fnptr-of uart-write))
+  (primitive/store! (primitive/field w ctx) (primitive/cast (ptr i8) 0))
   0)
 
 ; ---- capability #2: a bump allocator (a VALUE) over a STATIC buffer ----------
@@ -51,23 +53,23 @@ ret i64 0"))
 ; buffer (not freestanding), so here the buffer is `alloc-static` (lives in .bss).
 (defstruct Arena [(base (ptr i8)) (off i64) (cap i64)])
 (defn ar-alloc [(ar (ptr Arena)) (size i64)] (-> (ptr i8))
-  (let [p (cast (ptr i8) (iadd (cast i64 (load (field ar base))) (load (field ar off))))]
-    (store! (field ar off) (iadd (load (field ar off)) size))
+  (let [p (primitive/cast (ptr i8) (primitive/iadd (primitive/cast i64 (primitive/load (primitive/field ar base))) (primitive/load (primitive/field ar off))))]
+    (primitive/store! (primitive/field ar off) (primitive/iadd (primitive/load (primitive/field ar off)) size))
     p))
 
 (defn start [] (-> i64)               ; the ELF entry (ld.lld -e bare.start)
-  (let [buf      (alloc-static (array u8 256))
-        (mut ar) (zeroed Arena)
-        (mut w)  (zeroed Writer)]
-    (store! (field ar base) (cast (ptr i8) (index buf 0)))
-    (store! (field ar cap) 256)
+  (let [buf      (alloc/static (array u8 256))
+        (mut ar) (primitive/zeroed Arena)
+        (mut w)  (primitive/zeroed Writer)]
+    (primitive/store! (primitive/field ar base) (primitive/cast (ptr i8) (primitive/index buf 0)))
+    (primitive/store! (primitive/field ar cap) 256)
     (uart-writer (mut w))             ; wire the Writer to the UART backend
     ; allocate scratch FROM THE ARENA, fill it, and write it THROUGH THE WRITER —
     ; the explicit allocator + IO capabilities composing, with no runtime at all.
     (let [scratch (ar-alloc (mut ar) 16)]
-      (store! (index scratch 0) (cast i8 104))   ; 'h'
-      (store! (index scratch 1) (cast i8 105))   ; 'i'
-      (store! (index scratch 2) (cast i8 10))    ; '\n'
+      (primitive/store! (primitive/index scratch 0) (primitive/cast i8 104))   ; 'h'
+      (primitive/store! (primitive/index scratch 1) (primitive/cast i8 105))   ; 'i'
+      (primitive/store! (primitive/index scratch 2) (primitive/cast i8 10))    ; '\n'
       (w-write (mut w) scratch 3))               ; "hi\n" — from arena memory, via the Writer
     (w-str (mut w) c"from coil (bare metal)\n" 23)
     (poweroff)

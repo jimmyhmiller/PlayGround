@@ -1,0 +1,99 @@
+(module async-fd-test)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
+
+(import "async_runtime.coil" :use *)
+(import "async.coil" :use *)
+(import "io.coil" :use *)
+(import "assert.coil" :use *)
+
+(extern pipe :cc c [(ptr i32)] (-> i32))
+(extern close :cc c [i32] (-> i32))
+
+(defn runtime-init-ok [(result (Result (ptr Runtime) RuntimeError))] (-> bool)
+  (match result (Ok [_] true) (Err [_] false)))
+
+(defn runtime-close-ok [(result (Result i64 RuntimeError))] (-> bool)
+  (match result (Ok [_] true) (Err [_] false)))
+
+(defn runtime-close-busy [(result (Result i64 RuntimeError))] (-> bool)
+  (match result
+    (Ok [_] false)
+    (Err [error]
+         (match error
+           (Backend [_] false)
+           (Busy [registrations] (= registrations 1))))))
+
+(defn fd-init-ok [(result (Result (ptr (Task (Result i64 FdWaitError))) FdWaitError))] (-> bool)
+  (match result (Ok [_] true) (Err [_] false)))
+
+(defn fd-init-invalid [(result (Result (ptr (Task (Result i64 FdWaitError))) FdWaitError))] (-> bool)
+  (match result
+    (Ok [_] false)
+    (Err [error]
+         (match error
+           (InvalidFd [] true)
+           (Register [_] false)
+           (Event [_] false)))))
+
+(defn fd-poll-pending [(result (Result (Poll (Result i64 FdWaitError)) TaskError))] (-> bool)
+  (match result
+    (Err [_] false)
+    (Ok [poll]
+        (match poll (Pending [] true) (Ready [_] false)))))
+
+(defn fd-run-ok [(result (Result (Result i64 FdWaitError) TaskError))] (-> bool)
+  (match result
+    (Err [_] false)
+    (Ok [wait-result]
+        (match wait-result (Ok [_] true) (Err [_] false)))))
+
+(defn io-ok [(result (Result i64 IoError))] (-> bool)
+  (match result (Ok [_] true) (Err [_] false)))
+
+(defn main [] (-> i64)
+  (let [runtime (alloc/stack Runtime)
+        cx (alloc/stack Context)
+        parker (alloc/stack Parker)
+        state (alloc/stack FdWaitState)
+        task (alloc/stack (Task (Result i64 FdWaitError)))
+        fds (alloc/stack (array i32 2))
+        byte (alloc/stack i8)
+        writer (alloc/stack Writer)
+        reader (alloc/stack Reader)]
+    (assert-eq (pipe (primitive/cast (ptr i32) fds)) 0)
+    (assert (runtime-init-ok (runtime-init runtime)))
+    (runtime-context cx runtime)
+    (runtime-parker parker runtime)
+    
+    ; Readability remains pending until a byte enters the pipe.
+    (assert (fd-init-ok (fd-readable runtime task state (primitive/load (primitive/index fds 0)))))
+    (assert (fd-poll-pending (task-poll task cx)))
+    (assert-eq (primitive/load (primitive/field runtime registrations)) 1)
+    (assert (runtime-close-busy (runtime-close runtime)))
+    (primitive/store! byte 65)
+    (fd-writer writer (primitive/cast i64 (primitive/load (primitive/index fds 1))))
+    (assert (io-ok (write-all writer byte 1)))
+    (assert (fd-run-ok (task-run task cx parker)))
+    (assert-eq (primitive/load (primitive/field runtime registrations)) 0)
+    (assert-eq (task-close task) 0)
+    
+    ; Drain the pipe, then verify cancellation removes a pending registration.
+    (fd-reader reader (primitive/cast i64 (primitive/load (primitive/index fds 0))))
+    (assert (io-ok (read-exact reader byte 1)))
+    (assert (fd-init-ok (fd-readable runtime task state (primitive/load (primitive/index fds 0)))))
+    (assert (fd-poll-pending (task-poll task cx)))
+    (assert-eq (primitive/load (primitive/field runtime registrations)) 1)
+    (assert-eq (task-close task) 0)
+    (assert-eq (primitive/load (primitive/field runtime registrations)) 0)
+    
+    ; A pipe's write end should be immediately writable.
+    (assert (fd-init-ok (fd-writable runtime task state (primitive/load (primitive/index fds 1)))))
+    (assert (fd-run-ok (task-run task cx parker)))
+    (assert-eq (task-close task) 0)
+    
+    (assert (fd-init-invalid (fd-readable runtime task state -1)))
+    (assert (runtime-close-ok (runtime-close runtime)))
+    (assert-eq (close (primitive/load (primitive/index fds 0))) 0)
+    (assert-eq (close (primitive/load (primitive/index fds 1))) 0)
+    0))

@@ -1,3 +1,6 @@
+(module example.structs)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 ; Structs and arrays. A struct field or array element is reached as a *pointer*
 ; (via `field` / `index`), then read/written with `load` / `store!`.
 ;   coil run src/examples/structs.coil; echo $?   => 42
@@ -5,13 +8,13 @@
 (defstruct Point [(x :i64) (y :i64)])
 
 (defn main [] (-> :i64)
-  (let [p (alloc-stack Point)            ; pointer to a stack Point
-        a (alloc-stack (array i64 3))]   ; pointer to a stack [3 x i64]
-    (store! (field p x) 30)
-    (store! (field p y) 4)
-    (store! (index a 0) 1)
-    (store! (index a 1) 2)
-    (store! (index a 2) 5)
-    (iadd (iadd (load (field p x)) (load (field p y)))         ; 30 + 4
-          (iadd (load (index a 0))
-                (iadd (load (index a 1)) (load (index a 2))))))) ; 1 + 2 + 5
+  (let [p (alloc/stack Point)            ; pointer to a stack Point
+        a (alloc/stack (array i64 3))]   ; pointer to a stack [3 x i64]
+    (primitive/store! (primitive/field p x) 30)
+    (primitive/store! (primitive/field p y) 4)
+    (primitive/store! (primitive/index a 0) 1)
+    (primitive/store! (primitive/index a 1) 2)
+    (primitive/store! (primitive/index a 2) 5)
+    (primitive/iadd (primitive/iadd (primitive/load (primitive/field p x)) (primitive/load (primitive/field p y)))         ; 30 + 4
+          (primitive/iadd (primitive/load (primitive/index a 0))
+                (primitive/iadd (primitive/load (primitive/index a 1)) (primitive/load (primitive/index a 2))))))) ; 1 + 2 + 5

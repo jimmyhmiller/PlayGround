@@ -2,6 +2,7 @@
 ; (src/stdlib/arraylist.coil); no ambient heap, no compiler support.
 ;   coil run src/examples/arraylist.coil; echo $?   => 45
 (module app)
+(import "primitive.coil" :as primitive)
 (import "src/stdlib/arraylist.coil" :use *)
 (import "src/stdlib/alloc.coil" :use *)
 (import "src/stdlib/control.coil" :use *)
@@ -11,6 +12,6 @@
         (mut xs) (al-new [i64] a)]
     (for [i 0 10] (al-push! (mut xs) i))   ; 0..9, grows past the initial cap
     (let [(mut acc) 0]
-      (al-for [v xs] (store! acc (iadd (load acc) v)))   ; 0+1+…+9 = 45
+      (al-for [v xs] (primitive/store! acc (primitive/iadd (primitive/load acc) v)))   ; 0+1+…+9 = 45
       (al-free! (mut xs))                                 ; explicit cleanup
-      (load acc))))
+      (primitive/load acc))))

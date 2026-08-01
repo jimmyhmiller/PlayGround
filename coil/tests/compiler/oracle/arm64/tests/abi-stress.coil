@@ -2,6 +2,8 @@
 ; struct sizes across every AAPCS64 class (1..24 bytes), HFA structs,
 ; nested struct passing/returning, sret returns.
 (module t)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "src/stdlib/alloc.coil" :use *)
 (import "src/stdlib/io.coil" :use *)
 (import "src/stdlib/fmt.coil" :use *)
@@ -10,16 +12,16 @@
   (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
 
 (defn sum10 [(a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64) (i i64) (j i64)] (-> i64)
-  (iadd a (iadd (imul b 2) (iadd (imul c 3) (iadd (imul d 4) (iadd (imul e 5)
-    (iadd (imul f 6) (iadd (imul g 7) (iadd (imul h 8) (iadd (imul i 9) (imul j 10)))))))))))
+  (primitive/iadd a (primitive/iadd (primitive/imul b 2) (primitive/iadd (primitive/imul c 3) (primitive/iadd (primitive/imul d 4) (primitive/iadd (primitive/imul e 5)
+    (primitive/iadd (primitive/imul f 6) (primitive/iadd (primitive/imul g 7) (primitive/iadd (primitive/imul h 8) (primitive/iadd (primitive/imul i 9) (primitive/imul j 10)))))))))))
 
 (defn fsum10 [(a f64) (b f64) (c f64) (d f64) (e f64) (f f64) (g f64) (h f64) (i f64) (j f64)] (-> f64)
-  (fadd a (fadd (fmul b 2.0) (fadd (fmul c 3.0) (fadd (fmul d 4.0) (fadd (fmul e 5.0)
-    (fadd (fmul f 6.0) (fadd (fmul g 7.0) (fadd (fmul h 8.0) (fadd (fmul i 9.0) (fmul j 10.0)))))))))))
+  (primitive/fadd a (primitive/fadd (primitive/fmul b 2.0) (primitive/fadd (primitive/fmul c 3.0) (primitive/fadd (primitive/fmul d 4.0) (primitive/fadd (primitive/fmul e 5.0)
+    (primitive/fadd (primitive/fmul f 6.0) (primitive/fadd (primitive/fmul g 7.0) (primitive/fadd (primitive/fmul h 8.0) (primitive/fadd (primitive/fmul i 9.0) (primitive/fmul j 10.0)))))))))))
 
 (defn mixed [(a i64) (x f64) (b i64) (y f64) (c i64) (z f64) (d i64) (e i64) (f i64) (g i64) (h i64) (i2 i64) (q f64)] (-> i64)
-  (iadd (iadd a (iadd b (iadd c (iadd d (iadd e (iadd f (iadd g (iadd h i2))))))))
-        (cast i64 (fadd x (fadd y (fadd z q))))))
+  (primitive/iadd (primitive/iadd a (primitive/iadd b (primitive/iadd c (primitive/iadd d (primitive/iadd e (primitive/iadd f (primitive/iadd g (primitive/iadd h i2))))))))
+        (primitive/cast i64 (primitive/fadd x (primitive/fadd y (primitive/fadd z q))))))
 
 (defstruct S1 [(a u8)])
 (defstruct S3 [(a u8) (b u8) (c u8)])
@@ -33,80 +35,80 @@
 (defstruct Nest [(p S8) (q S12)])
 
 (defn take-s1 [(s S1)] (-> i64)
-  (let [p (alloc-stack S1)] (store! p s) (cast i64 (load (field p a)))))
+  (let [p (alloc/stack S1)] (primitive/store! p s) (primitive/cast i64 (primitive/load (primitive/field p a)))))
 (defn take-s3 [(s S3)] (-> i64)
-  (let [p (alloc-stack S3)]
-    (store! p s)
-    (iadd (cast i64 (load (field p a)))
-          (iadd (imul (cast i64 (load (field p b))) 10)
-                (imul (cast i64 (load (field p c))) 100)))))
+  (let [p (alloc/stack S3)]
+    (primitive/store! p s)
+    (primitive/iadd (primitive/cast i64 (primitive/load (primitive/field p a)))
+          (primitive/iadd (primitive/imul (primitive/cast i64 (primitive/load (primitive/field p b))) 10)
+                (primitive/imul (primitive/cast i64 (primitive/load (primitive/field p c))) 100)))))
 (defn take-s8 [(s S8)] (-> i64)
-  (let [p (alloc-stack S8)]
-    (store! p s)
-    (iadd (cast i64 (load (field p a))) (imul (cast i64 (load (field p b))) 1000))))
+  (let [p (alloc/stack S8)]
+    (primitive/store! p s)
+    (primitive/iadd (primitive/cast i64 (primitive/load (primitive/field p a))) (primitive/imul (primitive/cast i64 (primitive/load (primitive/field p b))) 1000))))
 (defn take-s12 [(s S12)] (-> i64)
-  (let [p (alloc-stack S12)]
-    (store! p s)
-    (iadd (load (field p a)) (imul (cast i64 (load (field p b))) 7))))
+  (let [p (alloc/stack S12)]
+    (primitive/store! p s)
+    (primitive/iadd (primitive/load (primitive/field p a)) (primitive/imul (primitive/cast i64 (primitive/load (primitive/field p b))) 7))))
 (defn take-s16 [(s S16)] (-> i64)
-  (let [p (alloc-stack S16)] (store! p s) (isub (load (field p a)) (load (field p b)))))
+  (let [p (alloc/stack S16)] (primitive/store! p s) (primitive/isub (primitive/load (primitive/field p a)) (primitive/load (primitive/field p b)))))
 (defn take-s17 [(s S17)] (-> i64)
-  (let [p (alloc-stack S17)]
-    (store! p s)
-    (iadd (load (field p a)) (iadd (load (field p b)) (cast i64 (load (field p c)))))))
+  (let [p (alloc/stack S17)]
+    (primitive/store! p s)
+    (primitive/iadd (primitive/load (primitive/field p a)) (primitive/iadd (primitive/load (primitive/field p b)) (primitive/cast i64 (primitive/load (primitive/field p c)))))))
 (defn take-s24 [(s S24)] (-> i64)
-  (let [p (alloc-stack S24)]
-    (store! p s)
-    (iadd (load (field p a)) (imul (load (field p b)) (load (field p c))))))
+  (let [p (alloc/stack S24)]
+    (primitive/store! p s)
+    (primitive/iadd (primitive/load (primitive/field p a)) (primitive/imul (primitive/load (primitive/field p b)) (primitive/load (primitive/field p c))))))
 (defn take-hfa2 [(s HFA2)] (-> f64)
-  (let [p (alloc-stack HFA2)]
-    (store! p s)
-    (fadd (load (field p x)) (fmul (load (field p y)) 3.0))))
+  (let [p (alloc/stack HFA2)]
+    (primitive/store! p s)
+    (primitive/fadd (primitive/load (primitive/field p x)) (primitive/fmul (primitive/load (primitive/field p y)) 3.0))))
 (defn take-hfa4 [(s HFA4)] (-> f32)
-  (let [p (alloc-stack HFA4)]
-    (store! p s)
-    (fadd (load (field p a))
-          (fadd (load (field p b))
-                (fadd (load (field p c)) (load (field p d)))))))
+  (let [p (alloc/stack HFA4)]
+    (primitive/store! p s)
+    (primitive/fadd (primitive/load (primitive/field p a))
+          (primitive/fadd (primitive/load (primitive/field p b))
+                (primitive/fadd (primitive/load (primitive/field p c)) (primitive/load (primitive/field p d)))))))
 (defn take-nest [(n Nest)] (-> i64)
-  (let [p (alloc-stack Nest)]
-    (store! p n)
-    (iadd (take-s8 (load (field p p))) (take-s12 (load (field p q))))))
+  (let [p (alloc/stack Nest)]
+    (primitive/store! p n)
+    (primitive/iadd (take-s8 (primitive/load (primitive/field p p))) (take-s12 (primitive/load (primitive/field p q))))))
 
 (defn make-s16 [(k i64)] (-> S16)
-  (let [p (alloc-stack S16)]
-    (store! (field p a) (imul k 100)) (store! (field p b) k) (load p)))
+  (let [p (alloc/stack S16)]
+    (primitive/store! (primitive/field p a) (primitive/imul k 100)) (primitive/store! (primitive/field p b) k) (primitive/load p)))
 (defn make-s24 [(k i64)] (-> S24)
-  (let [p (alloc-stack S24)]
-    (store! (field p a) k) (store! (field p b) (iadd k 1)) (store! (field p c) (iadd k 2)) (load p)))
+  (let [p (alloc/stack S24)]
+    (primitive/store! (primitive/field p a) k) (primitive/store! (primitive/field p b) (primitive/iadd k 1)) (primitive/store! (primitive/field p c) (primitive/iadd k 2)) (primitive/load p)))
 (defn make-hfa2 [(x f64)] (-> HFA2)
-  (let [p (alloc-stack HFA2)]
-    (store! (field p x) x) (store! (field p y) (fmul x 2.0)) (load p)))
+  (let [p (alloc/stack HFA2)]
+    (primitive/store! (primitive/field p x) x) (primitive/store! (primitive/field p y) (primitive/fmul x 2.0)) (primitive/load p)))
 
 (defn main [] (-> i64)
   (let [w (stdout)]
     (out w "sum10" (sum10 1 2 3 4 5 6 7 8 9 10))
-    (out w "fsum10" (cast i64 (fsum10 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0)))
+    (out w "fsum10" (primitive/cast i64 (fsum10 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0)))
     (out w "mixed" (mixed 1 0.5 2 1.5 3 2.5 4 5 6 7 8 9 3.5))
-    (let [s1 (alloc-stack S1) s3 (alloc-stack S3) s8 (alloc-stack S8)
-          s12 (alloc-stack S12) s17 (alloc-stack S17) hfa4 (alloc-stack HFA4)
-          nest (alloc-stack Nest)]
-      (store! (field s1 a) (cast u8 42))
-      (store! (field s3 a) (cast u8 1)) (store! (field s3 b) (cast u8 2)) (store! (field s3 c) (cast u8 3))
-      (store! (field s8 a) (cast i32 5)) (store! (field s8 b) (cast i32 -6))
-      (store! (field s12 a) 1000) (store! (field s12 b) (cast i32 -3))
-      (store! (field s17 a) 10) (store! (field s17 b) 20) (store! (field s17 c) (cast u8 30))
-      (store! (field hfa4 a) (cast f32 1.5)) (store! (field hfa4 b) (cast f32 2.5))
-      (store! (field hfa4 c) (cast f32 3.5)) (store! (field hfa4 d) (cast f32 4.5))
-      (store! (field nest p) (load s8)) (store! (field nest q) (load s12))
-      (out w "s1" (take-s1 (load s1)))
-      (out w "s3" (take-s3 (load s3)))
-      (out w "s8" (take-s8 (load s8)))
-      (out w "s12" (take-s12 (load s12)))
+    (let [s1 (alloc/stack S1) s3 (alloc/stack S3) s8 (alloc/stack S8)
+          s12 (alloc/stack S12) s17 (alloc/stack S17) hfa4 (alloc/stack HFA4)
+          nest (alloc/stack Nest)]
+      (primitive/store! (primitive/field s1 a) (primitive/cast u8 42))
+      (primitive/store! (primitive/field s3 a) (primitive/cast u8 1)) (primitive/store! (primitive/field s3 b) (primitive/cast u8 2)) (primitive/store! (primitive/field s3 c) (primitive/cast u8 3))
+      (primitive/store! (primitive/field s8 a) (primitive/cast i32 5)) (primitive/store! (primitive/field s8 b) (primitive/cast i32 -6))
+      (primitive/store! (primitive/field s12 a) 1000) (primitive/store! (primitive/field s12 b) (primitive/cast i32 -3))
+      (primitive/store! (primitive/field s17 a) 10) (primitive/store! (primitive/field s17 b) 20) (primitive/store! (primitive/field s17 c) (primitive/cast u8 30))
+      (primitive/store! (primitive/field hfa4 a) (primitive/cast f32 1.5)) (primitive/store! (primitive/field hfa4 b) (primitive/cast f32 2.5))
+      (primitive/store! (primitive/field hfa4 c) (primitive/cast f32 3.5)) (primitive/store! (primitive/field hfa4 d) (primitive/cast f32 4.5))
+      (primitive/store! (primitive/field nest p) (primitive/load s8)) (primitive/store! (primitive/field nest q) (primitive/load s12))
+      (out w "s1" (take-s1 (primitive/load s1)))
+      (out w "s3" (take-s3 (primitive/load s3)))
+      (out w "s8" (take-s8 (primitive/load s8)))
+      (out w "s12" (take-s12 (primitive/load s12)))
       (out w "s16" (take-s16 (make-s16 9)))
-      (out w "s17" (take-s17 (load s17)))
+      (out w "s17" (take-s17 (primitive/load s17)))
       (out w "s24" (take-s24 (make-s24 7)))
-      (out w "hfa2" (cast i64 (take-hfa2 (make-hfa2 2.5))))
-      (out w "hfa4" (cast i64 (take-hfa4 (load hfa4))))
-      (out w "nest" (take-nest (load nest)))
+      (out w "hfa2" (primitive/cast i64 (take-hfa2 (make-hfa2 2.5))))
+      (out w "hfa4" (primitive/cast i64 (take-hfa4 (primitive/load hfa4))))
+      (out w "nest" (take-nest (primitive/load nest)))
       0)))

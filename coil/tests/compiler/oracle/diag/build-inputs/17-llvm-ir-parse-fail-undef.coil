@@ -1,5 +1,7 @@
+(module oracle.17-llvm-ir-parse-fail-undef)
+(import "primitive.coil" :as primitive)
 ; A different LLVM parse error (an undefined SSA value rather than a bad opcode), so
 ; the `{:?}`-escaped error string in the diagnostic differs. Confirms the self-host
 ; reads whatever message LLVMParseIRInContext writes to the `errout` char** out-param
 ; and Debug-escapes it faithfully, rather than matching one hard-coded error text.
-(defn m [] (-> i64) (llvm-ir i64 [] "ret $ret %undefined"))
+(defn m [] (-> i64) (primitive/llvm-ir i64 [] "ret $ret %undefined"))

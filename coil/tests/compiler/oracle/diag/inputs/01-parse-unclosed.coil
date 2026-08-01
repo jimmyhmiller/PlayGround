@@ -1,3 +1,4 @@
 (module m)
+(import "primitive.coil" :as primitive)
 (defn main [] (-> i64)
-  (iadd 1 2)
+  (primitive/iadd 1 2)

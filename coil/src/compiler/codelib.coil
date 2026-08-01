@@ -1,4 +1,5 @@
 (module codelib)
+(import "../stdlib/primitive.coil" :as primitive)
 ; The `code-*` vocabulary as ORDINARY COIL FUNCTIONS over `(ptr Sexp)`.
 ;
 ; This is the metaprogram API for the compile-and-run design (see
@@ -18,7 +19,7 @@
 ;
 ; RESERVED NAMES, and why that does NOT force an atomic swap. Every name below is a
 ; special form at PARSE time: parser.coil:411 maps ~29 `code-*` heads to opcodes
-; before resolution runs, so `(code-nth c i)` becomes ECodeOp regardless of what is
+; before resolution runs, so `(primitive/code-nth c i)` becomes ECodeOp regardless of what is
 ; in scope, and these functions cannot be called from SOURCE while that holds. That
 ; does not matter, because the lowering belongs in CODEGEN, not in source: ECodeOp
 ; stays exactly as it is and gains a codegen case emitting a call to the matching
@@ -29,7 +30,7 @@
 ; For the same parse-time reason, nothing here calls a reserved name internally --
 ; it would become an ECodeOp. Hence code-tag/code-listish? as the internal spine.
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 (import "arraylist.coil" :use *)
@@ -51,73 +52,73 @@
 ; `Code` is a `(ptr Sexp)`. Tags (SexpKind order, reader.coil:16):
 ;   0=KInt 1=KFloat 2=KSym 3=KKw 4=KStr 5=KCStr 6=KList 7=KVec
 (defn code-tag [(c (ptr Sexp))] (-> i64)
-  (sx-tag (load c)))
+  (sx-tag (primitive/load c)))
 (defn code-listish? [(c (ptr Sexp))] (-> bool)
-  (let [t (code-tag c)] (or (icmp-eq t 6) (icmp-eq t 7))))
+  (let [t (code-tag c)] (or (primitive/icmp-eq t 6) (primitive/icmp-eq t 7))))
 
 ; op 0
 (defn code-list? [(c (ptr Sexp))] (-> bool)
   (code-listish? c))
 ; op 1
 (defn code-sym? [(c (ptr Sexp))] (-> bool)
-  (icmp-eq (code-tag c) 2))
+  (primitive/icmp-eq (code-tag c) 2))
 ; op 2
 (defn code-int? [(c (ptr Sexp))] (-> bool)
-  (icmp-eq (code-tag c) 0))
+  (primitive/icmp-eq (code-tag c) 0))
 ; op 11
 (defn code-keyword? [(c (ptr Sexp))] (-> bool)
-  (icmp-eq (code-tag c) 3))
+  (primitive/icmp-eq (code-tag c) 3))
 
 ; op 3
 (defn code-count [(c (ptr Sexp))] (-> i64)
   (if (not (code-listish? c))
       (code-die "code-count expects a list/vector")
-      (sx-len (sx-items (load c)))))
+      (sx-len (sx-items (primitive/load c)))))
 
 ; op 5
 (defn code-sym [(c (ptr Sexp))] (-> (slice u8))
-  (if (icmp-ne (code-tag c) 2)
+  (if (primitive/icmp-ne (code-tag c) 2)
       (do (code-die "code-sym expects a symbol") "")
-      (sx-sval (load c))))
+      (sx-sval (primitive/load c))))
 
 ; op 6
 (defn code-int [(c (ptr Sexp))] (-> i64)
-  (if (icmp-ne (code-tag c) 0)
+  (if (primitive/icmp-ne (code-tag c) 0)
       (code-die "code-int expects an integer")
-      (sx-ival (load c))))
+      (sx-ival (primitive/load c))))
 
 ; op 4 — bounds-checked, like the interpreter's.
 (defn code-nth [(c (ptr Sexp)) (i i64)] (-> (ptr Sexp))
   (if (not (code-listish? c))
-      (do (code-die "code-nth expects a list/vector") (cast (ptr Sexp) 0))
-      (let [items (sx-items (load c))
+      (do (code-die "code-nth expects a list/vector") (primitive/cast (ptr Sexp) 0))
+      (let [items (sx-items (primitive/load c))
             n (sx-len items)]
-        (if (or (icmp-lt i 0) (icmp-ge i n))
-            (do (code-die "code-nth index out of range") (cast (ptr Sexp) 0))
+        (if (or (primitive/icmp-lt i 0) (primitive/icmp-ge i n))
+            (do (code-die "code-nth index out of range") (primitive/cast (ptr Sexp) 0))
             (let [p (unwrap-ptr [Sexp] (create [Sexp] (malloc-allocator)))]
-              (store! p (sx-at items i))
+              (primitive/store! p (sx-at items i))
               p)))))
 
 ; op 7 — every element but the head, as a fresh list.
 (defn code-rest [(c (ptr Sexp))] (-> (ptr Sexp))
   (if (not (code-listish? c))
-      (do (code-die "code-rest expects a list") (cast (ptr Sexp) 0))
+      (do (code-die "code-rest expects a list") (primitive/cast (ptr Sexp) 0))
       (let [a (malloc-allocator)
-            items (sx-items (load c))
+            items (sx-items (primitive/load c))
             n (sx-len items)
             (mut xs) (al-new [Sexp] a)
             (mut i) 1]
-        (loop (if (icmp-ge (load i) n)
+        (loop (if (primitive/icmp-ge (primitive/load i) n)
                   (break)
-                  (do (al-push! (mut xs) (sx-at items (load i))) (store! i (iadd (load i) 1)))))
+                  (do (al-push! (mut xs) (sx-at items (primitive/load i))) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
         (let [p (unwrap-ptr [Sexp] (create [Sexp] a))]
-          (store! p (mk-sexp (KList (box-al [Sexp] a (load xs))) -1 -1))
+          (primitive/store! p (mk-sexp (KList (box-al [Sexp] a (primitive/load xs))) -1 -1))
           p))))
 
 ; op 10 — structural equality; shares the interpreter's sexp-eq rather than
 ; growing a second implementation of it.
 (defn code-eq [(x (ptr Sexp)) (y (ptr Sexp))] (-> bool)
-  (sexp-eq (load x) (load y)))
+  (sexp-eq (primitive/load x) (primitive/load y)))
 
 ; op 12 — build a symbol by concatenating a symbol's name with a suffix. A generic
 ; instantiation `(Gen A B)` — the same shape `code-field-count` accepts — is mangled
@@ -126,42 +127,42 @@
 (defn code-symbol [(c (ptr Sexp)) (suffix (slice u8))] (-> (ptr Sexp))
   (let [a (malloc-allocator)
         base
-          (if (icmp-eq (code-tag c) 2)
-              (sx-sval (load c))
-              (if (icmp-eq (code-tag c) 4)
-                  (sx-sval (load c))
-                  (if (or (icmp-eq (code-tag c) 6) (icmp-eq (code-tag c) 7))
-                      (let [m (inst-node-mangle a (load c))]
+          (if (primitive/icmp-eq (code-tag c) 2)
+              (sx-sval (primitive/load c))
+              (if (primitive/icmp-eq (code-tag c) 4)
+                  (sx-sval (primitive/load c))
+                  (if (or (primitive/icmp-eq (code-tag c) 6) (primitive/icmp-eq (code-tag c) 7))
+                      (let [m (inst-node-mangle a (primitive/load c))]
                         (if (str-eq m "")
                             (do (code-die "code-symbol expects a symbol, string, or type instantiation (Gen …)") "")
                             m))
                       (do (code-die "code-symbol expects a symbol, string, or type instantiation (Gen …)") ""))))
         p (unwrap-ptr [Sexp] (create [Sexp] a))]
-    (store! p (mk-sexp (KSym (sconcat a base suffix)) -1 -1))
+    (primitive/store! p (mk-sexp (KSym (sconcat a base suffix)) -1 -1))
     p))
 
 ; op 8 — a fresh hygienic name. Shares the interpreter's counter so the two agree.
 (defn code-gensym [] (-> (ptr Sexp))
   (let [a (malloc-allocator)
         p (unwrap-ptr [Sexp] (create [Sexp] a))]
-    (store! p (mk-sexp (KSym (sconcat a "$g" (dec->str a (next-gensym)))) -1 -1))
+    (primitive/store! p (mk-sexp (KSym (sconcat a "$g" (dec->str a (next-gensym)))) -1 -1))
     p))
 
 ; ---- constructors (what quasiquote lowers to) -------------------------------
 (defn code-mk-int [(v i64)] (-> (ptr Sexp))
   (let [a (malloc-allocator)
         p (unwrap-ptr [Sexp] (create [Sexp] a))]
-    (store! p (mk-sexp (KInt v) -1 -1))
+    (primitive/store! p (mk-sexp (KInt v) -1 -1))
     p))
 (defn code-mk-sym [(s (slice u8))] (-> (ptr Sexp))
   (let [a (malloc-allocator)
         p (unwrap-ptr [Sexp] (create [Sexp] a))]
-    (store! p (mk-sexp (KSym s) -1 -1))
+    (primitive/store! p (mk-sexp (KSym s) -1 -1))
     p))
 (defn code-mk-str [(s (slice u8))] (-> (ptr Sexp))
   (let [a (malloc-allocator)
         p (unwrap-ptr [Sexp] (create [Sexp] a))]
-    (store! p (mk-sexp (KStr s) -1 -1))
+    (primitive/store! p (mk-sexp (KStr s) -1 -1))
     p))
 
 ; A growable list under construction, so quasiquote and code-walking metaprograms
@@ -170,13 +171,13 @@
 (defn code-list-new [] (-> (ptr CodeList))
   (let [a (malloc-allocator)
         p (unwrap-ptr [CodeList] (create [CodeList] a))]
-    (store! (field p items) (box-al [Sexp] a (al-new [Sexp] a)))
+    (primitive/store! (primitive/field p items) (box-al [Sexp] a (al-new [Sexp] a)))
     p))
 (defn code-list-push! [(l (ptr CodeList)) (c (ptr Sexp))] (-> i64)
-  (al-push! [Sexp] (load (field l items)) (load c))
+  (al-push! [Sexp] (primitive/load (primitive/field l items)) (primitive/load c))
   0)
 (defn code-list-done [(l (ptr CodeList))] (-> (ptr Sexp))
   (let [a (malloc-allocator)
         p (unwrap-ptr [Sexp] (create [Sexp] a))]
-    (store! p (mk-sexp (KList (load (field l items))) -1 -1))
+    (primitive/store! p (mk-sexp (KList (primitive/load (primitive/field l items))) -1 -1))
     p))

@@ -1,5 +1,5 @@
 //! `sideEffects`-aware droppability, the authority the generic dead-module
-//! elimination pass ([`crate::bundler`]) consults to decide whether a
+//! elimination pass consults to decide whether a
 //! reachable-but-unused module may be dropped from a build.
 //!
 //! A module's droppability is read from the nearest ancestor `package.json`,

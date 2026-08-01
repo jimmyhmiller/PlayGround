@@ -1,4 +1,5 @@
 (module p9)
+(import "primitive.coil" :as primitive)
 (import "derive.coil" :use *)
 (import "io.coil" :use *)
 (import "fmt.coil" :use *)
@@ -6,8 +7,8 @@
 (derive-eq Val)
 (defstruct Other [(z i64)])
 (defn other-same [(a Other) (b Other)] (-> bool)
-  (let [(mut x) (zeroed Val) (mut y) (zeroed Val)]
-    (store! (field x kinds) (load (field a z))) (store! (field y kinds) (load (field b z)))
-    (= (load x) (load y))))
+  (let [(mut x) (primitive/zeroed Val) (mut y) (primitive/zeroed Val)]
+    (primitive/store! (primitive/field x kinds) (primitive/load (primitive/field a z))) (primitive/store! (primitive/field y kinds) (primitive/load (primitive/field b z)))
+    (= (primitive/load x) (primitive/load y))))
 (impl Eq Other (= [(a Other) (b Other)] (-> bool) (other-same a b)))
 (defn main [] (-> i64) (fmt (stdout) "ok\n") 0)

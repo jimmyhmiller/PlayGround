@@ -1,17 +1,19 @@
 ; counter.coil -- the minimal example, over externref. Build:
 ;   coil build counter.coil --target wasm32-unknown-unknown -o counter.wasm
 (module counter)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "slice.coil" :use *)
 (import "js.coil"    :use *)
 (import "dom.coil"   :use *)
 
-(defn count [] (-> (ptr i32)) (alloc-static i32))   ; the tally
-(defn view  [] (-> (ptr i32)) (alloc-static i32))   ; retain index of the display node
+(defn count [] (-> (ptr i32)) (alloc/static i32))   ; the tally
+(defn view  [] (-> (ptr i32)) (alloc/static i32))   ; retain index of the display node
 
-(defn render [] (-> i32) (set-text-ref! (deref (load (view))) (js-num (load (count)))))
+(defn render [] (-> i32) (set-text-ref! (deref (primitive/load (view))) (js-num (primitive/load (count)))))
 
-(defn on-inc [(u i32) (e externref)] (-> i64) (store! (count) (iadd (load (count)) (cast i32 1))) (render) 0)
-(defn on-dec [(u i32) (e externref)] (-> i64) (store! (count) (isub (load (count)) (cast i32 1))) (render) 0)
+(defn on-inc [(u i32) (e externref)] (-> i64) (primitive/store! (count) (primitive/iadd (primitive/load (count)) (primitive/cast i32 1))) (render) 0)
+(defn on-dec [(u i32) (e externref)] (-> i64) (primitive/store! (count) (primitive/isub (primitive/load (count)) (primitive/cast i32 1))) (render) 0)
 
 (defn main [] (-> i64)
   (let [root    (body)
@@ -21,10 +23,10 @@
         dec     (create "button")]
     (set-text! title "Coil counter") (append! root title)
     (set-attr! display "id" "count") (set-text! display "0") (append! root display)
-    (set-text! inc "+") (on! inc "click" "on_inc" (cast i32 0)) (append! root inc)
-    (set-text! dec "-") (on! dec "click" "on_dec" (cast i32 0)) (append! root dec)
-    (store! (count) (cast i32 0))
-    (store! (view) (retain display))
+    (set-text! inc "+") (on! inc "click" "on_inc" (primitive/cast i32 0)) (append! root inc)
+    (set-text! dec "-") (on! dec "click" "on_dec" (primitive/cast i32 0)) (append! root dec)
+    (primitive/store! (count) (primitive/cast i32 0))
+    (primitive/store! (view) (retain display))
     (render)
     0))
 

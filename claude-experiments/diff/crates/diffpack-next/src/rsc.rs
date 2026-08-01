@@ -13,7 +13,7 @@
 //!   function carrying the directive) becomes a server action: the client build
 //!   gets a thin RPC stub keyed by a stable id, the server build keeps the real
 //!   implementation and registers it under that id. This is the exact shape
-//!   [`crate::server_fn`] already implements for TanStack's `createServerFn`,
+//!   the TanStack integration already implements for `createServerFn`,
 //!   generalized to the bare directive.
 //!
 //! This module is the ATOM the rest of RSC support builds on: robustly detecting
@@ -95,7 +95,7 @@ pub enum RscDirective {
     /// directive). diffpack does not yet implement the `"use cache"` transform slice;
     /// it is detected ONLY so the build can HARD-ERROR rather than silently drop the
     /// directive (which would mask a real caching-semantics gap, per the repo
-    /// no-silent-stub rule). See [`crate::transform`] for the erroring path.
+    /// no-silent-stub rule). The compiler integration owns the erroring path.
     Cache,
 }
 
@@ -183,6 +183,22 @@ pub fn module_reference_id(path: &Path) -> String {
 /// throws `does not provide an export named "default"` on the first request that renders
 /// it — a failure that names neither the file nor the reason.
 pub fn transform_use_client_server(path: &Path, source: &str) -> Result<Option<String>, String> {
+    transform_use_client_server_with_mode(path, source, ClientReferenceMode::Synchronous)
+}
+
+/// Whether the bundler's server-side module container must be loaded before a
+/// client reference can be required by the SSR consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientReferenceMode {
+    Synchronous,
+    AsyncModuleContainer,
+}
+
+pub fn transform_use_client_server_with_mode(
+    path: &Path,
+    source: &str,
+    mode: ClientReferenceMode,
+) -> Result<Option<String>, String> {
     if detect_directive(path, source) != Some(RscDirective::Client) {
         return Ok(None);
     }
@@ -220,10 +236,22 @@ pub fn transform_use_client_server(path: &Path, source: &str) -> Result<Option<S
         out.push_str(&format!("import {};\n", json_string(&specifier)));
     }
     out.push_str("import { createClientModuleProxy } from \"react-server-dom-webpack/server\";\n");
-    out.push_str(&format!(
-        "const __diffpack_client = createClientModuleProxy({});\n",
-        json_string(&id)
-    ));
+    match mode {
+        ClientReferenceMode::Synchronous => out.push_str(&format!(
+            "const __diffpack_client = createClientModuleProxy({});\n",
+            json_string(&id)
+        )),
+        ClientReferenceMode::AsyncModuleContainer => out.push_str(&format!(
+            // React's client-module proxy is a fulfilled thenable. Reading
+            // `then` initializes its async twin synchronously and stores it in
+            // `value`; no top-level await leaks into Next's synchronously-loaded
+            // page module.
+            "const __diffpack_client_sync = createClientModuleProxy({id});\n\
+             void __diffpack_client_sync.then;\n\
+             const __diffpack_client = __diffpack_client_sync.value;\n",
+            id = json_string(&id)
+        )),
+    }
     for export in &exports {
         if export == "default" {
             out.push_str("export default __diffpack_client.default;\n");
@@ -404,7 +432,7 @@ pub fn transform_use_cache_server(path: &Path, source: &str) -> Result<Option<St
 }
 
 /// The subpath the client-side server-action transport (`callServer`) is imported
-/// from; diffpack registers [`crate::rsc_runtime`]'s `call_server.js` under it as a
+/// from; diffpack registers its `call_server.js` runtime module under it as a
 /// virtual module for the client build.
 pub const CALL_SERVER_SPECIFIER: &str = "#diffpack-call-server";
 
@@ -414,7 +442,7 @@ pub const CALL_SERVER_SPECIFIER: &str = "#diffpack-call-server";
 pub const ACTION_RESOLVER_SPECIFIER: &str = "#diffpack-rsc-action-resolver";
 
 /// The subpath the server-side action dispatcher (`handleServerAction`) is imported
-/// from; diffpack registers [`crate::rsc_runtime`]'s `action_handler.js` under it as
+/// from; diffpack registers its `action_handler.js` runtime module under it as
 /// a virtual module for the server build.
 pub const ACTION_HANDLER_SPECIFIER: &str = "#diffpack-rsc-action-handler";
 
@@ -648,7 +676,7 @@ pub struct ActionEntry {
 /// (`dist`, `.output`, `.next`, `.diffpack-output`, `.diffpack-next`) — a
 /// `"use client"` file inside one of those is a copy of a source file, and pinning
 /// the copy registers a second module id for the same component.
-/// Skipped only at the PROJECT ROOT ([`PROJECT_ROOT_ONLY_SKIPPED_DIRS`]): the
+/// Skipped only at the project root (using the private root skip table): the
 /// exported/reported trees whose names are ordinary words a source directory may
 /// legitimately use further down (`src/build/`, `app/out/`).
 pub fn walk_project_modules<F>(root: &Path, visit: &mut F) -> Result<(), String>
@@ -1051,7 +1079,7 @@ pub struct ModuleImport {
 /// literal argument — anywhere in the module, not only at the top level.
 ///
 /// This is the ONE specifier extraction the RSC-side scans share, so the stylesheet
-/// carry-over ([`stylesheet_imports`]) and the project import graph
+/// carry-over (from the private stylesheet scan) and the project import graph
 /// ([`crate::project_graph`]) cannot disagree about what a module depends on.
 /// Non-literal forms (`import(variable)`, `require(name)`) are not specifiers a
 /// bundler can follow and are not reported.
@@ -1590,6 +1618,23 @@ mod tests {
             out.contains("from \"react-server-dom-webpack/server\""),
             "must import the proxy from react-server-dom: {out}"
         );
+    }
+
+    #[test]
+    fn native_async_container_marks_flight_client_references_async() {
+        let out = transform_use_client_server_with_mode(
+            Path::new("/app/src/Counter.tsx"),
+            "\"use client\"; export default function Counter() {}",
+            ClientReferenceMode::AsyncModuleContainer,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(out.contains("void __diffpack_client_sync.then"), "{out}");
+        assert!(!out.contains("await "), "{out}");
+
+        let ordinary = client_server("\"use client\"; export default function Counter() {}")
+            .expect("use client module transforms");
+        assert!(!ordinary.contains("__diffpack_client_sync"), "{ordinary}");
     }
 
     #[test]

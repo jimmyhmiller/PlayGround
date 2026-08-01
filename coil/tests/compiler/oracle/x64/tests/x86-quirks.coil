@@ -19,6 +19,8 @@
 ;
 ; Exit 0 on success, else the first failing check number.
 (module x86quirks)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 
 (import "io.coil" :use *)
 (import "control.coil" :use *)
@@ -27,120 +29,120 @@
   (print-str (stderr) "x86-quirks: check ")
   (print-int (stderr) n)
   (print-str (stderr) " FAILED\n")
-  (when (icmp-eq (load firstbad) 0) (store! firstbad n) 0)
+  (when (primitive/icmp-eq (primitive/load firstbad) 0) (primitive/store! firstbad n) 0)
   0)
 
 ; ---- division: the divisor must survive rdx:rax being clobbered ----
 ; Written so the divisor is a live value used AFTER the division too, which
 ; catches a lowering that parks it in rax or rdx.
 (defn divmod [(a i64) (b i64)] (-> i64)
-  (let [q (idiv a b)
-        r (irem a b)]
+  (let [q (primitive/idiv a b)
+        r (primitive/irem a b)]
     ; b is used again here: if the division clobbered it, this is wrong
-    (iadd (imul q 1000) (iadd r b))))
+    (primitive/iadd (primitive/imul q 1000) (primitive/iadd r b))))
 (defn udivmod [(a u64) (b u64)] (-> u64)
-  (let [q (udiv a b)
-        r (urem a b)]
-    (iadd (imul q 1000) (iadd r b))))
+  (let [q (primitive/udiv a b)
+        r (primitive/urem a b)]
+    (primitive/iadd (primitive/imul q 1000) (primitive/iadd r b))))
 
 ; ---- shifts: the count must reach cl without losing a live value ----
 (defn shifter [(v i64) (n i64) (keep i64)] (-> i64)
-  (let [l (ishl v n)
-        r (ishr l n)]
+  (let [l (primitive/ishl v n)
+        r (primitive/ishr l n)]
     ; `keep` and `n` are both live across the shifts (which need cl)
-    (iadd (iadd l r) (iadd n keep))))
+    (primitive/iadd (primitive/iadd l r) (primitive/iadd n keep))))
 
 ; ---- setcc must be widened: a stale high byte shows up when summed ----
 (defn cmps [(a i64) (b i64)] (-> i64)
-  (iadd (iadd (if (icmp-lt a b) 1 0) (if (icmp-gt a b) 10 0))
-        (iadd (if (icmp-eq a b) 100 0) (if (icmp-ne a b) 1000 0))))
+  (primitive/iadd (primitive/iadd (if (primitive/icmp-lt a b) 1 0) (if (primitive/icmp-gt a b) 10 0))
+        (primitive/iadd (if (primitive/icmp-eq a b) 100 0) (if (primitive/icmp-ne a b) 1000 0))))
 
 (defn main [] (-> i64)
   (let [w (stdout)
-        fb (alloc-stack i64)]
-    (store! fb 0)
+        fb (alloc/stack i64)]
+    (primitive/store! fb 0)
 
     ; ---- 1-3. signed division, including the negative cases where the sign of
     ; the remainder matters (C semantics: truncate toward zero).
     ;  17 /  5 = 3 r 2  -> 3000 + 2 + 5   = 3007
-    (unless (icmp-eq (divmod 17 5) 3007) (note-fail! fb 1))
+    (unless (primitive/icmp-eq (divmod 17 5) 3007) (note-fail! fb 1))
     ; -17 /  5 = -3 r -2 -> -3000 + -2 + 5 = -2997
-    (unless (icmp-eq (divmod -17 5) -2997) (note-fail! fb 2))
+    (unless (primitive/icmp-eq (divmod -17 5) -2997) (note-fail! fb 2))
     ;  17 / -5 = -3 r 2  -> -3000 + 2 + -5 = -3003
-    (unless (icmp-eq (divmod 17 -5) -3003) (note-fail! fb 3))
+    (unless (primitive/icmp-eq (divmod 17 -5) -3003) (note-fail! fb 3))
 
     ; ---- 4. unsigned division of a value with the top bit set. If this were
     ; compiled as a SIGNED divide the quotient would be wrong (or it would trap).
     ; 2^63 / 2 = 2^62 = 4611686018427387904, r 0
     ; 2^63 cannot be written as a signed literal, so build the bit pattern.
-    (let [big (ishl (cast u64 1) (cast u64 63))]
-      (unless (icmp-eq (udiv big (cast u64 2)) (cast u64 4611686018427387904))
+    (let [big (primitive/ishl (primitive/cast u64 1) (primitive/cast u64 63))]
+      (unless (primitive/icmp-eq (primitive/udiv big (primitive/cast u64 2)) (primitive/cast u64 4611686018427387904))
               (note-fail! fb 4)))
 
     ; ---- 5. shifts with a live count and a live neighbour
     ; v=3 n=4 keep=7 -> l = 48, r = 3, 48+3+4+7 = 62
-    (unless (icmp-eq (shifter 3 4 7) 62) (note-fail! fb 5))
+    (unless (primitive/icmp-eq (shifter 3 4 7) 62) (note-fail! fb 5))
     ; ---- 6. a shift by a count that is itself computed (must land in cl)
-    (let [n (iadd 1 2)]
-      (unless (icmp-eq (ishl 1 n) 8) (note-fail! fb 6)))
+    (let [n (primitive/iadd 1 2)]
+      (unless (primitive/icmp-eq (primitive/ishl 1 n) 8) (note-fail! fb 6)))
     ; ---- 7. arithmetic vs logical right shift
-    (unless (icmp-eq (ishr -16 2) -4) (note-fail! fb 7))
+    (unless (primitive/icmp-eq (primitive/ishr -16 2) -4) (note-fail! fb 7))
     ; `ishr` is logical or arithmetic according to the operand's signedness
-    (unless (icmp-eq (ishr (cast u64 16) (cast u64 2)) (cast u64 4)) (note-fail! fb 8))
+    (unless (primitive/icmp-eq (primitive/ishr (primitive/cast u64 16) (primitive/cast u64 2)) (primitive/cast u64 4)) (note-fail! fb 8))
 
     ; ---- 9. setcc results must be clean 0/1 when combined
-    (unless (icmp-eq (cmps 1 2) 1001) (note-fail! fb 9))
-    (unless (icmp-eq (cmps 2 1) 1010) (note-fail! fb 10))
-    (unless (icmp-eq (cmps 2 2) 100) (note-fail! fb 11))
+    (unless (primitive/icmp-eq (cmps 1 2) 1001) (note-fail! fb 9))
+    (unless (primitive/icmp-eq (cmps 2 1) 1010) (note-fail! fb 10))
+    (unless (primitive/icmp-eq (cmps 2 2) 100) (note-fail! fb 11))
 
     ; ---- 12. NaN: EVERY ordered comparison must be false, including the ones
     ; that map to the x86 conditions which are TRUE when unordered.
-    (let [nan (fdiv 0.0 0.0)
+    (let [nan (primitive/fdiv 0.0 0.0)
           one 1.0]
-      (unless (not (fcmp-lt nan one)) (note-fail! fb 12))
-      (unless (not (fcmp-le nan one)) (note-fail! fb 13))
-      (unless (not (fcmp-gt nan one)) (note-fail! fb 14))
-      (unless (not (fcmp-ge nan one)) (note-fail! fb 15))
-      (unless (not (fcmp-eq nan one)) (note-fail! fb 16))
+      (unless (not (primitive/fcmp-lt nan one)) (note-fail! fb 12))
+      (unless (not (primitive/fcmp-le nan one)) (note-fail! fb 13))
+      (unless (not (primitive/fcmp-gt nan one)) (note-fail! fb 14))
+      (unless (not (primitive/fcmp-ge nan one)) (note-fail! fb 15))
+      (unless (not (primitive/fcmp-eq nan one)) (note-fail! fb 16))
       ; ... and the reversed operand order, since OLT/OLE swap operands
-      (unless (not (fcmp-lt one nan)) (note-fail! fb 17))
-      (unless (not (fcmp-gt one nan)) (note-fail! fb 18))
+      (unless (not (primitive/fcmp-lt one nan)) (note-fail! fb 17))
+      (unless (not (primitive/fcmp-gt one nan)) (note-fail! fb 18))
       ; `fcmp-ne` is ONE (Ordered and Not Equal), NOT the C `!=` (which is UNE
       ; and IS true for NaN). Ordered means both operands must be non-NaN, so
       ; this is false too — every fcmp-* here is an ORDERED predicate.
-      (unless (not (fcmp-ne nan one)) (note-fail! fb 19))
+      (unless (not (primitive/fcmp-ne nan one)) (note-fail! fb 19))
       ; and a NaN compares false even against itself
-      (unless (not (fcmp-eq nan nan)) (note-fail! fb 30)))
+      (unless (not (primitive/fcmp-eq nan nan)) (note-fail! fb 30)))
 
     ; ---- 20. unsigned <-> float, across the 2^63 boundary that has no
     ; hardware instruction.
-    (let [small (cast u64 1000)
-          huge (cast u64 -1)]   ; all ones = 2^64-1
-      (unless (fcmp-eq (cast f64 small) 1000.0) (note-fail! fb 20))
+    (let [small (primitive/cast u64 1000)
+          huge (primitive/cast u64 -1)]   ; all ones = 2^64-1
+      (unless (primitive/fcmp-eq (primitive/cast f64 small) 1000.0) (note-fail! fb 20))
       ; (double)(2^64-1) rounds to 2^64 = 1.8446744073709552e19
-      (unless (fcmp-gt (cast f64 huge) 1.8e19) (note-fail! fb 21)))
+      (unless (primitive/fcmp-gt (primitive/cast f64 huge) 1.8e19) (note-fail! fb 21)))
     ; float -> unsigned, above and below 2^63
-    (unless (icmp-eq (cast u64 1000.0) (cast u64 1000)) (note-fail! fb 22))
+    (unless (primitive/icmp-eq (primitive/cast u64 1000.0) (primitive/cast u64 1000)) (note-fail! fb 22))
     ; 1e19 is above 2^63, so this exercises the unsigned fixup path
-    (unless (icmp-gt (cast u64 1.0e19) (ishl (cast u64 1) (cast u64 63))) (note-fail! fb 23))
+    (unless (primitive/icmp-gt (primitive/cast u64 1.0e19) (primitive/ishl (primitive/cast u64 1) (primitive/cast u64 63))) (note-fail! fb 23))
 
     ; ---- 24. narrow and odd-width integer wraparound (shift-pair canon)
-    (let [a (cast u8 250)
-          b (cast u8 10)]
-      (unless (icmp-eq (cast i64 (iadd a b)) 4) (note-fail! fb 24)))   ; 260 mod 256
-    (let [c (cast i8 127)]
-      (unless (icmp-eq (cast i64 (iadd c (cast i8 1))) -128) (note-fail! fb 25)))
-    (let [d (cast u16 65535)]
-      (unless (icmp-eq (cast i64 (iadd d (cast u16 1))) 0) (note-fail! fb 26)))
-    (let [e (cast i32 2147483647)]
-      (unless (icmp-eq (cast i64 (iadd e (cast i32 1))) -2147483648) (note-fail! fb 27)))
+    (let [a (primitive/cast u8 250)
+          b (primitive/cast u8 10)]
+      (unless (primitive/icmp-eq (primitive/cast i64 (primitive/iadd a b)) 4) (note-fail! fb 24)))   ; 260 mod 256
+    (let [c (primitive/cast i8 127)]
+      (unless (primitive/icmp-eq (primitive/cast i64 (primitive/iadd c (primitive/cast i8 1))) -128) (note-fail! fb 25)))
+    (let [d (primitive/cast u16 65535)]
+      (unless (primitive/icmp-eq (primitive/cast i64 (primitive/iadd d (primitive/cast u16 1))) 0) (note-fail! fb 26)))
+    (let [e (primitive/cast i32 2147483647)]
+      (unless (primitive/icmp-eq (primitive/cast i64 (primitive/iadd e (primitive/cast i32 1))) -2147483648) (note-fail! fb 27)))
 
     ; ---- 28. signed vs unsigned comparison of the same bit pattern. -1 is
     ; less than 1 signed, but 0xFFFF... is GREATER than 1 unsigned; compiling
     ; one as the other is the classic silent miscompile.
-    (unless (icmp-lt -1 1) (note-fail! fb 28))
-    (unless (icmp-gt (cast u64 -1) (cast u64 1)) (note-fail! fb 29))
+    (unless (primitive/icmp-lt -1 1) (note-fail! fb 28))
+    (unless (primitive/icmp-gt (primitive/cast u64 -1) (primitive/cast u64 1)) (note-fail! fb 29))
 
-    (if (icmp-eq (load fb) 0)
+    (if (primitive/icmp-eq (primitive/load fb) 0)
         (do (print-str w "x86-quirks: all checks passed\n") 0)
-        (load fb))))
+        (primitive/load fb))))

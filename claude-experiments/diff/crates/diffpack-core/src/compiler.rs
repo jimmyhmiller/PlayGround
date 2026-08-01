@@ -295,7 +295,7 @@ pub fn transform_module_in_language(
 /// an external component compiler makes when handing TypeScript output to core.
 /// [`transform_module_with_options`] for source a component compiler produced:
 /// the path is the component (`App.vue`), but the language is `language`, not
-/// whatever the extension implies. See [`crate::sfc`].
+/// whatever the extension implies. Component compilation is supplied by the loader layer.
 #[allow(clippy::too_many_arguments)]
 pub fn transform_prepared_module_in_language(
     path: &Path,

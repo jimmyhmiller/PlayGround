@@ -1,4 +1,5 @@
 (module memgui)
+(import "primitive.coil" :as primitive)
 ; LIVE MEMORY INSPECTOR — a whole-program TRANSFORM that instruments allocations and shows a
 ; raylib window that updates WHILE THE PROGRAM RUNS. Zero source edits:
 ;
@@ -21,7 +22,7 @@
 ;
 ; All tracker state is FIXED-SIZE (no realloc), so the render thread can read it while the
 ; worker writes it without use-after-free; scalar reads may be a frame stale (fine for a monitor).
-(import "alloc.coil" :use *)
+(import "alloc.coil" :as alloc :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 (import "thread.coil" :use *)
@@ -49,9 +50,9 @@
 (extern usleep            :cc c [i32] (-> i32))   ; block the worker while paused
 (extern free              :cc c [(ptr i8)] (-> i64))   ; libc free is void; i64 return (ignored) matches other decls (e.g. the compiler's interp.coil) so instrumenting the compiler itself doesn't clash
 (defn rgb [(r i64) (g i64) (b i64)] (-> RLColor)
-  (let [c (alloc-stack RLColor)]
-    (store! (field c r) (cast u8 r)) (store! (field c g) (cast u8 g))
-    (store! (field c b) (cast u8 b)) (store! (field c a) (cast u8 255)) (load c)))
+  (let [c (alloc/stack RLColor)]
+    (primitive/store! (primitive/field c r) (primitive/cast u8 r)) (primitive/store! (primitive/field c g) (primitive/cast u8 g))
+    (primitive/store! (primitive/field c b) (primitive/cast u8 b)) (primitive/store! (primitive/field c a) (primitive/cast u8 255)) (primitive/load c)))
 
 ; ===== fixed-size tracked state ==============================================
 (defstruct MgSite [(typ (slice u8)) (file (slice u8)) (line i64) (col i64) (count i64) (bytes i64)])
@@ -80,83 +81,83 @@
    ; ---- display snapshot: frozen when paused so hover/tooltip is stable ----
    (vcur i64) (vpeak i64) (vtotal i64) (valloc i64) (vfree i64) (vresize i64) (vlive i64)
    (vn i64) (vsites (array MgSite 128)) (vorder (array i64 128))])
-(defn mg [] (-> (ptr MgState)) (alloc-static MgState))
+(defn mg [] (-> (ptr MgState)) (alloc/static MgState))
 (defn mg-init [] (-> i64)
   (let [s (mg)]
-    (if (icmp-ne (load (field s inited)) 0) 0
-      (do (let [sp (index (field s sites) 0)]              ; site 0 = "(unknown)" fallback
-            (store! (field sp typ) "(unknown)") (store! (field sp file) "") 0)
-          (store! (field s n-sites) 1) (store! (field s cur-site) 0)
-          (store! (field s inited) 1) 0))))
+    (if (primitive/icmp-ne (primitive/load (primitive/field s inited)) 0) 0
+      (do (let [sp (primitive/index (primitive/field s sites) 0)]              ; site 0 = "(unknown)" fallback
+            (primitive/store! (primitive/field sp typ) "(unknown)") (primitive/store! (primitive/field sp file) "") 0)
+          (primitive/store! (primitive/field s n-sites) 1) (primitive/store! (primitive/field s cur-site) 0)
+          (primitive/store! (primitive/field s inited) 1) 0))))
 (defn mg-log2 [(x i64)] (-> i64)
   (let [(mut v) x (mut n) 0]
-    (loop (if (if (icmp-le (load v) 1) true (icmp-ge (load n) 47)) (break)
-      (do (store! v (idiv (load v) 2)) (store! n (iadd (load n) 1)))))
-    (load n)))
+    (loop (if (if (primitive/icmp-le (primitive/load v) 1) true (primitive/icmp-ge (primitive/load n) 47)) (break)
+      (do (primitive/store! v (primitive/idiv (primitive/load v) 2)) (primitive/store! n (primitive/iadd (primitive/load n) 1)))))
+    (primitive/load n)))
 (defn mg-tl-push [(s (ptr MgState)) (v i64)] (-> i64)       ; ring push
-  (let [h (load (field s tl-head))]
-    (do (store! (index (field s tl) h) v)
-        (store! (field s tl-head) (irem (iadd h 1) 2048))
-        (if (icmp-lt (load (field s tl-count)) 2048)
-            (store! (field s tl-count) (iadd (load (field s tl-count)) 1)) 0)
+  (let [h (primitive/load (primitive/field s tl-head))]
+    (do (primitive/store! (primitive/index (primitive/field s tl) h) v)
+        (primitive/store! (primitive/field s tl-head) (primitive/irem (primitive/iadd h 1) 2048))
+        (if (primitive/icmp-lt (primitive/load (primitive/field s tl-count)) 2048)
+            (primitive/store! (primitive/field s tl-count) (primitive/iadd (primitive/load (primitive/field s tl-count)) 1)) 0)
         0)))
 
 ; ===== accounting ============================================================
 (defn mg-site-add [(s (ptr MgState)) (bytes i64) (bump-count i64)] (-> i64)
-  (let [sp (index (field s sites) (load (field s cur-site)))]
-    (do (store! (field sp bytes) (iadd (load (field sp bytes)) bytes))
-        (if (icmp-ne bump-count 0) (store! (field sp count) (iadd (load (field sp count)) 1)) 0) 0)))
+  (let [sp (primitive/index (primitive/field s sites) (primitive/load (primitive/field s cur-site)))]
+    (do (primitive/store! (primitive/field sp bytes) (primitive/iadd (primitive/load (primitive/field sp bytes)) bytes))
+        (if (primitive/icmp-ne bump-count 0) (primitive/store! (primitive/field sp count) (primitive/iadd (primitive/load (primitive/field sp count)) 1)) 0) 0)))
 (defn mg-acct-alloc [(size i64)] (-> i64)
   (let [s (mg)]
     (do (mg-init)
-        (store! (field s cur) (iadd (load (field s cur)) size))
-        (if (icmp-gt (load (field s cur)) (load (field s peak))) (store! (field s peak) (load (field s cur))) 0)
-        (store! (field s total) (iadd (load (field s total)) size))
-        (store! (field s n-alloc) (iadd (load (field s n-alloc)) 1))
-        (store! (field s n-live) (iadd (load (field s n-live)) 1))
-        (let [bi (mg-log2 size)] (store! (index (field s buckets) bi) (iadd (load (index (field s buckets) bi)) 1)))
+        (primitive/store! (primitive/field s cur) (primitive/iadd (primitive/load (primitive/field s cur)) size))
+        (if (primitive/icmp-gt (primitive/load (primitive/field s cur)) (primitive/load (primitive/field s peak))) (primitive/store! (primitive/field s peak) (primitive/load (primitive/field s cur))) 0)
+        (primitive/store! (primitive/field s total) (primitive/iadd (primitive/load (primitive/field s total)) size))
+        (primitive/store! (primitive/field s n-alloc) (primitive/iadd (primitive/load (primitive/field s n-alloc)) 1))
+        (primitive/store! (primitive/field s n-live) (primitive/iadd (primitive/load (primitive/field s n-live)) 1))
+        (let [bi (mg-log2 size)] (primitive/store! (primitive/index (primitive/field s buckets) bi) (primitive/iadd (primitive/load (primitive/index (primitive/field s buckets) bi)) 1)))
         (mg-site-add s size 1)
-        (mg-tl-push s (load (field s cur))) 0)))
+        (mg-tl-push s (primitive/load (primitive/field s cur))) 0)))
 (defn mg-acct-free [(size i64)] (-> i64)
   (let [s (mg)]
     (do (mg-init)
-        (store! (field s cur) (isub (load (field s cur)) size))
-        (store! (field s n-free) (iadd (load (field s n-free)) 1))
-        (store! (field s n-live) (isub (load (field s n-live)) 1))
-        (mg-tl-push s (load (field s cur))) 0)))
+        (primitive/store! (primitive/field s cur) (primitive/isub (primitive/load (primitive/field s cur)) size))
+        (primitive/store! (primitive/field s n-free) (primitive/iadd (primitive/load (primitive/field s n-free)) 1))
+        (primitive/store! (primitive/field s n-live) (primitive/isub (primitive/load (primitive/field s n-live)) 1))
+        (mg-tl-push s (primitive/load (primitive/field s cur))) 0)))
 (defn mg-acct-resize [(old i64) (new i64)] (-> i64)
   (let [s (mg)]
     (do (mg-init)
-        (store! (field s cur) (iadd (load (field s cur)) (isub new old)))
-        (if (icmp-gt (load (field s cur)) (load (field s peak))) (store! (field s peak) (load (field s cur))) 0)
-        (if (icmp-gt new old) (do (store! (field s total) (iadd (load (field s total)) (isub new old)))
-                                  (mg-site-add s (isub new old) 0) 0) 0)
-        (store! (field s n-resize) (iadd (load (field s n-resize)) 1))
-        (mg-tl-push s (load (field s cur))) 0)))
+        (primitive/store! (primitive/field s cur) (primitive/iadd (primitive/load (primitive/field s cur)) (primitive/isub new old)))
+        (if (primitive/icmp-gt (primitive/load (primitive/field s cur)) (primitive/load (primitive/field s peak))) (primitive/store! (primitive/field s peak) (primitive/load (primitive/field s cur))) 0)
+        (if (primitive/icmp-gt new old) (do (primitive/store! (primitive/field s total) (primitive/iadd (primitive/load (primitive/field s total)) (primitive/isub new old)))
+                                  (mg-site-add s (primitive/isub new old) 0) 0) 0)
+        (primitive/store! (primitive/field s n-resize) (primitive/iadd (primitive/load (primitive/field s n-resize)) 1))
+        (mg-tl-push s (primitive/load (primitive/field s cur))) 0)))
 
 ; site tagging: set the current site (find-or-add by file:line:col), called from user code
 (defn mg-site-find [(s (ptr MgState)) (file (slice u8)) (line i64) (col i64)] (-> i64)
-  (let [n (load (field s n-sites)) (mut i) 0 (mut found) -1]
-    (loop (if (if (icmp-ge (load i) n) true (icmp-ge (load found) 0)) (break)
-      (do (let [sp (index (field s sites) (load i))]
-            (if (and (icmp-eq (load (field sp line)) line)
-                 (and (icmp-eq (load (field sp col)) col) (str-eq (load (field sp file)) file)))
-                (store! found (load i)) 0))
-          (store! i (iadd (load i) 1)))))
-    (load found)))
+  (let [n (primitive/load (primitive/field s n-sites)) (mut i) 0 (mut found) -1]
+    (loop (if (if (primitive/icmp-ge (primitive/load i) n) true (primitive/icmp-ge (primitive/load found) 0)) (break)
+      (do (let [sp (primitive/index (primitive/field s sites) (primitive/load i))]
+            (if (and (primitive/icmp-eq (primitive/load (primitive/field sp line)) line)
+                 (and (primitive/icmp-eq (primitive/load (primitive/field sp col)) col) (str-eq (primitive/load (primitive/field sp file)) file)))
+                (primitive/store! found (primitive/load i)) 0))
+          (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load found)))
 (defn mg-set-site [(typ (slice u8)) (file (slice u8)) (line i64) (col i64)] (-> i64)
   (let [s (mg)]
     (do (mg-init)
         (let [idx (mg-site-find s file line col)]
-          (if (icmp-ge idx 0) (store! (field s cur-site) idx)
-            (let [n (load (field s n-sites))]
-              (if (icmp-lt n 128)
-                  (let [sp (index (field s sites) n)]
-                    (do (store! (field sp typ) typ) (store! (field sp file) file)
-                        (store! (field sp line) line) (store! (field sp col) col)
-                        (store! (field sp count) 0) (store! (field sp bytes) 0)
-                        (store! (field s n-sites) (iadd n 1)) (store! (field s cur-site) n) 0))
-                (store! (field s cur-site) 0)))))     ; table full -> attribute to (unknown)
+          (if (primitive/icmp-ge idx 0) (primitive/store! (primitive/field s cur-site) idx)
+            (let [n (primitive/load (primitive/field s n-sites))]
+              (if (primitive/icmp-lt n 128)
+                  (let [sp (primitive/index (primitive/field s sites) n)]
+                    (do (primitive/store! (primitive/field sp typ) typ) (primitive/store! (primitive/field sp file) file)
+                        (primitive/store! (primitive/field sp line) line) (primitive/store! (primitive/field sp col) col)
+                        (primitive/store! (primitive/field sp count) 0) (primitive/store! (primitive/field sp bytes) 0)
+                        (primitive/store! (primitive/field s n-sites) (primitive/iadd n 1)) (primitive/store! (primitive/field s cur-site) n) 0))
+                (primitive/store! (primitive/field s cur-site) 0)))))     ; table full -> attribute to (unknown)
         0)))
 
 ; ---- live-block table: the actual heap layout (addr+size+site per live allocation) ----
@@ -164,270 +165,270 @@
 ; Address bits 0-3 are always 0 for malloc'd pointers, so mix before masking or every
 ; key lands in the same few buckets.
 (defn mg-hx-slot [(addr i64)] (-> i64)
-  (let [h (ixor addr (ishr addr 20))] (iand (ixor h (ishr h 9)) 262143)))
+  (let [h (primitive/ixor addr (primitive/ishr addr 20))] (primitive/iand (primitive/ixor h (primitive/ishr h 9)) 262143)))
 (defn mg-hx-put! [(s (ptr MgState)) (addr i64) (blkidx i64)] (-> i64)
   (let [(mut i) (mg-hx-slot addr) (mut n) 0]
-    (loop (if (icmp-ge (load n) 262144) (break)     ; cannot happen at <=25% load; a guard, not a path
-      (let [k (load (index (field s hx-key) (load i)))]
-        (if (if (icmp-eq k 0) true (if (icmp-eq k -1) true (icmp-eq k addr)))
-            (do (store! (index (field s hx-key) (load i)) addr)
-                (store! (index (field s hx-val) (load i)) (iadd blkidx 1)) (break))
-          (do (store! i (iand (iadd (load i) 1) 262143)) (store! n (iadd (load n) 1)) 0)))))
+    (loop (if (primitive/icmp-ge (primitive/load n) 262144) (break)     ; cannot happen at <=25% load; a guard, not a path
+      (let [k (primitive/load (primitive/index (primitive/field s hx-key) (primitive/load i)))]
+        (if (if (primitive/icmp-eq k 0) true (if (primitive/icmp-eq k -1) true (primitive/icmp-eq k addr)))
+            (do (primitive/store! (primitive/index (primitive/field s hx-key) (primitive/load i)) addr)
+                (primitive/store! (primitive/index (primitive/field s hx-val) (primitive/load i)) (primitive/iadd blkidx 1)) (break))
+          (do (primitive/store! i (primitive/iand (primitive/iadd (primitive/load i) 1) 262143)) (primitive/store! n (primitive/iadd (primitive/load n) 1)) 0)))))
     0))
 ; the block index for `addr`, or -1. Clears the entry when found: an address is only
 ; ever looked up to retire it, and malloc reuses addresses.
 (defn mg-hx-take! [(s (ptr MgState)) (addr i64)] (-> i64)
   (let [(mut i) (mg-hx-slot addr) (mut n) 0 (mut r) -1]
-    (loop (if (icmp-ge (load n) 262144) (break)
-      (let [k (load (index (field s hx-key) (load i)))]
-        (if (icmp-eq k 0) (break)                    ; empty slot -> the key was never here
-          (if (icmp-eq k addr)
-              (do (store! r (isub (load (index (field s hx-val) (load i))) 1))
-                  (store! (index (field s hx-key) (load i)) -1) (break))
-            (do (store! i (iand (iadd (load i) 1) 262143)) (store! n (iadd (load n) 1)) 0))))))
-    (load r)))
+    (loop (if (primitive/icmp-ge (primitive/load n) 262144) (break)
+      (let [k (primitive/load (primitive/index (primitive/field s hx-key) (primitive/load i)))]
+        (if (primitive/icmp-eq k 0) (break)                    ; empty slot -> the key was never here
+          (if (primitive/icmp-eq k addr)
+              (do (primitive/store! r (primitive/isub (primitive/load (primitive/index (primitive/field s hx-val) (primitive/load i))) 1))
+                  (primitive/store! (primitive/index (primitive/field s hx-key) (primitive/load i)) -1) (break))
+            (do (primitive/store! i (primitive/iand (primitive/iadd (primitive/load i) 1) 262143)) (primitive/store! n (primitive/iadd (primitive/load n) 1)) 0))))))
+    (primitive/load r)))
 (defn mg-track-alloc [(addr i64) (size i64)] (-> i64)
-  (let [s (mg) n (load (field s nblk))]
-    (if (icmp-ge n 65536) (do (store! (field s blk-dropped) (iadd (load (field s blk-dropped)) 1)) 0)
-      (do (store! (index (field s blk-addr) n) addr) (store! (index (field s blk-size) n) size)
-          (store! (index (field s blk-site) n) (load (field s cur-site))) (store! (index (field s blk-live) n) 1)
+  (let [s (mg) n (primitive/load (primitive/field s nblk))]
+    (if (primitive/icmp-ge n 65536) (do (primitive/store! (primitive/field s blk-dropped) (primitive/iadd (primitive/load (primitive/field s blk-dropped)) 1)) 0)
+      (do (primitive/store! (primitive/index (primitive/field s blk-addr) n) addr) (primitive/store! (primitive/index (primitive/field s blk-size) n) size)
+          (primitive/store! (primitive/index (primitive/field s blk-site) n) (primitive/load (primitive/field s cur-site))) (primitive/store! (primitive/index (primitive/field s blk-live) n) 1)
           (mg-hx-put! s addr n)
-          (store! (field s nblk) (iadd n 1)) 0))))
+          (primitive/store! (primitive/field s nblk) (primitive/iadd n 1)) 0))))
 ; Mark the live block at `addr` dead. This used to scan the whole block table, which
 ; made every free and every realloc O(nblk) — on a real workload (the compiler building
 ; itself) that one scan was the bulk of the program's runtime under instrumentation.
 (defn mg-track-free [(addr i64)] (-> i64)
   (let [s (mg) i (mg-hx-take! s addr)]
-    (if (icmp-lt i 0) 0 (do (store! (index (field s blk-live) i) 0) 0))))
+    (if (primitive/icmp-lt i 0) 0 (do (primitive/store! (primitive/index (primitive/field s blk-live) i) 0) 0))))
 (defn mg-track-resize [(oldaddr i64) (newaddr i64) (new i64)] (-> i64)
-  (do (if (icmp-ne oldaddr 0) (mg-track-free oldaddr) 0) (mg-track-alloc newaddr new) 0))
+  (do (if (primitive/icmp-ne oldaddr 0) (mg-track-free oldaddr) 0) (mg-track-alloc newaddr new) 0))
 
 ; ===== tracking allocator ====================================================
 ; while paused, block the WORKER here — the program itself freezes at its next allocation, so
 ; the heap map/stats show a truly frozen live state (not just a frozen display). The render
 ; thread keeps running (separate thread) so SPACE can unpause. ~15ms poll.
 (defn mg-wait-if-paused [] (-> i64)
-  (loop (if (icmp-eq (load (field (mg) paused)) 0) (break) (do (usleep 15000) 0))) 0)
+  (loop (if (primitive/icmp-eq (primitive/load (primitive/field (mg) paused)) 0) (break) (do (usleep 15000) 0))) 0)
 (defn mg-ma-alloc [(ctx (ptr i8)) (size i64) (align i64)] (-> (Option (ptr i8)))
   (do (mg-wait-if-paused)
-    (let [p (malloc (cast isize size))]
-      (if (icmp-eq (cast i64 p) 0) (None) (do (mg-acct-alloc size) (mg-track-alloc (cast i64 p) size) (Some p))))))
+    (let [p (malloc (primitive/cast isize size))]
+      (if (primitive/icmp-eq (primitive/cast i64 p) 0) (None) (do (mg-acct-alloc size) (mg-track-alloc (primitive/cast i64 p) size) (Some p))))))
 (defn mg-ma-resize [(ctx (ptr i8)) (p (ptr i8)) (old i64) (new i64) (align i64)] (-> (Option (ptr i8)))
   (do (mg-wait-if-paused)
-    (let [q (realloc p (cast isize new))]
-      (if (icmp-eq (cast i64 q) 0) (None)
-        (do (if (icmp-eq old 0) (mg-acct-alloc new) (mg-acct-resize old new))
-            (mg-track-resize (if (icmp-eq old 0) 0 (cast i64 p)) (cast i64 q) new)
+    (let [q (realloc p (primitive/cast isize new))]
+      (if (primitive/icmp-eq (primitive/cast i64 q) 0) (None)
+        (do (if (primitive/icmp-eq old 0) (mg-acct-alloc new) (mg-acct-resize old new))
+            (mg-track-resize (if (primitive/icmp-eq old 0) 0 (primitive/cast i64 p)) (primitive/cast i64 q) new)
             (Some q))))))
 (defn mg-ma-free [(ctx (ptr i8)) (p (ptr i8)) (size i64) (align i64)] (-> i64)
-  (do (mg-wait-if-paused) (mg-acct-free size) (mg-track-free (cast i64 p)) (free p) 0))
+  (do (mg-wait-if-paused) (mg-acct-free size) (mg-track-free (primitive/cast i64 p)) (primitive/free p) 0))
 (defn mg-allocator [] (-> (ptr Allocator))
-  (let [a (alloc-static Allocator)]
-    (store! (field a alloc)  (fnptr-of mg-ma-alloc))
-    (store! (field a resize) (fnptr-of mg-ma-resize))
-    (store! (field a free)   (fnptr-of mg-ma-free))
-    (store! (field a ctx)    (cast (ptr i8) 0)) a))
+  (let [a (alloc/static Allocator)]
+    (primitive/store! (primitive/field a alloc)  (primitive/fnptr-of mg-ma-alloc))
+    (primitive/store! (primitive/field a resize) (primitive/fnptr-of mg-ma-resize))
+    (primitive/store! (primitive/field a free)   (primitive/fnptr-of mg-ma-free))
+    (primitive/store! (primitive/field a ctx)    (primitive/cast (ptr i8) 0)) a))
 
 ; ===== GUI ===================================================================
 (const WINW 1100)
 (const WINH 780)
 (defn mg-tl-max [(s (ptr MgState))] (-> i64)
-  (let [n (load (field s tl-count)) (mut i) 0 (mut m) 1]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (let [v (load (index (field s tl) (load i)))] (if (icmp-gt v (load m)) (store! m v) 0)) (store! i (iadd (load i) 1)))))
-    (load m)))
+  (let [n (primitive/load (primitive/field s tl-count)) (mut i) 0 (mut m) 1]
+    (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+      (do (let [v (primitive/load (primitive/index (primitive/field s tl) (primitive/load i)))] (if (primitive/icmp-gt v (primitive/load m)) (primitive/store! m v) 0)) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load m)))
 (defn mg-tl-at [(s (ptr MgState)) (k i64)] (-> i64)          ; logical sample k (0 = oldest)
-  (let [cnt (load (field s tl-count))]
-    (if (icmp-lt cnt 2048) (load (index (field s tl) k))
-      (load (index (field s tl) (irem (iadd (load (field s tl-head)) k) 2048))))))
+  (let [cnt (primitive/load (primitive/field s tl-count))]
+    (if (primitive/icmp-lt cnt 2048) (primitive/load (primitive/index (primitive/field s tl) k))
+      (primitive/load (primitive/index (primitive/field s tl) (primitive/irem (primitive/iadd (primitive/load (primitive/field s tl-head)) k) 2048))))))
 (defn mg-draw-timeline [(s (ptr MgState)) (x0 i64) (y0 i64) (w i64) (h i64)] (-> i64)
-  (let [n (load (field s tl-count)) mx (mg-tl-max s)]
-    (do (DrawRectangleLines (cast i32 x0) (cast i32 y0) (cast i32 w) (cast i32 h) (rgb 70 78 100))
-        (if (icmp-gt n 0)
+  (let [n (primitive/load (primitive/field s tl-count)) mx (mg-tl-max s)]
+    (do (DrawRectangleLines (primitive/cast i32 x0) (primitive/cast i32 y0) (primitive/cast i32 w) (primitive/cast i32 h) (rgb 70 78 100))
+        (if (primitive/icmp-gt n 0)
             (let [(mut px) 0]
-              (loop (if (icmp-ge (load px) w) (break)
-                (do (let [k (idiv (imul (load px) n) w) v (mg-tl-at s k) bh (idiv (imul v h) mx)]
-                      (DrawRectangle (cast i32 (iadd x0 (load px))) (cast i32 (iadd y0 (isub h bh))) 1 (cast i32 bh) (rgb 90 170 250)))
-                    (store! px (iadd (load px) 1)))))) 0)
+              (loop (if (primitive/icmp-ge (primitive/load px) w) (break)
+                (do (let [k (primitive/idiv (primitive/imul (primitive/load px) n) w) v (mg-tl-at s k) bh (primitive/idiv (primitive/imul v h) mx)]
+                      (DrawRectangle (primitive/cast i32 (primitive/iadd x0 (primitive/load px))) (primitive/cast i32 (primitive/iadd y0 (primitive/isub h bh))) 1 (primitive/cast i32 bh) (rgb 90 170 250)))
+                    (primitive/store! px (primitive/iadd (primitive/load px) 1)))))) 0)
         0)))
 (defn mg-basename [(s (slice u8))] (-> (slice u8))
-  (let [n (slice-len s) (mut i) (isub n 1) (mut at) -1]
-    (loop (if (icmp-lt (load i) 0) (break)
-      (do (if (icmp-eq (cast i64 (slice-get s (load i))) 47) (do (store! at (load i)) (break)) 0) (store! i (isub (load i) 1)))))
-    (if (icmp-lt (load at) 0) s (subslice s (iadd (load at) 1) n))))
+  (let [n (slice-len s) (mut i) (primitive/isub n 1) (mut at) -1]
+    (loop (if (primitive/icmp-lt (primitive/load i) 0) (break)
+      (do (if (primitive/icmp-eq (primitive/cast i64 (slice-get s (primitive/load i))) 47) (do (primitive/store! at (primitive/load i)) (break)) 0) (primitive/store! i (primitive/isub (primitive/load i) 1)))))
+    (if (primitive/icmp-lt (primitive/load at) 0) s (subslice s (primitive/iadd (primitive/load at) 1) n))))
 
 ; ---- a categorical palette; each type gets a stable color by hashing its label ----
 (defn mg-palette [(k i64)] (-> RLColor)
-  (if (icmp-eq k 0) (rgb 90 170 250) (if (icmp-eq k 1) (rgb 250 170 90)
-   (if (icmp-eq k 2) (rgb 120 210 130) (if (icmp-eq k 3) (rgb 230 120 200)
-   (if (icmp-eq k 4) (rgb 240 220 100) (if (icmp-eq k 5) (rgb 150 140 250)
-   (if (icmp-eq k 6) (rgb 100 210 210) (if (icmp-eq k 7) (rgb 250 130 120)
-   (if (icmp-eq k 8) (rgb 180 200 120) (if (icmp-eq k 9) (rgb 210 150 230)
-   (if (icmp-eq k 10) (rgb 130 190 240) (rgb 240 180 140)))))))))))))
+  (if (primitive/icmp-eq k 0) (rgb 90 170 250) (if (primitive/icmp-eq k 1) (rgb 250 170 90)
+   (if (primitive/icmp-eq k 2) (rgb 120 210 130) (if (primitive/icmp-eq k 3) (rgb 230 120 200)
+   (if (primitive/icmp-eq k 4) (rgb 240 220 100) (if (primitive/icmp-eq k 5) (rgb 150 140 250)
+   (if (primitive/icmp-eq k 6) (rgb 100 210 210) (if (primitive/icmp-eq k 7) (rgb 250 130 120)
+   (if (primitive/icmp-eq k 8) (rgb 180 200 120) (if (primitive/icmp-eq k 9) (rgb 210 150 230)
+   (if (primitive/icmp-eq k 10) (rgb 130 190 240) (rgb 240 180 140)))))))))))))
 (defn mg-type-color [(typ (slice u8))] (-> RLColor)
-  (let [h (str-hash typ)] (mg-palette (irem (if (icmp-lt h 0) (isub 0 h) h) 12))))
+  (let [h (str-hash typ)] (mg-palette (primitive/irem (if (primitive/icmp-lt h 0) (primitive/isub 0 h) h) 12))))
 
 ; ---- display snapshot (frozen while paused) + sort sites by bytes, descending ----
-(defn mg-vbytes [(s (ptr MgState)) (i i64)] (-> i64) (load (field (index (field s vsites) i) bytes)))
+(defn mg-vbytes [(s (ptr MgState)) (i i64)] (-> i64) (primitive/load (primitive/field (primitive/index (primitive/field s vsites) i) bytes)))
 (defn mg-sort-order [(s (ptr MgState)) (n i64)] (-> i64)
   (let [(mut i) 0]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (let [(mut j) (iadd (load i) 1) (mut best) (load i)]
-            (loop (if (icmp-ge (load j) n) (break)
-              (do (if (icmp-gt (mg-vbytes s (load (index (field s vorder) (load j))))
-                              (mg-vbytes s (load (index (field s vorder) (load best))))) (store! best (load j)) 0)
-                  (store! j (iadd (load j) 1)))))
-            (let [tmp (load (index (field s vorder) (load i)))]
-              (store! (index (field s vorder) (load i)) (load (index (field s vorder) (load best))))
-              (store! (index (field s vorder) (load best)) tmp) 0))
-          (store! i (iadd (load i) 1)))))
+    (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+      (do (let [(mut j) (primitive/iadd (primitive/load i) 1) (mut best) (primitive/load i)]
+            (loop (if (primitive/icmp-ge (primitive/load j) n) (break)
+              (do (if (primitive/icmp-gt (mg-vbytes s (primitive/load (primitive/index (primitive/field s vorder) (primitive/load j))))
+                              (mg-vbytes s (primitive/load (primitive/index (primitive/field s vorder) (primitive/load best))))) (primitive/store! best (primitive/load j)) 0)
+                  (primitive/store! j (primitive/iadd (primitive/load j) 1)))))
+            (let [tmp (primitive/load (primitive/index (primitive/field s vorder) (primitive/load i)))]
+              (primitive/store! (primitive/index (primitive/field s vorder) (primitive/load i)) (primitive/load (primitive/index (primitive/field s vorder) (primitive/load best))))
+              (primitive/store! (primitive/index (primitive/field s vorder) (primitive/load best)) tmp) 0))
+          (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
     0))
 (defn mg-snapshot [(s (ptr MgState))] (-> i64)
-  (do (store! (field s vcur) (load (field s cur))) (store! (field s vpeak) (load (field s peak)))
-      (store! (field s vtotal) (load (field s total))) (store! (field s valloc) (load (field s n-alloc)))
-      (store! (field s vfree) (load (field s n-free))) (store! (field s vresize) (load (field s n-resize)))
-      (store! (field s vlive) (load (field s n-live)))
-      (let [n (load (field s n-sites))]
-        (store! (field s vn) n)
-        (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break)
-          (do (store! (index (field s vsites) (load i)) (load (index (field s sites) (load i))))
-              (store! (index (field s vorder) (load i)) (load i)) (store! i (iadd (load i) 1))))))
+  (do (primitive/store! (primitive/field s vcur) (primitive/load (primitive/field s cur))) (primitive/store! (primitive/field s vpeak) (primitive/load (primitive/field s peak)))
+      (primitive/store! (primitive/field s vtotal) (primitive/load (primitive/field s total))) (primitive/store! (primitive/field s valloc) (primitive/load (primitive/field s n-alloc)))
+      (primitive/store! (primitive/field s vfree) (primitive/load (primitive/field s n-free))) (primitive/store! (primitive/field s vresize) (primitive/load (primitive/field s n-resize)))
+      (primitive/store! (primitive/field s vlive) (primitive/load (primitive/field s n-live)))
+      (let [n (primitive/load (primitive/field s n-sites))]
+        (primitive/store! (primitive/field s vn) n)
+        (let [(mut i) 0] (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+          (do (primitive/store! (primitive/index (primitive/field s vsites) (primitive/load i)) (primitive/load (primitive/index (primitive/field s sites) (primitive/load i))))
+              (primitive/store! (primitive/index (primitive/field s vorder) (primitive/load i)) (primitive/load i)) (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
         (mg-sort-order s n)) 0))
 
 (const BARX 24)
 (const BARY 356)
 (const BARROW 30)
-(defn mg-nbars [] (-> i64) (idiv (isub (isub WINH BARY) 12) BARROW))
+(defn mg-nbars [] (-> i64) (primitive/idiv (primitive/isub (primitive/isub WINH BARY) 12) BARROW))
 (defn in-rect? [(mx i64) (my i64) (x i64) (y i64) (w i64) (h i64)] (-> bool)
-  (and (and (icmp-ge mx x) (icmp-le mx (iadd x w))) (and (icmp-ge my y) (icmp-le my (iadd y h)))))
+  (and (and (primitive/icmp-ge mx x) (primitive/icmp-le mx (primitive/iadd x w))) (and (primitive/icmp-ge my y) (primitive/icmp-le my (primitive/iadd y h)))))
 ; draw sorted, type-colored bars (length = bytes); return the site index under the mouse, or -1
 (defn mg-draw-bars [(s (ptr MgState)) (mx i64) (my i64)] (-> i64)
-  (let [n (load (field s vn)) barw (isub WINW (imul BARX 2)) (mut i) 0 (mut row) 0 (mut hov) -1
-        maxb (if (icmp-gt n 0) (mg-vbytes s (load (index (field s vorder) 0))) 1)
-        buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf)]
-    (do (loop (if (if (icmp-ge (load i) n) true (icmp-ge (load row) (mg-nbars))) (break)
-          (do (let [si (load (index (field s vorder) (load i))) sp (index (field s vsites) si)
-                    b (load (field sp bytes)) y (iadd BARY (imul (load row) BARROW))]
-                (if (icmp-gt b 0)
-                    (let [w (iadd 3 (idiv (imul b (isub barw 3)) (if (icmp-gt maxb 0) maxb 1)))
-                          hovered (in-rect? mx my BARX y barw (isub BARROW 6))
-                          bn (mg-basename (load (field sp file)))]
-                      (do (DrawRectangle (cast i32 BARX) (cast i32 y) (cast i32 w) (cast i32 (isub BARROW 6)) (mg-type-color (load (field sp typ))))
-                          (if hovered (do (DrawRectangleLines (cast i32 BARX) (cast i32 y) (cast i32 barw) (cast i32 (isub BARROW 6)) (rgb 255 255 255)) (store! hov si) 0) 0)
+  (let [n (primitive/load (primitive/field s vn)) barw (primitive/isub WINW (primitive/imul BARX 2)) (mut i) 0 (mut row) 0 (mut hov) -1
+        maxb (if (primitive/icmp-gt n 0) (mg-vbytes s (primitive/load (primitive/index (primitive/field s vorder) 0))) 1)
+        buf (alloc/stack (array i8 256)) p (primitive/cast (ptr i8) buf)]
+    (do (loop (if (if (primitive/icmp-ge (primitive/load i) n) true (primitive/icmp-ge (primitive/load row) (mg-nbars))) (break)
+          (do (let [si (primitive/load (primitive/index (primitive/field s vorder) (primitive/load i))) sp (primitive/index (primitive/field s vsites) si)
+                    b (primitive/load (primitive/field sp bytes)) y (primitive/iadd BARY (primitive/imul (primitive/load row) BARROW))]
+                (if (primitive/icmp-gt b 0)
+                    (let [w (primitive/iadd 3 (primitive/idiv (primitive/imul b (primitive/isub barw 3)) (if (primitive/icmp-gt maxb 0) maxb 1)))
+                          hovered (in-rect? mx my BARX y barw (primitive/isub BARROW 6))
+                          bn (mg-basename (primitive/load (primitive/field sp file)))]
+                      (do (DrawRectangle (primitive/cast i32 BARX) (primitive/cast i32 y) (primitive/cast i32 w) (primitive/cast i32 (primitive/isub BARROW 6)) (mg-type-color (primitive/load (primitive/field sp typ))))
+                          (if hovered (do (DrawRectangleLines (primitive/cast i32 BARX) (primitive/cast i32 y) (primitive/cast i32 barw) (primitive/cast i32 (primitive/isub BARROW 6)) (rgb 255 255 255)) (primitive/store! hov si) 0) 0)
                           (snprintf p 256 c"%.*s  %.*s:%ld:%ld   x%ld   %ld B"
-                            (cast i32 (slice-len (load (field sp typ)))) (cast (ptr i8) (slice-data (load (field sp typ))))
-                            (cast i32 (slice-len bn)) (cast (ptr i8) (slice-data bn))
-                            (load (field sp line)) (load (field sp col)) (load (field sp count)) b)
-                          (DrawText p (cast i32 (iadd BARX 6)) (cast i32 (iadd y 3)) 16 (rgb 20 22 30))
-                          (store! row (iadd (load row) 1)) 0))
+                            (primitive/cast i32 (slice-len (primitive/load (primitive/field sp typ)))) (primitive/cast (ptr i8) (slice-data (primitive/load (primitive/field sp typ))))
+                            (primitive/cast i32 (slice-len bn)) (primitive/cast (ptr i8) (slice-data bn))
+                            (primitive/load (primitive/field sp line)) (primitive/load (primitive/field sp col)) (primitive/load (primitive/field sp count)) b)
+                          (DrawText p (primitive/cast i32 (primitive/iadd BARX 6)) (primitive/cast i32 (primitive/iadd y 3)) 16 (rgb 20 22 30))
+                          (primitive/store! row (primitive/iadd (primitive/load row) 1)) 0))
                   0))
-              (store! i (iadd (load i) 1)))))
-        (load hov))))
+              (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+        (primitive/load hov))))
 ; tooltip for the hovered site
 (defn mg-tooltip [(s (ptr MgState)) (si i64) (mx i64) (my i64)] (-> i64)
-  (let [sp (index (field s vsites) si) buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf)
-        tot (load (field s vtotal)) bx (iadd mx 16) by my]
-    (do (DrawRectangle (cast i32 bx) (cast i32 by) 360 96 (rgb 12 14 20))
-        (DrawRectangleLines (cast i32 bx) (cast i32 by) 360 96 (mg-type-color (load (field sp typ))))
-        (snprintf p 256 c"type: %.*s" (cast i32 (slice-len (load (field sp typ)))) (cast (ptr i8) (slice-data (load (field sp typ)))))
-        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 8)) 16 (rgb 235 238 245))
-        (snprintf p 256 c"at:   %.*s:%ld:%ld" (cast i32 (slice-len (load (field sp file)))) (cast (ptr i8) (slice-data (load (field sp file)))) (load (field sp line)) (load (field sp col)))
-        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 30)) 16 (rgb 200 210 225))
-        (snprintf p 256 c"allocs: %ld    bytes: %ld" (load (field sp count)) (load (field sp bytes)))
-        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 52)) 16 (rgb 200 210 225))
-        (snprintf p 256 c"%ld%% of total bytes" (if (icmp-gt tot 0) (idiv (imul (load (field sp bytes)) 100) tot) 0))
-        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 74)) 16 (rgb 150 158 175)) 0)))
+  (let [sp (primitive/index (primitive/field s vsites) si) buf (alloc/stack (array i8 256)) p (primitive/cast (ptr i8) buf)
+        tot (primitive/load (primitive/field s vtotal)) bx (primitive/iadd mx 16) by my]
+    (do (DrawRectangle (primitive/cast i32 bx) (primitive/cast i32 by) 360 96 (rgb 12 14 20))
+        (DrawRectangleLines (primitive/cast i32 bx) (primitive/cast i32 by) 360 96 (mg-type-color (primitive/load (primitive/field sp typ))))
+        (snprintf p 256 c"type: %.*s" (primitive/cast i32 (slice-len (primitive/load (primitive/field sp typ)))) (primitive/cast (ptr i8) (slice-data (primitive/load (primitive/field sp typ)))))
+        (DrawText p (primitive/cast i32 (primitive/iadd bx 8)) (primitive/cast i32 (primitive/iadd by 8)) 16 (rgb 235 238 245))
+        (snprintf p 256 c"at:   %.*s:%ld:%ld" (primitive/cast i32 (slice-len (primitive/load (primitive/field sp file)))) (primitive/cast (ptr i8) (slice-data (primitive/load (primitive/field sp file)))) (primitive/load (primitive/field sp line)) (primitive/load (primitive/field sp col)))
+        (DrawText p (primitive/cast i32 (primitive/iadd bx 8)) (primitive/cast i32 (primitive/iadd by 30)) 16 (rgb 200 210 225))
+        (snprintf p 256 c"allocs: %ld    bytes: %ld" (primitive/load (primitive/field sp count)) (primitive/load (primitive/field sp bytes)))
+        (DrawText p (primitive/cast i32 (primitive/iadd bx 8)) (primitive/cast i32 (primitive/iadd by 52)) 16 (rgb 200 210 225))
+        (snprintf p 256 c"%ld%% of total bytes" (if (primitive/icmp-gt tot 0) (primitive/idiv (primitive/imul (primitive/load (primitive/field sp bytes)) 100) tot) 0))
+        (DrawText p (primitive/cast i32 (primitive/iadd bx 8)) (primitive/cast i32 (primitive/iadd by 74)) 16 (rgb 150 158 175)) 0)))
 ; ---- the REAL heap map: one strip, each live block placed by its address ----
 (defn mg-live-count [(s (ptr MgState))] (-> i64)
-  (let [n (load (field s nblk)) (mut i) 0 (mut c) 0]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (if (icmp-ne (load (index (field s blk-live) (load i))) 0) (store! c (iadd (load c) 1)) 0) (store! i (iadd (load i) 1))))) (load c)))
+  (let [n (primitive/load (primitive/field s nblk)) (mut i) 0 (mut c) 0]
+    (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+      (do (if (primitive/icmp-ne (primitive/load (primitive/index (primitive/field s blk-live) (primitive/load i))) 0) (primitive/store! c (primitive/iadd (primitive/load c) 1)) 0) (primitive/store! i (primitive/iadd (primitive/load i) 1))))) (primitive/load c)))
 ; Heap map as an address DENSITY strip: split [min,max) into `w` columns; each column's height
 ; = how full that address region is (bytes allocated / bytes the column spans), colored by the
 ; type that dominates it. Tall/bright = packed with objects; short/empty = free/other space.
 ; O(live blocks) per frame, no sort — scales from hundreds to millions of blocks.
 (defn mg-draw-heap [(s (ptr MgState)) (mx i64) (my i64) (x0 i64) (y0 i64) (w i64) (h i64)] (-> i64)
-  (let [n (load (field s nblk)) (mut mn) -1 (mut mxa) 0 (mut hov) -1]
+  (let [n (primitive/load (primitive/field s nblk)) (mut mn) -1 (mut mxa) 0 (mut hov) -1]
     ; pass 1: address extent over live blocks
     (for [i 0 n]
-      (if (icmp-ne (load (index (field s blk-live) i)) 0)
-          (let [a (load (index (field s blk-addr) i)) e (iadd a (load (index (field s blk-size) i)))]
-            (do (if (or (icmp-lt (load mn) 0) (icmp-lt a (load mn))) (store! mn a) 0)
-                (if (icmp-gt e (load mxa)) (store! mxa e) 0)))
+      (if (primitive/icmp-ne (primitive/load (primitive/index (primitive/field s blk-live) i)) 0)
+          (let [a (primitive/load (primitive/index (primitive/field s blk-addr) i)) e (primitive/iadd a (primitive/load (primitive/index (primitive/field s blk-size) i)))]
+            (do (if (or (primitive/icmp-lt (primitive/load mn) 0) (primitive/icmp-lt a (primitive/load mn))) (primitive/store! mn a) 0)
+                (if (primitive/icmp-gt e (primitive/load mxa)) (primitive/store! mxa e) 0)))
         0))
-    (for [c 0 w] (do (store! (index (field s bk-bytes) c) 0) (store! (index (field s bk-max) c) 0)))
-    (let [span (if (icmp-gt (load mxa) (load mn)) (isub (load mxa) (load mn)) 1)
-          colspan (let [q (idiv (if (icmp-gt (load mxa) (load mn)) (isub (load mxa) (load mn)) 1) w)] (if (icmp-lt q 1) 1 q))]
-      (store! (field s hmin) (load mn))
-      (store! (field s hcolspan) colspan)
+    (for [c 0 w] (do (primitive/store! (primitive/index (primitive/field s bk-bytes) c) 0) (primitive/store! (primitive/index (primitive/field s bk-max) c) 0)))
+    (let [span (if (primitive/icmp-gt (primitive/load mxa) (primitive/load mn)) (primitive/isub (primitive/load mxa) (primitive/load mn)) 1)
+          colspan (let [q (primitive/idiv (if (primitive/icmp-gt (primitive/load mxa) (primitive/load mn)) (primitive/isub (primitive/load mxa) (primitive/load mn)) 1) w)] (if (primitive/icmp-lt q 1) 1 q))]
+      (primitive/store! (primitive/field s hmin) (primitive/load mn))
+      (primitive/store! (primitive/field s hcolspan) colspan)
       ; pass 2: bin each live block into its address columns
       (for [j 0 n]
-        (if (icmp-ne (load (index (field s blk-live) j)) 0)
-            (let [a (load (index (field s blk-addr) j)) sz (load (index (field s blk-size) j))
-                  sc0 (idiv (imul (isub a (load mn)) w) span)
-                  ec0 (idiv (imul (isub (iadd a (isub sz 1)) (load mn)) w) span)
-                  sc (if (icmp-lt sc0 0) 0 (if (icmp-ge sc0 w) (isub w 1) sc0))
-                  ec (if (icmp-lt ec0 0) 0 (if (icmp-ge ec0 w) (isub w 1) ec0))
-                  ncols (iadd (isub ec sc) 1) per (idiv sz ncols) site (load (index (field s blk-site) j))]
-              (for [c sc (iadd ec 1)]
-                (do (store! (index (field s bk-bytes) c) (iadd (load (index (field s bk-bytes) c)) per))
-                    (if (icmp-gt per (load (index (field s bk-max) c)))
-                        (do (store! (index (field s bk-max) c) per) (store! (index (field s bk-site) c) site))
+        (if (primitive/icmp-ne (primitive/load (primitive/index (primitive/field s blk-live) j)) 0)
+            (let [a (primitive/load (primitive/index (primitive/field s blk-addr) j)) sz (primitive/load (primitive/index (primitive/field s blk-size) j))
+                  sc0 (primitive/idiv (primitive/imul (primitive/isub a (primitive/load mn)) w) span)
+                  ec0 (primitive/idiv (primitive/imul (primitive/isub (primitive/iadd a (primitive/isub sz 1)) (primitive/load mn)) w) span)
+                  sc (if (primitive/icmp-lt sc0 0) 0 (if (primitive/icmp-ge sc0 w) (primitive/isub w 1) sc0))
+                  ec (if (primitive/icmp-lt ec0 0) 0 (if (primitive/icmp-ge ec0 w) (primitive/isub w 1) ec0))
+                  ncols (primitive/iadd (primitive/isub ec sc) 1) per (primitive/idiv sz ncols) site (primitive/load (primitive/index (primitive/field s blk-site) j))]
+              (for [c sc (primitive/iadd ec 1)]
+                (do (primitive/store! (primitive/index (primitive/field s bk-bytes) c) (primitive/iadd (primitive/load (primitive/index (primitive/field s bk-bytes) c)) per))
+                    (if (primitive/icmp-gt per (primitive/load (primitive/index (primitive/field s bk-max) c)))
+                        (do (primitive/store! (primitive/index (primitive/field s bk-max) c) per) (primitive/store! (primitive/index (primitive/field s bk-site) c) site))
                       0))))
           0))
-      (DrawRectangle (cast i32 x0) (cast i32 y0) (cast i32 w) (cast i32 h) (rgb 16 18 24))
-      (DrawRectangleLines (cast i32 x0) (cast i32 y0) (cast i32 w) (cast i32 h) (rgb 70 78 100))
+      (DrawRectangle (primitive/cast i32 x0) (primitive/cast i32 y0) (primitive/cast i32 w) (primitive/cast i32 h) (rgb 16 18 24))
+      (DrawRectangleLines (primitive/cast i32 x0) (primitive/cast i32 y0) (primitive/cast i32 w) (primitive/cast i32 h) (rgb 70 78 100))
       ; draw one vertical bar per column, height = occupancy, color = dominant type
       (for [c 0 w]
-        (let [b (load (index (field s bk-bytes) c))]
-          (if (icmp-gt b 0)
-              (let [occ (let [o (idiv (imul b h) colspan)] (if (icmp-gt o h) h (if (icmp-lt o 2) 2 o)))]
-                (do (DrawRectangle (cast i32 (iadd x0 c)) (cast i32 (isub (iadd y0 h) occ)) 1 (cast i32 occ)
-                      (mg-type-color (load (field (index (field s sites) (load (index (field s bk-site) c))) typ))))
-                    (if (in-rect? mx my (iadd x0 c) y0 1 h) (store! hov c) 0)))
+        (let [b (primitive/load (primitive/index (primitive/field s bk-bytes) c))]
+          (if (primitive/icmp-gt b 0)
+              (let [occ (let [o (primitive/idiv (primitive/imul b h) colspan)] (if (primitive/icmp-gt o h) h (if (primitive/icmp-lt o 2) 2 o)))]
+                (do (DrawRectangle (primitive/cast i32 (primitive/iadd x0 c)) (primitive/cast i32 (primitive/isub (primitive/iadd y0 h) occ)) 1 (primitive/cast i32 occ)
+                      (mg-type-color (primitive/load (primitive/field (primitive/index (primitive/field s sites) (primitive/load (primitive/index (primitive/field s bk-site) c))) typ))))
+                    (if (in-rect? mx my (primitive/iadd x0 c) y0 1 h) (primitive/store! hov c) 0)))
             0))))
-    (load hov)))
+    (primitive/load hov)))
 (defn mg-heap-tooltip [(s (ptr MgState)) (col i64) (mx i64) (my i64)] (-> i64)
-  (let [a0 (iadd (load (field s hmin)) (imul col (load (field s hcolspan)))) b (load (index (field s bk-bytes) col))
-        sp (index (field s sites) (load (index (field s bk-site) col)))
-        buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf) bx (isub mx 380) by my]
-    (do (DrawRectangle (cast i32 bx) (cast i32 by) 372 96 (rgb 12 14 20))
-        (DrawRectangleLines (cast i32 bx) (cast i32 by) 372 96 (mg-type-color (load (field sp typ))))
-        (snprintf p 256 c"addr ~0x%lx  (+%ld B window)" a0 (load (field s hcolspan)))
-        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 8)) 16 (rgb 235 238 245))
+  (let [a0 (primitive/iadd (primitive/load (primitive/field s hmin)) (primitive/imul col (primitive/load (primitive/field s hcolspan)))) b (primitive/load (primitive/index (primitive/field s bk-bytes) col))
+        sp (primitive/index (primitive/field s sites) (primitive/load (primitive/index (primitive/field s bk-site) col)))
+        buf (alloc/stack (array i8 256)) p (primitive/cast (ptr i8) buf) bx (primitive/isub mx 380) by my]
+    (do (DrawRectangle (primitive/cast i32 bx) (primitive/cast i32 by) 372 96 (rgb 12 14 20))
+        (DrawRectangleLines (primitive/cast i32 bx) (primitive/cast i32 by) 372 96 (mg-type-color (primitive/load (primitive/field sp typ))))
+        (snprintf p 256 c"addr ~0x%lx  (+%ld B window)" a0 (primitive/load (primitive/field s hcolspan)))
+        (DrawText p (primitive/cast i32 (primitive/iadd bx 8)) (primitive/cast i32 (primitive/iadd by 8)) 16 (rgb 235 238 245))
         (snprintf p 256 c"allocated here: %ld B" b)
-        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 30)) 16 (rgb 200 210 225))
-        (snprintf p 256 c"mostly %.*s" (cast i32 (slice-len (load (field sp typ)))) (cast (ptr i8) (slice-data (load (field sp typ)))))
-        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 52)) 16 (rgb 200 210 225))
-        (snprintf p 256 c"at %.*s:%ld:%ld" (cast i32 (slice-len (load (field sp file)))) (cast (ptr i8) (slice-data (load (field sp file)))) (load (field sp line)) (load (field sp col)))
-        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 74)) 16 (rgb 150 158 175)) 0)))
+        (DrawText p (primitive/cast i32 (primitive/iadd bx 8)) (primitive/cast i32 (primitive/iadd by 30)) 16 (rgb 200 210 225))
+        (snprintf p 256 c"mostly %.*s" (primitive/cast i32 (slice-len (primitive/load (primitive/field sp typ)))) (primitive/cast (ptr i8) (slice-data (primitive/load (primitive/field sp typ)))))
+        (DrawText p (primitive/cast i32 (primitive/iadd bx 8)) (primitive/cast i32 (primitive/iadd by 52)) 16 (rgb 200 210 225))
+        (snprintf p 256 c"at %.*s:%ld:%ld" (primitive/cast i32 (slice-len (primitive/load (primitive/field sp file)))) (primitive/cast (ptr i8) (slice-data (primitive/load (primitive/field sp file)))) (primitive/load (primitive/field sp line)) (primitive/load (primitive/field sp col)))
+        (DrawText p (primitive/cast i32 (primitive/iadd bx 8)) (primitive/cast i32 (primitive/iadd by 74)) 16 (rgb 150 158 175)) 0)))
 (defn mg-render [(s (ptr MgState)) (mx i64) (my i64) (paused i64)] (-> i64)
-  (let [buf (alloc-stack (array i8 220)) p (cast (ptr i8) buf) fg (rgb 235 238 245) dim (rgb 150 158 175)]
+  (let [buf (alloc/stack (array i8 220)) p (primitive/cast (ptr i8) buf) fg (rgb 235 238 245) dim (rgb 150 158 175)]
     (do (ClearBackground (rgb 24 26 34))
-        (DrawText (if (icmp-ne paused 0) c"coil memory inspector  [PAUSED]"
-                    (if (icmp-ne (load (field s worker-done)) 0) c"coil memory inspector  (finished)" c"coil memory inspector  (running)")) 24 16 26 fg)
+        (DrawText (if (primitive/icmp-ne paused 0) c"coil memory inspector  [PAUSED]"
+                    (if (primitive/icmp-ne (primitive/load (primitive/field s worker-done)) 0) c"coil memory inspector  (finished)" c"coil memory inspector  (running)")) 24 16 26 fg)
         (DrawText c"SPACE pause    hover a block or bar for details" 470 22 16 dim)
-        (snprintf p 220 c"current: %ld B    peak: %ld B    total: %ld B" (load (field s vcur)) (load (field s vpeak)) (load (field s vtotal)))
+        (snprintf p 220 c"current: %ld B    peak: %ld B    total: %ld B" (primitive/load (primitive/field s vcur)) (primitive/load (primitive/field s vpeak)) (primitive/load (primitive/field s vtotal)))
         (DrawText p 24 54 20 fg)
-        (snprintf p 220 c"allocs: %ld   frees: %ld   resizes: %ld   outstanding: %ld" (load (field s valloc)) (load (field s vfree)) (load (field s vresize)) (load (field s vlive)))
+        (snprintf p 220 c"allocs: %ld   frees: %ld   resizes: %ld   outstanding: %ld" (primitive/load (primitive/field s valloc)) (primitive/load (primitive/field s vfree)) (primitive/load (primitive/field s vresize)) (primitive/load (primitive/field s vlive)))
         (DrawText p 24 80 20 dim)
         (DrawText c"heap map  (each block placed by address; dark = free/other space)" 24 114 18 fg)
-        (snprintf p 220 c"live blocks: %ld   dropped(cap): %ld   used: %ld B" (mg-live-count s) (load (field s blk-dropped)) (load (field s cur)))
+        (snprintf p 220 c"live blocks: %ld   dropped(cap): %ld   used: %ld B" (mg-live-count s) (primitive/load (primitive/field s blk-dropped)) (primitive/load (primitive/field s cur)))
         (DrawText p 24 322 16 dim)
         (DrawText c"allocation by site  (bar length = bytes, color = type, sorted)" 24 332 18 fg)
-        (let [hh (mg-draw-heap s mx my 24 138 (isub WINW 48) 170)
+        (let [hh (mg-draw-heap s mx my 24 138 (primitive/isub WINW 48) 170)
               bh (mg-draw-bars s mx my)]
-          (if (icmp-ge hh 0) (mg-heap-tooltip s hh mx my)
-            (if (icmp-ge bh 0) (mg-tooltip s bh mx my) 0)))
+          (if (primitive/icmp-ge hh 0) (mg-heap-tooltip s hh mx my)
+            (if (primitive/icmp-ge bh 0) (mg-tooltip s bh mx my) 0)))
         0)))
 
 ; ===== worker result plumbing + the live loop ================================
-(defn mg-set-result [(r i64)] (-> i64) (do (store! (field (mg) result) r) 0))
-(defn mg-set-done [] (-> i64) (do (store! (field (mg) worker-done) 1) 0))
-(defn mg-result [] (-> i64) (load (field (mg) result)))
-(defn mg-thread [] (-> (ptr Thread)) (alloc-static Thread))
+(defn mg-set-result [(r i64)] (-> i64) (do (primitive/store! (primitive/field (mg) result) r) 0))
+(defn mg-set-done [] (-> i64) (do (primitive/store! (primitive/field (mg) worker-done) 1) 0))
+(defn mg-result [] (-> i64) (primitive/load (primitive/field (mg) result)))
+(defn mg-thread [] (-> (ptr Thread)) (alloc/static Thread))
 (defn mg-autoclose-frames [] (-> i64)
-  (if (icmp-eq (cast i64 (getenv c"MEMGUI_AUTOCLOSE")) 0) 0 90))
+  (if (primitive/icmp-eq (primitive/cast i64 (getenv c"MEMGUI_AUTOCLOSE")) 0) 0 90))
 ; the render loop, on the MAIN thread, while the worker runs. SPACE toggles the SHARED `paused`
 ; flag, which the worker blocks on at its next allocation (mg-wait-if-paused) — so the program
 ; itself freezes and the map shows a truly frozen live state. On exit we clear paused so the
@@ -435,16 +436,16 @@
 (defn mg-loop [] (-> i64)
   (let [s (mg) cap (mg-autoclose-frames) (mut frames) 0]
     (do (mg-snapshot s)
-        (loop (if (if (WindowShouldClose) true (if (icmp-gt cap 0) (icmp-ge (load frames) cap) false)) (break)
-          (do (if (IsKeyPressed 32) (store! (field s paused) (isub 1 (load (field s paused)))) 0)
+        (loop (if (if (WindowShouldClose) true (if (primitive/icmp-gt cap 0) (primitive/icmp-ge (primitive/load frames) cap) false)) (break)
+          (do (if (IsKeyPressed 32) (primitive/store! (primitive/field s paused) (primitive/isub 1 (primitive/load (primitive/field s paused)))) 0)
               (mg-snapshot s)   ; worker is frozen while paused, so the snapshot is naturally stable
               ; autoclose (headless test): force a hover over the top bar so the shot shows a tooltip
-              (let [mx (if (icmp-gt cap 0) (iadd BARX (idiv (isub WINW 48) 2)) (cast i64 (GetMouseX)))
-                    my (if (icmp-gt cap 0) 210 (cast i64 (GetMouseY)))]
-                (do (BeginDrawing) (mg-render s mx my (load (field s paused))) (EndDrawing) 0))
-              (if (and (icmp-gt cap 0) (icmp-eq (load frames) 80)) (do (TakeScreenshot c"memgui.png") 0) 0)
-              (store! frames (iadd (load frames) 1)))))
-        (store! (field s paused) 0)   ; unblock the worker before joining
+              (let [mx (if (primitive/icmp-gt cap 0) (primitive/iadd BARX (primitive/idiv (primitive/isub WINW 48) 2)) (primitive/cast i64 (GetMouseX)))
+                    my (if (primitive/icmp-gt cap 0) 210 (primitive/cast i64 (GetMouseY)))]
+                (do (BeginDrawing) (mg-render s mx my (primitive/load (primitive/field s paused))) (EndDrawing) 0))
+              (if (and (primitive/icmp-gt cap 0) (primitive/icmp-eq (primitive/load frames) 80)) (do (TakeScreenshot c"memgui.png") 0) 0)
+              (primitive/store! frames (primitive/iadd (primitive/load frames) 1)))))
+        (primitive/store! (primitive/field s paused) 0)   ; unblock the worker before joining
         0)))
 
 ; ===== the transform =========================================================
@@ -453,19 +454,19 @@
 ; `al-new` -> `arraylist.al-new`); bare `code-eq` would then fail to recognize an already-
 ; tagged call and re-tag it forever. Simple-name matching is stable across rounds.
 (defn mg-simple [(s (slice u8))] (-> (slice u8))
-  (let [n (slice-len s) (mut i) (isub n 1) (mut at) -1]
-    (loop (if (icmp-lt (load i) 0) (break)
-      (do (if (icmp-eq (cast i64 (slice-get s (load i))) 46) (do (store! at (load i)) (break)) 0) (store! i (isub (load i) 1)))))
-    (if (icmp-lt (load at) 0) s (subslice s (iadd (load at) 1) n))))
+  (let [n (slice-len s) (mut i) (primitive/isub n 1) (mut at) -1]
+    (loop (if (primitive/icmp-lt (primitive/load i) 0) (break)
+      (do (if (primitive/icmp-eq (primitive/cast i64 (slice-get s (primitive/load i))) 46) (do (primitive/store! at (primitive/load i)) (break)) 0) (primitive/store! i (primitive/isub (primitive/load i) 1)))))
+    (if (primitive/icmp-lt (primitive/load at) 0) s (subslice s (primitive/iadd (primitive/load at) 1) n))))
 (defn mg-headis? [(h Code) (nm (slice u8))] (-> bool)
-  (and (code-sym? h) (str-eq (mg-simple (code-str h)) nm)))
+  (and (primitive/code-sym? h) (str-eq (mg-simple (primitive/code-str h)) nm)))
 ; A head's simple name, or "" when it isn't a symbol. Every `code-*` call is a
 ; round-trip out of the metaprogram and back into the compiler, so this is
 ; deliberately computed ONCE per head and then compared against all the target
 ; names below — matching name-by-name instead would re-fetch the same string once
 ; per candidate, and mg-target-kind runs on every node of the whole program.
 (defn mg-simple-name [(h Code)] (-> (slice u8))
-  (if (code-sym? h) (mg-simple (code-str h)) ""))
+  (if (primitive/code-sym? h) (mg-simple (primitive/code-str h)) ""))
 ; a call head we tag with a source site; its type-arg is at index 1
 (defn mg-tag-name? [(nm (slice u8))] (-> bool)
   (if (str-eq nm "al-new") true (if (str-eq nm "al-push!") true (if (str-eq nm "hm-new") true
@@ -475,70 +476,70 @@
   (let [nm (mg-simple-name h)]
     (if (str-eq nm "malloc-allocator") 1 (if (mg-tag-name? nm) 2 0))))
 (defn mg-has-target? [(f Code)] (-> bool)
-  (if (not (code-list? f)) false
-    (let [n (code-count f)]
-      (if (icmp-eq n 0) false
+  (if (not (primitive/code-list? f)) false
+    (let [n (primitive/code-count f)]
+      (if (primitive/icmp-eq n 0) false
         ; mg-target-kind is 0 for a non-symbol head, so no separate code-sym? probe
-        (if (icmp-ne (mg-target-kind (code-nth f 0)) 0) true
+        (if (primitive/icmp-ne (mg-target-kind (primitive/code-nth f 0)) 0) true
           (mg-has-target-kids? f 0 n))))))
 (defn mg-has-target-kids? [(f Code) (i i64) (n i64)] (-> bool)
-  (if (icmp-ge i n) false (if (mg-has-target? (code-nth f i)) true (mg-has-target-kids? f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) false (if (mg-has-target? (primitive/code-nth f i)) true (mg-has-target-kids? f (primitive/iadd i 1) n))))
 (defn mg-rw-binds [(v Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `[] `[~(mg-rw (code-nth v i)) ~@(mg-rw-binds v (iadd i 1) n)]))
+  (if (primitive/icmp-ge i n) `[] `[~(mg-rw (primitive/code-nth v i)) ~@(mg-rw-binds v (primitive/iadd i 1) n)]))
 ; already tagged? -> `(do (mg-set-site …) CALL)`; recognized so the fixpoint doesn't re-tag.
 (defn mg-tagged? [(f Code)] (-> bool)
-  (if (and (code-eq (code-nth f 0) `do) (icmp-ge (code-count f) 3))
-      (let [g (code-nth f 1)]
-        (and (code-list? g) (and (icmp-gt (code-count g) 0) (mg-headis? (code-nth g 0) "mg-set-site"))))
+  (if (and (primitive/code-eq (primitive/code-nth f 0) `do) (primitive/icmp-ge (primitive/code-count f) 3))
+      (let [g (primitive/code-nth f 1)]
+        (and (primitive/code-list? g) (and (primitive/icmp-gt (primitive/code-count g) 0) (mg-headis? (primitive/code-nth g 0) "mg-set-site"))))
     false))
 (defn mg-rw [(f Code)] (-> Code)
-  (if (not (code-list? f)) f
-    (let [n (code-count f)]
-      (if (icmp-eq n 0) f
-        (let [head (code-nth f 0) kind (mg-target-kind head)]
-          (if (and (code-eq head `do) (mg-tagged? f))
+  (if (not (primitive/code-list? f)) f
+    (let [n (primitive/code-count f)]
+      (if (primitive/icmp-eq n 0) f
+        (let [head (primitive/code-nth f 0) kind (mg-target-kind head)]
+          (if (and (primitive/code-eq head `do) (mg-tagged? f))
               ; keep the tag; rewrite only the wrapped call's ARGS (don't re-tag it)
-              (let [call (code-nth f 2)]
-                `(do ~(code-nth f 1) (~(code-nth call 0) ~@(mg-rw-kids call 1 (code-count call)))))
-          (if (icmp-eq kind 1)
+              (let [call (primitive/code-nth f 2)]
+                `(do ~(primitive/code-nth f 1) (~(primitive/code-nth call 0) ~@(mg-rw-kids call 1 (primitive/code-count call)))))
+          (if (primitive/icmp-eq kind 1)
               `(mg-allocator ~@(mg-rw-kids f 1 n))
-            (if (icmp-eq kind 2)
+            (if (primitive/icmp-eq kind 2)
                 ; code-src (raw source text of the type-arg span) is robust — code-str aborts on
                 ; type nodes it can't name (generic instantiations in the compiler's own source)
-                `(do (mg-set-site ~(code-src (code-nth f 1)) ~(code-file f) ~(code-line f) ~(code-col f))
+                `(do (mg-set-site ~(primitive/code-src (primitive/code-nth f 1)) ~(primitive/code-file f) ~(primitive/code-line f) ~(primitive/code-col f))
                      (~head ~@(mg-rw-kids f 1 n)))
               (if (not (mg-has-target? f)) f
-                (if (and (code-eq head `let) (icmp-ge n 2))
-                    `(let ~(mg-rw-binds (code-nth f 1) 0 (code-count (code-nth f 1))) ~@(mg-rw-kids f 2 n))
+                (if (and (primitive/code-eq head `let) (primitive/icmp-ge n 2))
+                    `(let ~(mg-rw-binds (primitive/code-nth f 1) 0 (primitive/code-count (primitive/code-nth f 1))) ~@(mg-rw-kids f 2 n))
                   `(~@(mg-rw-kids f 0 n))))))))))))
 (defn mg-rw-kids [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `() `(~(mg-rw (code-nth f i)) ~@(mg-rw-kids f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `() `(~(mg-rw (primitive/code-nth f i)) ~@(mg-rw-kids f (primitive/iadd i 1) n))))
 
 ; move main's body into a worker fn; rewrite main into the raylib launcher
 (defn mg-is-main? [(f Code)] (-> bool)
-  (and (code-list? f) (and (icmp-ge (code-count f) 5)
-       (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) `main)))))
+  (and (primitive/code-list? f) (and (primitive/icmp-ge (primitive/code-count f) 5)
+       (and (primitive/code-eq (primitive/code-nth f 0) `defn) (primitive/code-eq (primitive/code-nth f 1) `main)))))
 (defn mg-forms-from [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `() `(~(code-nth f i) ~@(mg-forms-from f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `() `(~(primitive/code-nth f i) ~@(mg-forms-from f (primitive/iadd i 1) n))))
 ; main's params (e.g. argc/argv) are threaded to the worker through a static holder, since a
 ; pthread body is `[(ptr i8)] -> (ptr i8)` and can't carry them directly. __MgArgs mirrors
 ; main's param vector; the launcher stores each param into it, the worker re-binds them.
-(defn mg-nparams [(f Code)] (-> i64) (code-count (code-nth f 2)))
-(defn mg-pname [(f Code) (i i64)] (-> Code) (code-nth (code-nth (code-nth f 2) i) 0))
+(defn mg-nparams [(f Code)] (-> i64) (primitive/code-count (primitive/code-nth f 2)))
+(defn mg-pname [(f Code) (i i64)] (-> Code) (primitive/code-nth (primitive/code-nth (primitive/code-nth f 2) i) 0))
 (defn mg-arg-stores [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `()
-    `((store! (field (__mg_args) ~(mg-pname f i)) ~(mg-pname f i)) ~@(mg-arg-stores f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `()
+    `((primitive/store! (primitive/field (__mg_args) ~(mg-pname f i)) ~(mg-pname f i)) ~@(mg-arg-stores f (primitive/iadd i 1) n))))
 (defn mg-arg-binds [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `[]
-    `[~(mg-pname f i) (load (field (__mg_args) ~(mg-pname f i))) ~@(mg-arg-binds f (iadd i 1) n)]))
+  (if (primitive/icmp-ge i n) `[]
+    `[~(mg-pname f i) (primitive/load (primitive/field (__mg_args) ~(mg-pname f i))) ~@(mg-arg-binds f (primitive/iadd i 1) n)]))
 ; the launcher that replaces `main`: stores main's args, then owns the raylib window (main thread)
 (defn mg-launcher [(f Code)] (-> Code)
-  `(defn ~(code-nth f 1) ~(code-nth f 2) ~(code-nth f 3)
+  `(defn ~(primitive/code-nth f 1) ~(primitive/code-nth f 2) ~(primitive/code-nth f 3)
      (do ~@(mg-arg-stores f 0 (mg-nparams f))
          (mg-init)
          (InitWindow WINW WINH c"coil memory inspector")
          (SetTargetFPS 60)
-         (thread-spawn (mg-thread) (fnptr-of __mg_worker__) (cast (ptr i8) 0))
+         (thread-spawn (mg-thread) (primitive/fnptr-of __mg_worker__) (primitive/cast (ptr i8) 0))
          (mg-loop)
          (thread-join (mg-thread))
          (CloseWindow)
@@ -546,49 +547,49 @@
 ; the worker that runs the ORIGINAL (allocation-tagged) main body on a spawned thread,
 ; re-binding main's params (argc/argv/…) from the holder before the body runs
 (defn mg-worker-of [(f Code)] (-> Code)
-  (let [body (mg-forms-from (mg-rw f) 4 (code-count f)) np (mg-nparams f)]
-    (if (icmp-eq np 0)
+  (let [body (mg-forms-from (mg-rw f) 4 (primitive/code-count f)) np (mg-nparams f)]
+    (if (primitive/icmp-eq np 0)
         `(defn __mg_worker__ [(__mg_arg (ptr i8))] (-> (ptr i8))
-           (let [__mg_r (do ~@body)] (mg-set-result __mg_r) (mg-set-done) (cast (ptr i8) 0)))
+           (let [__mg_r (do ~@body)] (mg-set-result __mg_r) (mg-set-done) (primitive/cast (ptr i8) 0)))
       `(defn __mg_worker__ [(__mg_arg (ptr i8))] (-> (ptr i8))
-         (let [__mg_r (let ~(mg-arg-binds f 0 np) ~@body)] (mg-set-result __mg_r) (mg-set-done) (cast (ptr i8) 0))))))
+         (let [__mg_r (let ~(mg-arg-binds f 0 np) ~@body)] (mg-set-result __mg_r) (mg-set-done) (primitive/cast (ptr i8) 0))))))
 ; the extra top-level forms to append when wrapping main (worker, + the args holder if main has params)
 (defn mg-aux-forms [(mf Code)] (-> Code)
-  (if (icmp-eq (mg-nparams mf) 0)
+  (if (primitive/icmp-eq (mg-nparams mf) 0)
       `(~(mg-worker-of mf))
-    `((defstruct __MgArgs ~(code-nth mf 2))
-      (defn __mg_args [] (-> (ptr __MgArgs)) (alloc-static __MgArgs))
+    `((defstruct __MgArgs ~(primitive/code-nth mf 2))
+      (defn __mg_args [] (-> (ptr __MgArgs)) (alloc/static __MgArgs))
       ~(mg-worker-of mf))))
 ; When launching: wrap main -> launcher. Otherwise (module already has the worker): mg-rw only.
 (defn mg-form-launch [(f Code)] (-> Code)
   (if (mg-is-main? f) (mg-launcher f) (mg-rw f)))
 (defn mg-forms-launch [(m Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `() `(~(mg-form-launch (code-nth m i)) ~@(mg-forms-launch m (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `() `(~(mg-form-launch (primitive/code-nth m i)) ~@(mg-forms-launch m (primitive/iadd i 1) n))))
 (defn mg-forms-plain [(m Code) (i i64) (n i64)] (-> Code)      ; mg-rw only, never touch main
-  (if (icmp-ge i n) `() `(~(mg-rw (code-nth m i)) ~@(mg-forms-plain m (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `() `(~(mg-rw (primitive/code-nth m i)) ~@(mg-forms-plain m (primitive/iadd i 1) n))))
 (defn mg-proc? [(m Code)] (-> bool)
-  (if (icmp-gt (code-count m) 1)
-      (if (code-eq (code-nth m 0) `memgui) false (code-from-user? (code-nth m 1))) false))
+  (if (primitive/icmp-gt (primitive/code-count m) 1)
+      (if (primitive/code-eq (primitive/code-nth m 0) `memgui) false (primitive/code-from-user? (primitive/code-nth m 1))) false))
 ; is a form the worker defn `(defn __mg_worker__ …)`? (robust to name qualification across rounds)
 (defn mg-is-worker? [(f Code)] (-> bool)
-  (and (code-list? f) (and (icmp-ge (code-count f) 2)
-       (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) `__mg_worker__)))))
+  (and (primitive/code-list? f) (and (primitive/icmp-ge (primitive/code-count f) 2)
+       (and (primitive/code-eq (primitive/code-nth f 0) `defn) (primitive/code-eq (primitive/code-nth f 1) `__mg_worker__)))))
 (defn mg-has-worker? [(m Code) (i i64) (n i64)] (-> bool)
-  (if (icmp-ge i n) false (if (mg-is-worker? (code-nth m i)) true (mg-has-worker? m (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) false (if (mg-is-worker? (primitive/code-nth m i)) true (mg-has-worker? m (primitive/iadd i 1) n))))
 (defn mg-find-main [(m Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `_ (let [f (code-nth m i)] (if (mg-is-main? f) f (mg-find-main m (iadd i 1) n)))))
+  (if (primitive/icmp-ge i n) `_ (let [f (primitive/code-nth m i)] (if (mg-is-main? f) f (mg-find-main m (primitive/iadd i 1) n)))))
 (defn mg-mod [(m Code)] (-> Code)
   (if (not (mg-proc? m)) m
-    (if (mg-has-worker? m 1 (code-count m))
+    (if (mg-has-worker? m 1 (primitive/code-count m))
         ; already processed on an earlier round -> just mg-rw (identity in practice) -> fixpoint
-        `(~(code-nth m 0) ~@(mg-forms-plain m 1 (code-count m)))
-      (let [mf (mg-find-main m 1 (code-count m))]
-        (if (code-eq mf `_)
-            `(~(code-nth m 0) ~@(mg-forms-plain m 1 (code-count m)))
+        `(~(primitive/code-nth m 0) ~@(mg-forms-plain m 1 (primitive/code-count m)))
+      (let [mf (mg-find-main m 1 (primitive/code-count m))]
+        (if (primitive/code-eq mf `_)
+            `(~(primitive/code-nth m 0) ~@(mg-forms-plain m 1 (primitive/code-count m)))
           ; first time: wrap main -> launcher AND append the worker (+ args holder if main has params)
-          `(~(code-nth m 0) ~@(mg-forms-launch m 1 (code-count m)) ~@(mg-aux-forms mf)))))))
+          `(~(primitive/code-nth m 0) ~@(mg-forms-launch m 1 (primitive/code-count m)) ~@(mg-aux-forms mf)))))))
 (defn mg-mods [(ms Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `() `(~(mg-mod (code-nth ms i)) ~@(mg-mods ms (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `() `(~(mg-mod (primitive/code-nth ms i)) ~@(mg-mods ms (primitive/iadd i 1) n))))
 (defn mg-transform [(mods Code)] (-> Code)
-  `(do ~@(mg-mods mods 0 (code-count mods))))
+  `(do ~@(mg-mods mods 0 (primitive/code-count mods))))
 (transform mg-transform)

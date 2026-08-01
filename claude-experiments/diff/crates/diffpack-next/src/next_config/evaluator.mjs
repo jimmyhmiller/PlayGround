@@ -374,11 +374,16 @@ function extractPageExtensions(config) {
 }
 
 // `productionBrowserSourceMaps`: Next's gate on BROWSER source maps in a production
-// build. Server-side maps are not configurable — Next always emits them — so this is
-// the only source-map knob the config carries, and diffpack reads it for exactly the
-// same purpose. Anything other than a literal `true` is Next's default of off.
+// build. Anything other than a literal `true` is Next's default of off.
 function extractProductionBrowserSourceMaps(config) {
   return Boolean(config && config.productionBrowserSourceMaps === true);
+}
+
+// `experimental.serverSourceMaps`: Next's independent production server-map gate.
+// It defaults off in Next's webpack config (`serverSourceMaps ?? false`). Keep the
+// extracted value flat so Rust does not need to mirror the rest of experimental.
+function extractServerSourceMaps(config) {
+  return Boolean(config && config.experimental && config.experimental.serverSourceMaps === true);
 }
 
 const EMPTY = {
@@ -388,6 +393,7 @@ const EMPTY = {
   images: extractImages({}, configPath),
   mdx: extractMdx(),
   productionBrowserSourceMaps: extractProductionBrowserSourceMaps({}),
+  serverSourceMaps: extractServerSourceMaps({}),
   ...extractRouting({}),
 };
 
@@ -402,6 +408,7 @@ try {
     images: extractImages(config, configPath),
     mdx: extractMdx(),
     productionBrowserSourceMaps: extractProductionBrowserSourceMaps(config),
+    serverSourceMaps: extractServerSourceMaps(config),
     ...extractRouting(config),
   };
   if (typeof config.redirects === "function") out.redirects = (await config.redirects()) || [];

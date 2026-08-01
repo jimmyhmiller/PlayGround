@@ -8,8 +8,9 @@
 ;    the writer sorts symbols into (local, external-defined, undefined) order
 ;    as LC_DYSYMTAB requires and remaps relocation symbol numbers.
 (module macho)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -52,78 +53,78 @@
    (a (ptr Allocator))])
 
 (defn mobj-new [(a (ptr Allocator))] (-> MObj)
-  (let [p (alloc-stack MObj)]
-    (store! (field p sects) (al-new [MSect] a))
-    (store! (field p syms) (al-new [MSym] a))
-    (store! (field p relocs) (al-new [MReloc] a))
-    (store! (field p a) a)
-    (load p)))
+  (let [p (alloc/stack MObj)]
+    (primitive/store! (primitive/field p sects) (al-new [MSect] a))
+    (primitive/store! (primitive/field p syms) (al-new [MSym] a))
+    (primitive/store! (primitive/field p relocs) (al-new [MReloc] a))
+    (primitive/store! (primitive/field p a) a)
+    (primitive/load p)))
 
 ; add a section; returns its 1-based ordinal.
 (defn mobj-add-sect! [(o (mut MObj)) (seg (slice u8)) (sect (slice u8)) (align i64) (flags i64)] (-> i64)
-  (let [s (alloc-stack MSect)]
-    (store! (field s segname) seg)
-    (store! (field s sectname) sect)
-    (store! (field s buf) (al-new [u8] (load (field o a))))
-    (store! (field s align) align)
-    (store! (field s flags) flags)
-    (al-push! (mut (field o sects)) (load s))
-    (al-len [MSect] (load (field o sects)))))
+  (let [s (alloc/stack MSect)]
+    (primitive/store! (primitive/field s segname) seg)
+    (primitive/store! (primitive/field s sectname) sect)
+    (primitive/store! (primitive/field s buf) (al-new [u8] (primitive/load (primitive/field o a))))
+    (primitive/store! (primitive/field s align) align)
+    (primitive/store! (primitive/field s flags) flags)
+    (al-push! (mut (primitive/field o sects)) (primitive/load s))
+    (al-len [MSect] (primitive/load (primitive/field o sects)))))
 
 ; add a symbol; returns its index (caller-side numbering used by relocs).
 (defn mobj-add-sym! [(o (mut MObj)) (name (slice u8)) (sect i64) (off i64) (ext bool)] (-> i64)
-  (let [s (alloc-stack MSym)]
-    (store! (field s name) name)
-    (store! (field s sect) sect)
-    (store! (field s off) off)
-    (store! (field s ext) ext)
-    (al-push! (mut (field o syms)) (load s))
-    (isub (al-len [MSym] (load (field o syms))) 1)))
+  (let [s (alloc/stack MSym)]
+    (primitive/store! (primitive/field s name) name)
+    (primitive/store! (primitive/field s sect) sect)
+    (primitive/store! (primitive/field s off) off)
+    (primitive/store! (primitive/field s ext) ext)
+    (al-push! (mut (primitive/field o syms)) (primitive/load s))
+    (primitive/isub (al-len [MSym] (primitive/load (primitive/field o syms))) 1)))
 
 (defn mobj-add-reloc! [(o (mut MObj)) (sect i64) (off i64) (sym i64) (rtype i64) (pcrel bool) (len i64)] (-> i64)
-  (let [r (alloc-stack MReloc)]
-    (store! (field r sect) sect)
-    (store! (field r off) off)
-    (store! (field r sym) sym)
-    (store! (field r rtype) rtype)
-    (store! (field r pcrel) pcrel)
-    (store! (field r len) len)
-    (al-push! (mut (field o relocs)) (load r))
+  (let [r (alloc/stack MReloc)]
+    (primitive/store! (primitive/field r sect) sect)
+    (primitive/store! (primitive/field r off) off)
+    (primitive/store! (primitive/field r sym) sym)
+    (primitive/store! (primitive/field r rtype) rtype)
+    (primitive/store! (primitive/field r pcrel) pcrel)
+    (primitive/store! (primitive/field r len) len)
+    (al-push! (mut (primitive/field o relocs)) (primitive/load r))
     0))
 
 ; pointer to the byte buffer of section `ord` (1-based) — the caller emits into it.
 (defn mobj-sect-buf [(o (mut MObj)) (ord i64)] (-> (ptr (ArrayList u8)))
-  (field (al-at [MSect] (field o sects) (isub ord 1)) buf))
+  (primitive/field (al-at [MSect] (primitive/field o sects) (primitive/isub ord 1)) buf))
 (defn mobj-sect-len [(o (mut MObj)) (ord i64)] (-> i64)
-  (al-len [u8] (load (field (al-at [MSect] (field o sects) (isub ord 1)) buf))))
+  (al-len [u8] (primitive/load (primitive/field (al-at [MSect] (primitive/field o sects) (primitive/isub ord 1)) buf))))
 
 ; write a fixed-width (16-byte, NUL-padded) segment/section name
 (defn mo-name16! [(b (mut (ArrayList u8))) (s (slice u8))] (-> i64)
   (let [n (slice-len s)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) 16)
+    (loop (if (primitive/icmp-ge (primitive/load i) 16)
               (break)
               (do
-                (if (icmp-lt (load i) n)
-                    (al-push! (mut b) (slice-get s (load i)))
-                    (al-push! (mut b) (cast u8 0)))
-                (store! i (iadd (load i) 1))))))
+                (if (primitive/icmp-lt (primitive/load i) n)
+                    (al-push! (mut b) (slice-get s (primitive/load i)))
+                    (al-push! (mut b) (primitive/cast u8 0)))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 
 (defn align-up [(v i64) (align i64)] (-> i64)
-  (let [rem (urem v align)]
-    (if (icmp-eq rem 0) v (iadd v (isub align rem)))))
+  (let [rem (primitive/urem v align)]
+    (if (primitive/icmp-eq rem 0) v (primitive/iadd v (primitive/isub align rem)))))
 (defn pow2 [(n i64)] (-> i64)
-  (ishl 1 n))
+  (primitive/ishl 1 n))
 
 ; ============================ serialization ==================================
 ; Layout:  header | segment cmd (+sections) | build-version | symtab | dysymtab
 ;          | section contents | relocations | nlist symtab | string table
 (defn macho-write [(o (mut MObj))] (-> (ptr (ArrayList u8)))
-  (let [a (load (field o a))
-        nsect (al-len [MSect] (load (field o sects)))
-        nsym (al-len [MSym] (load (field o syms)))
-        nrel (al-len [MReloc] (load (field o relocs)))
+  (let [a (primitive/load (primitive/field o a))
+        nsect (al-len [MSect] (primitive/load (primitive/field o sects)))
+        nsym (al-len [MSym] (primitive/load (primitive/field o syms)))
+        nrel (al-len [MReloc] (primitive/load (primitive/field o relocs)))
         ; ---- symbol permutation: locals, then external defined, then undefined.
         ; order[i] = caller index of the i-th nlist entry; perm[caller] = nlist idx.
         (mut order) (al-new [i64] a)
@@ -132,111 +133,111 @@
         (mut nextdef) 0
         (mut nundef) 0]
     (let [(mut i) 0]
-      (loop (if (icmp-ge (load i) nsym)
+      (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                 (break)
-                (do (al-push! (mut perm) 0) (store! i (iadd (load i) 1))))))
+                (do (al-push! (mut perm) 0) (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
     ; pass 1: locals (defined, not ext)
     (let [(mut i) 0]
-      (loop (if (icmp-ge (load i) nsym)
+      (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                 (break)
                 (do
-                  (let [sp (al-at [MSym] (field o syms) (load i))]
-                    (when (and (icmp-ne (load (field sp sect)) 0) (not (load (field sp ext))))
-                          (al-set! (mut perm) (load i) (al-len [i64] (load order)))
-                          (al-push! (mut order) (load i))
-                          (store! nlocal (iadd (load nlocal) 1))
+                  (let [sp (al-at [MSym] (primitive/field o syms) (primitive/load i))]
+                    (when (and (primitive/icmp-ne (primitive/load (primitive/field sp sect)) 0) (not (primitive/load (primitive/field sp ext))))
+                          (al-set! (mut perm) (primitive/load i) (al-len [i64] (primitive/load order)))
+                          (al-push! (mut order) (primitive/load i))
+                          (primitive/store! nlocal (primitive/iadd (primitive/load nlocal) 1))
                           0))
-                  (store! i (iadd (load i) 1))))))
+                  (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
     ; pass 2: external defined
     (let [(mut i) 0]
-      (loop (if (icmp-ge (load i) nsym)
+      (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                 (break)
                 (do
-                  (let [sp (al-at [MSym] (field o syms) (load i))]
-                    (when (and (icmp-ne (load (field sp sect)) 0) (load (field sp ext)))
-                          (al-set! (mut perm) (load i) (al-len [i64] (load order)))
-                          (al-push! (mut order) (load i))
-                          (store! nextdef (iadd (load nextdef) 1))
+                  (let [sp (al-at [MSym] (primitive/field o syms) (primitive/load i))]
+                    (when (and (primitive/icmp-ne (primitive/load (primitive/field sp sect)) 0) (primitive/load (primitive/field sp ext)))
+                          (al-set! (mut perm) (primitive/load i) (al-len [i64] (primitive/load order)))
+                          (al-push! (mut order) (primitive/load i))
+                          (primitive/store! nextdef (primitive/iadd (primitive/load nextdef) 1))
                           0))
-                  (store! i (iadd (load i) 1))))))
+                  (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
     ; pass 3: undefined
     (let [(mut i) 0]
-      (loop (if (icmp-ge (load i) nsym)
+      (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                 (break)
                 (do
-                  (let [sp (al-at [MSym] (field o syms) (load i))]
-                    (when (icmp-eq (load (field sp sect)) 0)
-                          (al-set! (mut perm) (load i) (al-len [i64] (load order)))
-                          (al-push! (mut order) (load i))
-                          (store! nundef (iadd (load nundef) 1))
+                  (let [sp (al-at [MSym] (primitive/field o syms) (primitive/load i))]
+                    (when (primitive/icmp-eq (primitive/load (primitive/field sp sect)) 0)
+                          (al-set! (mut perm) (primitive/load i) (al-len [i64] (primitive/load order)))
+                          (al-push! (mut order) (primitive/load i))
+                          (primitive/store! nundef (primitive/iadd (primitive/load nundef) 1))
                           0))
-                  (store! i (iadd (load i) 1))))))
+                  (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
     ; ---- addresses: sections are laid out consecutively from vmaddr 0.
     (let [(mut addrs) (al-new [i64] a)
           (mut vm) 0]
       (let [(mut i) 0]
-        (loop (if (icmp-ge (load i) nsect)
+        (loop (if (primitive/icmp-ge (primitive/load i) nsect)
                   (break)
                   (do
-                    (let [sp (al-at [MSect] (field o sects) (load i))]
-                      (store! vm (align-up (load vm) (pow2 (load (field sp align)))))
-                      (al-push! (mut addrs) (load vm))
-                      (store! vm (iadd (load vm) (al-len [u8] (load (field sp buf))))))
-                    (store! i (iadd (load i) 1))))))
+                    (let [sp (al-at [MSect] (primitive/field o sects) (primitive/load i))]
+                      (primitive/store! vm (align-up (primitive/load vm) (pow2 (primitive/load (primitive/field sp align)))))
+                      (al-push! (mut addrs) (primitive/load vm))
+                      (primitive/store! vm (primitive/iadd (primitive/load vm) (al-len [u8] (primitive/load (primitive/field sp buf))))))
+                    (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
       ; ---- file offsets
       (let [ncmds 4
-            sizeofcmds (iadd (iadd 72 (imul 80 nsect)) (iadd 24 (iadd 24 80)))
-            hdrend (iadd 32 sizeofcmds)
+            sizeofcmds (primitive/iadd (primitive/iadd 72 (primitive/imul 80 nsect)) (primitive/iadd 24 (primitive/iadd 24 80)))
+            hdrend (primitive/iadd 32 sizeofcmds)
             (mut foffs) (al-new [i64] a)
             (mut fo) hdrend]
         (let [(mut i) 0]
-          (loop (if (icmp-ge (load i) nsect)
+          (loop (if (primitive/icmp-ge (primitive/load i) nsect)
                     (break)
                     (do
-                      (let [sp (al-at [MSect] (field o sects) (load i))]
-                        (store! fo (align-up (load fo) (pow2 (load (field sp align)))))
-                        (al-push! (mut foffs) (load fo))
-                        (store! fo (iadd (load fo) (al-len [u8] (load (field sp buf))))))
-                      (store! i (iadd (load i) 1))))))
+                      (let [sp (al-at [MSect] (primitive/field o sects) (primitive/load i))]
+                        (primitive/store! fo (align-up (primitive/load fo) (pow2 (primitive/load (primitive/field sp align)))))
+                        (al-push! (mut foffs) (primitive/load fo))
+                        (primitive/store! fo (primitive/iadd (primitive/load fo) (al-len [u8] (primitive/load (primitive/field sp buf))))))
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
         ; relocations: grouped per section, 8-byte aligned
-        (store! fo (align-up (load fo) 8))
+        (primitive/store! fo (align-up (primitive/load fo) 8))
         (let [(mut reloffs) (al-new [i64] a)
               (mut nrelocs) (al-new [i64] a)]
           (let [(mut si) 0]
-            (loop (if (icmp-ge (load si) nsect)
+            (loop (if (primitive/icmp-ge (primitive/load si) nsect)
                       (break)
                       (do
                         (let [(mut cnt) 0
                               (mut ri) 0]
-                          (loop (if (icmp-ge (load ri) nrel)
+                          (loop (if (primitive/icmp-ge (primitive/load ri) nrel)
                                     (break)
                                     (do
-                                      (when (icmp-eq (load (field (al-at [MReloc] (field o relocs) (load ri)) sect))
-                                                     (iadd (load si) 1))
-                                            (store! cnt (iadd (load cnt) 1)))
-                                      (store! ri (iadd (load ri) 1)))))
-                          (al-push! (mut reloffs) (when (icmp-gt (load cnt) 0) (load fo)))
-                          (al-push! (mut nrelocs) (load cnt))
-                          (store! fo (iadd (load fo) (imul 8 (load cnt)))))
-                        (store! si (iadd (load si) 1))))))
-          (let [symoff (align-up (load fo) 8)
-                stroff (iadd symoff (imul 16 nsym))
-                ; ---- string table (index 0 = NUL)
+                                      (when (primitive/icmp-eq (primitive/load (primitive/field (al-at [MReloc] (primitive/field o relocs) (primitive/load ri)) sect))
+                                                     (primitive/iadd (primitive/load si) 1))
+                                            (primitive/store! cnt (primitive/iadd (primitive/load cnt) 1)))
+                                      (primitive/store! ri (primitive/iadd (primitive/load ri) 1)))))
+                          (al-push! (mut reloffs) (when (primitive/icmp-gt (primitive/load cnt) 0) (primitive/load fo)))
+                          (al-push! (mut nrelocs) (primitive/load cnt))
+                          (primitive/store! fo (primitive/iadd (primitive/load fo) (primitive/imul 8 (primitive/load cnt)))))
+                        (primitive/store! si (primitive/iadd (primitive/load si) 1))))))
+          (let [symoff (align-up (primitive/load fo) 8)
+                stroff (primitive/iadd symoff (primitive/imul 16 nsym))
+                ; ---- string table (primitive/index 0 = NUL)
                 (mut strtab) (al-new [u8] a)
                 (mut strx) (al-new [i64] a)]
-            (al-push! (mut strtab) (cast u8 0))
+            (al-push! (mut strtab) (primitive/cast u8 0))
             ; strx is per NLIST order
             (let [(mut i) 0]
-              (loop (if (icmp-ge (load i) nsym)
+              (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                         (break)
                         (do
-                          (let [ci (al-get [i64] (load order) (load i))
-                                sp (al-at [MSym] (field o syms) ci)]
-                            (al-push! (mut strx) (al-len [u8] (load strtab)))
-                            (b-bytes! (mut strtab) (load (field sp name)))
-                            (al-push! (mut strtab) (cast u8 0)))
-                          (store! i (iadd (load i) 1))))))
-            (let [strsize (al-len [u8] (load strtab))
+                          (let [ci (al-get [i64] (primitive/load order) (primitive/load i))
+                                sp (al-at [MSym] (primitive/field o syms) ci)]
+                            (al-push! (mut strx) (al-len [u8] (primitive/load strtab)))
+                            (b-bytes! (mut strtab) (primitive/load (primitive/field sp name)))
+                            (al-push! (mut strtab) (primitive/cast u8 0)))
+                          (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
+            (let [strsize (al-len [u8] (primitive/load strtab))
                   (mut out) (al-new [u8] a)]
               ; ================= header =================
               (b-u32! (mut out) 4277009103)  ; MH_MAGIC_64 0xFEEDFACF
@@ -249,40 +250,40 @@
               (b-u32! (mut out) 0)  ; reserved
               ; ================= LC_SEGMENT_64 =================
               (b-u32! (mut out) 25)  ; LC_SEGMENT_64
-              (b-u32! (mut out) (iadd 72 (imul 80 nsect)))
+              (b-u32! (mut out) (primitive/iadd 72 (primitive/imul 80 nsect)))
               (mo-name16! (mut out) "")  ; segname (unnamed in objects)
               (b-u64! (mut out) 0)  ; vmaddr
-              (b-u64! (mut out) (load vm))  ; vmsize
-              (b-u64! (mut out) (if (icmp-gt nsect 0) (al-get [i64] (load foffs) 0) hdrend))  ; fileoff
+              (b-u64! (mut out) (primitive/load vm))  ; vmsize
+              (b-u64! (mut out) (if (primitive/icmp-gt nsect 0) (al-get [i64] (primitive/load foffs) 0) hdrend))  ; fileoff
               ; filesize = end of the last section's contents - fileoff (relocs excluded)
               (b-u64! (mut out)
-                      (when (icmp-gt nsect 0)
-                            (isub (iadd (al-get [i64] (load foffs) (isub nsect 1))
-                                        (al-len [u8] (load (field (al-at [MSect] (field o sects) (isub nsect 1)) buf))))
-                                  (al-get [i64] (load foffs) 0))))
+                      (when (primitive/icmp-gt nsect 0)
+                            (primitive/isub (primitive/iadd (al-get [i64] (primitive/load foffs) (primitive/isub nsect 1))
+                                        (al-len [u8] (primitive/load (primitive/field (al-at [MSect] (primitive/field o sects) (primitive/isub nsect 1)) buf))))
+                                  (al-get [i64] (primitive/load foffs) 0))))
               (b-u32! (mut out) 7)  ; maxprot rwx
               (b-u32! (mut out) 7)  ; initprot rwx
               (b-u32! (mut out) nsect)
               (b-u32! (mut out) 0)  ; flags
               ; section headers
               (let [(mut i) 0]
-                (loop (if (icmp-ge (load i) nsect)
+                (loop (if (primitive/icmp-ge (primitive/load i) nsect)
                           (break)
                           (do
-                            (let [sp (al-at [MSect] (field o sects) (load i))]
-                              (mo-name16! (mut out) (load (field sp sectname)))
-                              (mo-name16! (mut out) (load (field sp segname)))
-                              (b-u64! (mut out) (al-get [i64] (load addrs) (load i)))
-                              (b-u64! (mut out) (al-len [u8] (load (field sp buf))))
-                              (b-u32! (mut out) (al-get [i64] (load foffs) (load i)))
-                              (b-u32! (mut out) (load (field sp align)))
-                              (b-u32! (mut out) (al-get [i64] (load reloffs) (load i)))
-                              (b-u32! (mut out) (al-get [i64] (load nrelocs) (load i)))
-                              (b-u32! (mut out) (load (field sp flags)))
+                            (let [sp (al-at [MSect] (primitive/field o sects) (primitive/load i))]
+                              (mo-name16! (mut out) (primitive/load (primitive/field sp sectname)))
+                              (mo-name16! (mut out) (primitive/load (primitive/field sp segname)))
+                              (b-u64! (mut out) (al-get [i64] (primitive/load addrs) (primitive/load i)))
+                              (b-u64! (mut out) (al-len [u8] (primitive/load (primitive/field sp buf))))
+                              (b-u32! (mut out) (al-get [i64] (primitive/load foffs) (primitive/load i)))
+                              (b-u32! (mut out) (primitive/load (primitive/field sp align)))
+                              (b-u32! (mut out) (al-get [i64] (primitive/load reloffs) (primitive/load i)))
+                              (b-u32! (mut out) (al-get [i64] (primitive/load nrelocs) (primitive/load i)))
+                              (b-u32! (mut out) (primitive/load (primitive/field sp flags)))
                               (b-u32! (mut out) 0)
                               (b-u32! (mut out) 0)
                               (b-u32! (mut out) 0))
-                            (store! i (iadd (load i) 1))))))
+                            (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
               ; ================= LC_BUILD_VERSION =================
               (b-u32! (mut out) 50)  ; LC_BUILD_VERSION
               (b-u32! (mut out) 24)
@@ -301,11 +302,11 @@
               (b-u32! (mut out) 11)  ; LC_DYSYMTAB
               (b-u32! (mut out) 80)
               (b-u32! (mut out) 0)  ; ilocalsym
-              (b-u32! (mut out) (load nlocal))  ; nlocalsym
-              (b-u32! (mut out) (load nlocal))  ; iextdefsym
-              (b-u32! (mut out) (load nextdef))  ; nextdefsym
-              (b-u32! (mut out) (iadd (load nlocal) (load nextdef)))  ; iundefsym
-              (b-u32! (mut out) (load nundef))  ; nundefsym
+              (b-u32! (mut out) (primitive/load nlocal))  ; nlocalsym
+              (b-u32! (mut out) (primitive/load nlocal))  ; iextdefsym
+              (b-u32! (mut out) (primitive/load nextdef))  ; nextdefsym
+              (b-u32! (mut out) (primitive/iadd (primitive/load nlocal) (primitive/load nextdef)))  ; iundefsym
+              (b-u32! (mut out) (primitive/load nundef))  ; nundefsym
               (b-u32! (mut out) 0)
               (b-u32! (mut out) 0)
               (b-u32! (mut out) 0)
@@ -320,54 +321,54 @@
               (b-u32! (mut out) 0)
               ; ================= section contents =================
               (let [(mut i) 0]
-                (loop (if (icmp-ge (load i) nsect)
+                (loop (if (primitive/icmp-ge (primitive/load i) nsect)
                           (break)
                           (do
-                            (let [sp (al-at [MSect] (field o sects) (load i))]
-                              (b-zeros! (mut out) (isub (al-get [i64] (load foffs) (load i)) (al-len [u8] (load out))))
-                              (b-bytes! (mut out) (al-slice [u8] (load (field sp buf)))))
-                            (store! i (iadd (load i) 1))))))
+                            (let [sp (al-at [MSect] (primitive/field o sects) (primitive/load i))]
+                              (b-zeros! (mut out) (primitive/isub (al-get [i64] (primitive/load foffs) (primitive/load i)) (al-len [u8] (primitive/load out))))
+                              (b-bytes! (mut out) (al-slice [u8] (primitive/load (primitive/field sp buf)))))
+                            (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
               ; ================= relocations (grouped per section) =================
-              (b-zeros! (mut out) (isub (align-up (al-len [u8] (load out)) 8) (al-len [u8] (load out))))
+              (b-zeros! (mut out) (primitive/isub (align-up (al-len [u8] (primitive/load out)) 8) (al-len [u8] (primitive/load out))))
               (let [(mut si) 0]
-                (loop (if (icmp-ge (load si) nsect)
+                (loop (if (primitive/icmp-ge (primitive/load si) nsect)
                           (break)
                           (do
                             (let [(mut ri) 0]
-                              (loop (if (icmp-ge (load ri) nrel)
+                              (loop (if (primitive/icmp-ge (primitive/load ri) nrel)
                                         (break)
                                         (do
-                                          (let [rp (al-at [MReloc] (field o relocs) (load ri))]
-                                            (when (icmp-eq (load (field rp sect)) (iadd (load si) 1))
-                                                  (b-u32! (mut out) (load (field rp off)))
+                                          (let [rp (al-at [MReloc] (primitive/field o relocs) (primitive/load ri))]
+                                            (when (primitive/icmp-eq (primitive/load (primitive/field rp sect)) (primitive/iadd (primitive/load si) 1))
+                                                  (b-u32! (mut out) (primitive/load (primitive/field rp off)))
                                                   ; sym < 0 is a SECTION relocation (r_extern = 0):
                                                   ; symbolnum is the target SECTION ordinal (-sym), not
                                                   ; a symbol index — the DWARF-address scheme dsymutil
                                                   ; wants. sym >= 0 is the usual extern symbol reloc.
-                                                  (let [secreloc (icmp-lt (load (field rp sym)) 0)
+                                                  (let [secreloc (primitive/icmp-lt (primitive/load (primitive/field rp sym)) 0)
                                                         snum
                                                           (if secreloc
-                                                              (isub 0 (load (field rp sym)))
-                                                              (al-get [i64] (load perm) (load (field rp sym))))]
+                                                              (primitive/isub 0 (primitive/load (primitive/field rp sym)))
+                                                              (al-get [i64] (primitive/load perm) (primitive/load (primitive/field rp sym))))]
                                                     (b-u32! (mut out)
-                                                            (ior (iand snum 16777215)
-                                                                 (ior (ishl (when (load (field rp pcrel)) 1) 24)
-                                                                      (ior (ishl (load (field rp len)) 25)
-                                                                           (ior (ishl (unless secreloc 1) 27)  ; r_extern
-                                                                                (ishl (load (field rp rtype)) 28)))))))
+                                                            (primitive/ior (primitive/iand snum 16777215)
+                                                                 (primitive/ior (primitive/ishl (when (primitive/load (primitive/field rp pcrel)) 1) 24)
+                                                                      (primitive/ior (primitive/ishl (primitive/load (primitive/field rp len)) 25)
+                                                                           (primitive/ior (primitive/ishl (unless secreloc 1) 27)  ; r_extern
+                                                                                (primitive/ishl (primitive/load (primitive/field rp rtype)) 28)))))))
                                                   0))
-                                          (store! ri (iadd (load ri) 1))))))
-                            (store! si (iadd (load si) 1))))))
+                                          (primitive/store! ri (primitive/iadd (primitive/load ri) 1))))))
+                            (primitive/store! si (primitive/iadd (primitive/load si) 1))))))
               ; ================= nlist symbol table =================
-              (b-zeros! (mut out) (isub symoff (al-len [u8] (load out))))
+              (b-zeros! (mut out) (primitive/isub symoff (al-len [u8] (primitive/load out))))
               (let [(mut i) 0]
-                (loop (if (icmp-ge (load i) nsym)
+                (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                           (break)
                           (do
-                            (let [ci (al-get [i64] (load order) (load i))
-                                  sp (al-at [MSym] (field o syms) ci)]
-                              (b-u32! (mut out) (al-get [i64] (load strx) (load i)))
-                              (if (icmp-eq (load (field sp sect)) 0)
+                            (let [ci (al-get [i64] (primitive/load order) (primitive/load i))
+                                  sp (al-at [MSym] (primitive/field o syms) ci)]
+                              (b-u32! (mut out) (al-get [i64] (primitive/load strx) (primitive/load i)))
+                              (if (primitive/icmp-eq (primitive/load (primitive/field sp sect)) 0)
                                   (do
                                     (b-u8! (mut out) 1)  ; N_UNDF | N_EXT
                                     (b-u8! (mut out) 0)  ; NO_SECT
@@ -375,16 +376,16 @@
                                     (b-u64! (mut out) 0)
                                     0)
                                   (do
-                                    (b-u8! (mut out) (ior 14 (when (load (field sp ext)) 1)))  ; N_SECT (|N_EXT)
-                                    (b-u8! (mut out) (load (field sp sect)))
+                                    (b-u8! (mut out) (primitive/ior 14 (when (primitive/load (primitive/field sp ext)) 1)))  ; N_SECT (|N_EXT)
+                                    (b-u8! (mut out) (primitive/load (primitive/field sp sect)))
                                     (b-u16! (mut out) 0)
                                     (b-u64! (mut out)
-                                            (iadd (al-get [i64] (load addrs) (isub (load (field sp sect)) 1))
-                                                  (load (field sp off))))
+                                            (primitive/iadd (al-get [i64] (primitive/load addrs) (primitive/isub (primitive/load (primitive/field sp sect)) 1))
+                                                  (primitive/load (primitive/field sp off))))
                                     0)))
-                            (store! i (iadd (load i) 1))))))
+                            (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
               ; ================= string table =================
-              (b-bytes! (mut out) (al-slice [u8] (load strtab)))
+              (b-bytes! (mut out) (al-slice [u8] (primitive/load strtab)))
               (let [bp (unwrap-ptr [(ArrayList u8)] (create [(ArrayList u8)] a))]
-                (store! bp (load out))
+                (primitive/store! bp (primitive/load out))
                 bp))))))))

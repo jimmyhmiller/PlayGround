@@ -1,3 +1,4 @@
 (module app)
-(defn add-half [(x Code)] (-> Code) `(iadd ~x 1.5))
+(import "primitive.coil" :as primitive)
+(defn add-half [(x Code)] (-> Code) `(primitive/iadd ~x 1.5))
 (defn main [] (-> i64) (add-half 3))

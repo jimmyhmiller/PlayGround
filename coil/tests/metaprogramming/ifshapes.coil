@@ -1,4 +1,5 @@
 (module ifshapes)
+(import "primitive.coil" :as primitive)
 ; An AUDIT of WHICH nested-`if` shapes the tree actually contains, so a fix rule is
 ; designed from what is there rather than from what is imaginable.
 ;
@@ -16,22 +17,22 @@
 ; partition the population instead of overlapping.
 
 (defn is-hand-if? [(f Code)] (-> bool)
-  (if (code-list? f)
-      (if (icmp-eq (code-count f) 4)
-          (if (code-eq (code-nth f 0) `if) (not (code-macro? f)) false)
+  (if (primitive/code-list? f)
+      (if (primitive/icmp-eq (primitive/code-count f) 4)
+          (if (primitive/code-eq (primitive/code-nth f 0) `if) (not (primitive/code-macro? f)) false)
           false)
       false))
 
-(defn ish-test [(f Code)] (-> Code) (code-nth f 1))
-(defn ish-then [(f Code)] (-> Code) (code-nth f 2))
-(defn ish-else [(f Code)] (-> Code) (code-nth f 3))
+(defn ish-test [(f Code)] (-> Code) (primitive/code-nth f 1))
+(defn ish-then [(f Code)] (-> Code) (primitive/code-nth f 2))
+(defn ish-else [(f Code)] (-> Code) (primitive/code-nth f 3))
 
 (defn ish-zero? [(x Code)] (-> bool)
-  (code-eq x `0))
+  (primitive/code-eq x `0))
 
 (defn ish-not? [(x Code)] (-> bool)
-  (if (code-list? x)
-      (if (icmp-eq (code-count x) 2) (code-eq (code-nth x 0) `not) false)
+  (if (primitive/code-list? x)
+      (if (primitive/icmp-eq (primitive/code-count x) 2) (primitive/code-eq (primitive/code-nth x 0) `not) false)
       false))
 
 ; ---- the shapes -------------------------------------------------------------
@@ -40,24 +41,24 @@
 ;; `x` when BOTH hold: `(if (and a b) x E)`. One level of nesting goes away.
 (defn ish-and-collapse? [(f Code)] (-> bool)
   (let [th (ish-then f)]
-    (if (is-hand-if? th) (code-eq (ish-else th) (ish-else f)) false)))
+    (if (is-hand-if? th) (primitive/code-eq (ish-else th) (ish-else f)) false)))
 
 ;; `(if a X (if b X y))` — the then arms agree, so either test reaching `X` is an
 ;; `or`: `(if (or a b) X y)`. This is an else-chain, but writing it as a `cond` would
 ;; duplicate the body; the `or` says what is actually meant.
 (defn ish-or-collapse? [(f Code)] (-> bool)
   (let [el (ish-else f)]
-    (if (is-hand-if? el) (code-eq (ish-then el) (ish-then f)) false)))
+    (if (is-hand-if? el) (primitive/code-eq (ish-then el) (ish-then f)) false)))
 
 ;; `(if c true false)` is `c`; `(if c false true)` is `(not c)`.
 (defn ish-bool-identity? [(f Code)] (-> bool)
-  (if (code-eq (ish-then f) `true)
-      (code-eq (ish-else f) `false)
-      (if (code-eq (ish-then f) `false) (code-eq (ish-else f) `true) false)))
+  (if (primitive/code-eq (ish-then f) `true)
+      (primitive/code-eq (ish-else f) `false)
+      (if (primitive/code-eq (ish-then f) `false) (primitive/code-eq (ish-else f) `true) false)))
 
 ;; Both arms identical — the test decides nothing.
 (defn ish-same-arms? [(f Code)] (-> bool)
-  (code-eq (ish-then f) (ish-else f)))
+  (primitive/code-eq (ish-then f) (ish-else f)))
 
 ;; `(if (not c) a b)` reads inside-out; `(if c b a)` does not.
 (defn ish-negated? [(f Code)] (-> bool)
@@ -75,35 +76,35 @@
 ; the question is how many OPPORTUNITIES exist, not how many top-level forms have one.
 
 (defn ish-report [(f Code)] (-> Code)
-  (cond (ish-bool-identity? f) (warn f "SHAPE bool-identity: (if c true false) is just c")
-        (ish-same-arms? f)     (warn f "SHAPE same-arms: both branches identical")
-        (ish-and-collapse? f)  (warn f "SHAPE and-collapse: (if a (if b x E) E) -> (if (and a b) x E)")
-        (ish-or-collapse? f)   (warn f "SHAPE or-collapse: (if a X (if b X y)) -> (if (or a b) X y)")
-        (ish-negated? f)       (warn f "SHAPE negated-test: (if (not c) a b) -> (if c b a)")
-        (ish-when? f)          (warn f "SHAPE when: (if c body 0) -> (when c body)")
-        (ish-unless? f)        (warn f "SHAPE unless: (if c 0 body) -> (unless c body)")
-        :else                  (warn f "SHAPE plain: a genuine two-way branch")))
+  (cond (ish-bool-identity? f) (primitive/warn f "SHAPE bool-identity: (if c true false) is just c")
+        (ish-same-arms? f)     (primitive/warn f "SHAPE same-arms: both branches identical")
+        (ish-and-collapse? f)  (primitive/warn f "SHAPE and-collapse: (if a (if b x E) E) -> (if (and a b) x E)")
+        (ish-or-collapse? f)   (primitive/warn f "SHAPE or-collapse: (if a X (if b X y)) -> (if (or a b) X y)")
+        (ish-negated? f)       (primitive/warn f "SHAPE negated-test: (if (not c) a b) -> (if c b a)")
+        (ish-when? f)          (primitive/warn f "SHAPE when: (if c body 0) -> (when c body)")
+        (ish-unless? f)        (primitive/warn f "SHAPE unless: (if c 0 body) -> (unless c body)")
+        :else                  (primitive/warn f "SHAPE plain: a genuine two-way branch")))
 
 (defn ish-walk [(f Code)] (-> Code)
-  (if (code-list? f)
-      (do (if (is-hand-if? f) (ish-report f) `0) (ish-kids f 0 (code-count f)))
+  (if (primitive/code-list? f)
+      (do (if (is-hand-if? f) (ish-report f) `0) (ish-kids f 0 (primitive/code-count f)))
       `0))
 
 (defn ish-kids [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0 (do (ish-walk (code-nth f i)) (ish-kids f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `0 (do (ish-walk (primitive/code-nth f i)) (ish-kids f (primitive/iadd i 1) n))))
 
 (defn ish-look-at? [(m Code)] (-> bool)
-  (if (icmp-gt (code-count m) 1) (code-from-user? (code-nth m 1)) false))
+  (if (primitive/icmp-gt (primitive/code-count m) 1) (primitive/code-from-user? (primitive/code-nth m 1)) false))
 
 (defn ish-forms [(m Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0 (do (ish-walk (code-nth m i)) (ish-forms m (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `0 (do (ish-walk (primitive/code-nth m i)) (ish-forms m (primitive/iadd i 1) n))))
 
 (defn ish-mods [(ms Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n)
+  (if (primitive/icmp-ge i n)
       `0
       (do
-        (let [m (code-nth ms i)] (if (ish-look-at? m) (ish-forms m 1 (code-count m)) `0))
-        (ish-mods ms (iadd i 1) n))))
+        (let [m (primitive/code-nth ms i)] (if (ish-look-at? m) (ish-forms m 1 (primitive/code-count m)) `0))
+        (ish-mods ms (primitive/iadd i 1) n))))
 
 (defn audit-if-shapes [(modules Code)] (-> Code)
-  (ish-mods modules 0 (code-count modules)))
+  (ish-mods modules 0 (primitive/code-count modules)))

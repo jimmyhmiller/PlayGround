@@ -1,0 +1,16 @@
+[package]
+name = "diffpack-next-bindings"
+version = "0.1.0"
+edition = "2024"
+description = "Versioned project bridge between Next's bundler contract and Diffpack"
+license = "MIT"
+
+[[bin]]
+name = "diffpack-next-bindings"
+path = "src/main.rs"
+
+[dependencies]
+diffpack-next = { path = "../../../crates/diffpack-next" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "8.2.0"

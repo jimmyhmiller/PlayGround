@@ -7,6 +7,7 @@
 ; `js-unretain`, because externref cannot live in linear memory. Property and method
 ; NAMES are not JS values; they cross as (ptr u8)+len and the bridge reads them.
 (module js)
+(import "primitive.coil" :as primitive)
 (import "slice.coil" :use *)
 
 ; ---- generic host primitives (env.*, implemented once in js-bridge.js) ----
@@ -28,22 +29,22 @@
 
 ; ---- ergonomic wrappers ----
 (defn js-global [(name (slice u8))] (-> externref)
-  (js_global (slice-data [u8] name) (cast i32 (slice-len [u8] name))))
+  (js_global (slice-data [u8] name) (primitive/cast i32 (slice-len [u8] name))))
 (defn js-get [(o externref) (prop (slice u8))] (-> externref)
-  (js_get o (slice-data [u8] prop) (cast i32 (slice-len [u8] prop))))
+  (js_get o (slice-data [u8] prop) (primitive/cast i32 (slice-len [u8] prop))))
 (defn js-get-i [(o externref) (i i32)] (-> externref) (js_get_index o i))
 (defn js-set! [(o externref) (prop (slice u8)) (v externref)] (-> i32)
-  (js_set o (slice-data [u8] prop) (cast i32 (slice-len [u8] prop)) v))
-(defn js-str [(s (slice u8))] (-> externref) (js_str (slice-data [u8] s) (cast i32 (slice-len [u8] s))))
+  (js_set o (slice-data [u8] prop) (primitive/cast i32 (slice-len [u8] prop)) v))
+(defn js-str [(s (slice u8))] (-> externref) (js_str (slice-data [u8] s) (primitive/cast i32 (slice-len [u8] s))))
 (defn js-set-str! [(o externref) (prop (slice u8)) (s (slice u8))] (-> i32) (js-set! o prop (js-str s)))
 (defn js-num [(n i32)] (-> externref) (js_i32 n))
 (defn js-int [(r externref)] (-> i32) (js_to_i32 r))
 (defn js-call [(o externref) (m (slice u8))] (-> externref)
-  (js_call0 o (slice-data [u8] m) (cast i32 (slice-len [u8] m))))
+  (js_call0 o (slice-data [u8] m) (primitive/cast i32 (slice-len [u8] m))))
 (defn js-call1 [(o externref) (m (slice u8)) (a externref)] (-> externref)
-  (js_call1 o (slice-data [u8] m) (cast i32 (slice-len [u8] m)) a))
+  (js_call1 o (slice-data [u8] m) (primitive/cast i32 (slice-len [u8] m)) a))
 (defn js-call2 [(o externref) (m (slice u8)) (a externref) (b externref)] (-> externref)
-  (js_call2 o (slice-data [u8] m) (cast i32 (slice-len [u8] m)) a b))
+  (js_call2 o (slice-data [u8] m) (primitive/cast i32 (slice-len [u8] m)) a b))
 ; method call with a single string argument (classList.add, setAttribute value, …)
 (defn js-call-s [(o externref) (m (slice u8)) (s (slice u8))] (-> externref) (js-call1 o m (js-str s)))
 

@@ -1,4 +1,5 @@
 (module arbitrary)
+(import "primitive.coil" :as primitive)
 ; ARBITRARY CODE IN A METAPROGRAM — the compiled engine's payoff.
 ;
 ; Everything below is impossible under the comptime interpreter (no generics, no
@@ -18,18 +19,18 @@
 ; (sum-squares N) -> the literal 1^2 + ... + N^2, computed with a REAL generic
 ; ArrayList (mono instantiates it inside the metaprogram dylib) and malloc.
 (defn sum-squares [(nc Code)] (-> Code)
-  (let [n (code-int nc)
+  (let [n (primitive/code-int nc)
         a (malloc-allocator)
         (mut xs) (al-new [i64] a)
         (mut i) 1]
-    (loop (if (icmp-gt (load i) n) (break)
-      (do (al-push! (mut xs) (imul (load i) (load i)))
-          (store! i (iadd (load i) 1)))))
-    (let [(mut acc) 0 (mut j) 0 m (al-len [i64] (load xs))]
-      (loop (if (icmp-ge (load j) m) (break)
-        (do (store! acc (iadd (load acc) (al-get [i64] (load xs) (load j))))
-            (store! j (iadd (load j) 1)))))
-      `~(load acc))))
+    (loop (if (primitive/icmp-gt (primitive/load i) n) (break)
+      (do (al-push! (mut xs) (primitive/imul (primitive/load i) (primitive/load i)))
+          (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (let [(mut acc) 0 (mut j) 0 m (al-len [i64] (primitive/load xs))]
+      (loop (if (primitive/icmp-ge (primitive/load j) m) (break)
+        (do (primitive/store! acc (primitive/iadd (primitive/load acc) (al-get [i64] (primitive/load xs) (primitive/load j))))
+            (primitive/store! j (primitive/iadd (primitive/load j) 1)))))
+      `~(primitive/load acc))))
 
 ; (table-lookup KEY) -> a constant fetched from a compile-time HashMap built with
 ; the real string-keyed map machinery (generic HashMap + fnptr-of KeyOps).
@@ -39,22 +40,22 @@
     (hm-put! (mut m) "answer" 42)
     (hm-put! (mut m) "year" 2026)
     (hm-put! (mut m) "coil" 7)
-    (match (hm-get [(slice u8) i64] (load m) (code-sym key))
+    (match (hm-get [(slice u8) i64] (primitive/load m) (primitive/code-sym key))
       (Some [v] `~v)
-      (None [] (error "table-lookup: unknown key")))))
+      (None [] (primitive/error "table-lookup: unknown key")))))
 
 ; (static-strlen "...") -> the length of the string, measured by LIBC's strlen at
 ; expansion time — a real FFI call from inside a metaprogram.
 (defn static-strlen [(sc Code)] (-> Code)
-  (let [s (code-str sc)
+  (let [s (primitive/code-str sc)
         a (malloc-allocator)
         n (slice-len s)
-        buf (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))
+        buf (unwrap-ptr [i8] (raw-alloc a (primitive/iadd n 1) 1))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (store! (index buf (load i)) (cast i8 (slice-get s (load i))))
-          (store! i (iadd (load i) 1)))))
-    (store! (index buf n) (cast i8 0))
+    (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+      (do (primitive/store! (primitive/index buf (primitive/load i)) (primitive/cast i8 (slice-get s (primitive/load i))))
+          (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/store! (primitive/index buf n) (primitive/cast i8 0))
     `~(strlen buf)))
 
 ; (const-name PREFIX N) -> the symbol PREFIX-N built with the real StrBuf string
@@ -62,21 +63,21 @@
 (defn const-name [(prefix Code) (nc Code)] (-> Code)
   (let [a (malloc-allocator)
         (mut sb) (sb-new a)]
-    (sb-push-str! (mut sb) (code-sym prefix))
+    (sb-push-str! (mut sb) (primitive/code-sym prefix))
     (sb-push-str! (mut sb) "-")
-    (sb-push-str! (mut sb) (dec->str-rt a (code-int nc)))
-    (code-symbol (sb-str (load sb)) "")))
+    (sb-push-str! (mut sb) (dec->str-rt a (primitive/code-int nc)))
+    (primitive/code-symbol (sb-str (primitive/load sb)) "")))
 
 ; helper the macro calls: an ORDINARY function (i64 -> string), itself using
 ; arbitrary code — division loops and byte munging
 (defn dec->str-rt [(a (ptr Allocator)) (v i64)] (-> (slice u8))
-  (if (icmp-eq v 0) "0"
+  (if (primitive/icmp-eq v 0) "0"
     (let [(mut sb) (sb-new a) (mut x) v (mut digits) (al-new [u8] a)]
-      (loop (if (icmp-le (load x) 0) (break)
-        (do (al-push! (mut digits) (cast u8 (iadd 48 (irem (load x) 10))))
-            (store! x (udiv (load x) 10)))))
-      (let [(mut k) (isub (al-len [u8] (load digits)) 1)]
-        (loop (if (icmp-lt (load k) 0) (break)
-          (do (sb-push-byte! (mut sb) (al-get [u8] (load digits) (load k)))
-              (store! k (isub (load k) 1))))))
-      (sb-str (load sb)))))
+      (loop (if (primitive/icmp-le (primitive/load x) 0) (break)
+        (do (al-push! (mut digits) (primitive/cast u8 (primitive/iadd 48 (primitive/irem (primitive/load x) 10))))
+            (primitive/store! x (primitive/udiv (primitive/load x) 10)))))
+      (let [(mut k) (primitive/isub (al-len [u8] (primitive/load digits)) 1)]
+        (loop (if (primitive/icmp-lt (primitive/load k) 0) (break)
+          (do (sb-push-byte! (mut sb) (al-get [u8] (primitive/load digits) (primitive/load k)))
+              (primitive/store! k (primitive/isub (primitive/load k) 1))))))
+      (sb-str (primitive/load sb)))))

@@ -23,18 +23,23 @@ pub fn transform_to_standalone_esm(path: &std::path::Path, source: &str) -> Resu
     )
 }
 
+pub mod artifacts;
 pub mod compiler;
 pub mod dev_server;
 pub mod lazy_routes;
 pub mod mdx;
+pub mod native;
 pub mod next_adapter;
 pub mod next_config;
 pub mod next_font;
 pub mod next_pages;
 pub mod policies;
+pub mod production;
+pub mod profile;
 pub mod project_graph;
 pub mod rsc;
 pub mod rsc_runtime_resolve;
 pub mod shared_config;
+pub mod source_policy;
 pub mod static_image;
 pub mod styled_jsx;

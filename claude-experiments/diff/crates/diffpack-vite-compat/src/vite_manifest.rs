@@ -15,26 +15,12 @@
 
 use std::collections::BTreeMap;
 
-/// One emitted page's manifest record.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PageRecord {
-    /// The manifest key: the entry HTML document's path relative to the project
-    /// root (e.g. `index.html`, `nested/about.html`).
-    pub key: String,
-    /// The emitted entry chunk file, relative to the output dir (e.g. `index.js`).
-    pub file: String,
-    /// The entry's extracted stylesheet file(s), relative to the output dir. Empty
-    /// when the page produced no CSS.
-    pub css: Vec<String>,
-    /// The entry module's source path relative to the project root (the
-    /// `<script type="module" src>` target, e.g. `src/main.tsx`), when known.
-    pub src: Option<String>,
-}
+use diffpack_web::config::EmittedPage;
 
 /// Renders the manifest JSON for the given pages, keyed by entry path. Keys are
 /// sorted for a deterministic, reproducible artifact.
-pub fn render(pages: &[PageRecord]) -> String {
-    let mut records: BTreeMap<&str, &PageRecord> = BTreeMap::new();
+pub fn render(pages: &[EmittedPage]) -> String {
+    let mut records: BTreeMap<&str, &EmittedPage> = BTreeMap::new();
     for page in pages {
         records.insert(page.key.as_str(), page);
     }
@@ -77,7 +63,7 @@ mod tests {
 
     #[test]
     fn renders_a_single_entry_with_css() {
-        let json = render(&[PageRecord {
+        let json = render(&[EmittedPage {
             key: "index.html".to_string(),
             file: "index.js".to_string(),
             css: vec!["index.css".to_string()],
@@ -94,13 +80,13 @@ mod tests {
     #[test]
     fn renders_multiple_pages_deterministically_sorted() {
         let pages = vec![
-            PageRecord {
+            EmittedPage {
                 key: "about.html".to_string(),
                 file: "about.js".to_string(),
                 css: vec![],
                 src: Some("src/about.tsx".to_string()),
             },
-            PageRecord {
+            EmittedPage {
                 key: "index.html".to_string(),
                 file: "index.js".to_string(),
                 css: vec!["index.css".to_string()],

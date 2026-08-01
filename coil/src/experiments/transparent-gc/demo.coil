@@ -1,4 +1,5 @@
 (module demo)
+(import "primitive.coil" :as primitive)
 ; NORMAL code that assumes a garbage collector. No `ptr`. No allocation calls.
 ; No rooting. `Pair` is used as a plain value type; `cons`/`car`/`cdr`/`nil` are
 ; the ambient list primitives. The gc-transform (gcauto.coil) makes it real.
@@ -18,7 +19,7 @@
 (defn main [] (-> :i64)
   (let [(mut total) 0]
     (for [m 0 2000]
-      (store! total (+ total (sum (build 50 0)))))
+      (primitive/store! total (+ total (sum (build 50 0)))))
     (fmt (stdout) "sum={d} (expect 2450000)  peak_live={d}  collections={d}  total_alloc={d}\n"
          total (gc-peak) (gc-collections) (gc-total))
     0))

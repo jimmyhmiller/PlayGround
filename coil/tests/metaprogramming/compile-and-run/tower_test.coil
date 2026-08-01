@@ -1,4 +1,5 @@
 (module tower_test)
+(import "primitive.coil" :as primitive)
 (import "src/stdlib/control.coil" :use *)
 ; MACROS IN A MACRO BODY (the tower):
 ; - `when` as a statement (both branches i64)
@@ -7,13 +8,13 @@
 (defn wrap2 [(c Code)] (-> Code) `(do ~c ~c))
 (defn dbl [(c Code)] (-> Code)
   (let [(mut n) 0]
-    (when (code-int? c) (store! n (code-int c)))
-    `~(imul (load n) 2)))
+    (when (primitive/code-int? c) (primitive/store! n (primitive/code-int c)))
+    `~(primitive/imul (primitive/load n) 2)))
 (defn pick [(c Code)] (-> Code)
   (cond
-    (code-int? c) (wrap2 `1)
-    (code-sym? c) `2
+    (primitive/code-int? c) (wrap2 `1)
+    (primitive/code-sym? c) `2
     `3))
 (defn main [] (-> :i64)
   ; dbl 21 -> 42 ; pick 9 -> (do 1 1) -> 1 ; pick foo -> 2
-  (iadd (dbl 21) (iadd (pick 9) (pick foo))))
+  (primitive/iadd (dbl 21) (primitive/iadd (pick 9) (pick foo))))

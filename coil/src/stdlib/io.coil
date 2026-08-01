@@ -1,4 +1,6 @@
 (module coil.io)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 ; Zig-style IO: a capability is a VALUE (a vtable struct) threaded explicitly,
 ; exactly like the allocator. A `Writer` is `{ write-fn, ctx }`; a function that
 ; does output *takes* a Writer, so IO shows up in its type. There is no ambient
@@ -31,47 +33,47 @@
 
 ;; One underlying write; may be short (writes fewer than `len` bytes).
 (defn write-some [(w (ptr Writer)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (call-ptr (load (field w write-fn)) (load (field w ctx)) buf len))
+  (primitive/call-ptr (primitive/load (primitive/field w write-fn)) (primitive/load (primitive/field w ctx)) buf len))
 
 ;; Write the whole buffer, looping over short writes; returns the total or errors.
 (defn write-all [(w (ptr Writer)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (if (icmp-le len 0)
+  (if (primitive/icmp-le len 0)
       (Ok 0)
       (match (write-some w buf len)
         (Err [e] (Err e))
         (Ok [n]
-          (if (icmp-le n 0)
+          (if (primitive/icmp-le n 0)
               (Err (Errno 0))                           ; made no progress
-              (match (write-all w (index buf n) (isub len n))
+              (match (write-all w (primitive/index buf n) (primitive/isub len n))
                 (Err [e] (Err e))
-                (Ok [m] (Ok (iadd n m)))))))))
+                (Ok [m] (Ok (primitive/iadd n m)))))))))
 
 (defn write-byte [(w (ptr Writer)) (b :u8)] (-> (Result :i64 IoError))
-  (let [p (alloc-stack :u8)]
-    (store! p b)
-    (write-all w (cast (ptr i8) p) 1)))
+  (let [p (alloc/stack :u8)]
+    (primitive/store! p b)
+    (write-all w (primitive/cast (ptr i8) p) 1)))
 
 ;; Write a `(slice u8)` string — its length is carried, so no `strlen` scan and
 ;; embedded NULs are fine. This is the everyday string printer.
 (defn print-str [(w (ptr Writer)) (s (slice u8))] (-> (Result :i64 IoError))
-  (write-all w (cast (ptr i8) (slice-data s)) (slice-len s)))
+  (write-all w (primitive/cast (ptr i8) (slice-data s)) (slice-len s)))
 
 ;; Write a NUL-terminated C string (`c"…"` / a `(ptr i8)` from FFI).
 (defn print-cstr [(w (ptr Writer)) (s (ptr i8))] (-> (Result :i64 IoError))
-  (write-all w s (cast :i64 (strlen s))))
+  (write-all w s (primitive/cast :i64 (strlen s))))
 
 ;; Write a non-negative integer in decimal, most-significant digit first.
 (defn print-int [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
-  (if (icmp-lt n 10)
-      (write-byte w (cast :u8 (iadd n 48)))
-      (do (print-int w (idiv n 10))
-          (write-byte w (cast :u8 (iadd (irem n 10) 48))))))
+  (if (primitive/icmp-lt n 10)
+      (write-byte w (primitive/cast :u8 (primitive/iadd n 48)))
+      (do (print-int w (primitive/idiv n 10))
+          (write-byte w (primitive/cast :u8 (primitive/iadd (primitive/irem n 10) 48))))))
 
 ; ---- backends ----
 ;; fd-backed: the ctx pointer *is* the file descriptor (int<->ptr cast).
 (defn fd-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (let [n (cast :i64 (write (cast i32 ctx) buf (cast isize len)))]
-    (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
+  (let [n (primitive/cast :i64 (write (primitive/cast i32 ctx) buf (primitive/cast isize len)))]
+    (if (primitive/icmp-lt n 0) (Err (Errno n)) (Ok n))))
 ;; The caller owns the Writer cell. `alloc-static` gives ONE cell per CALL SITE, not per
 ;; call, so building the Writer in here handed every caller the SAME struct: two live
 ;; `fd-writer`s on different fds aliased, and the aliasing was already known to bite —
@@ -80,12 +82,12 @@
 ;; statics; that treated the symptom, and `stdin` (via fd-reader) still shared one.
 ;; A static is right for a genuine singleton at ITS OWN site — never for instance state.
 (defn fd-writer [(w (ptr Writer)) (fd :i64)] (-> (ptr Writer))
-  (store! (field w write-fn) (fnptr-of fd-write))
-  (store! (field w ctx) (cast (ptr i8) fd))
+  (primitive/store! (primitive/field w write-fn) (primitive/fnptr-of fd-write))
+  (primitive/store! (primitive/field w ctx) (primitive/cast (ptr i8) fd))
   w)
 ;; the standard streams ARE singletons: each owns a dedicated static at its own call site.
-(defn stdout [] (-> (ptr Writer)) (fd-writer (alloc-static Writer) 1))
-(defn stderr [] (-> (ptr Writer)) (fd-writer (alloc-static Writer) 2))
+(defn stdout [] (-> (ptr Writer)) (fd-writer (alloc/static Writer) 1))
+(defn stderr [] (-> (ptr Writer)) (fd-writer (alloc/static Writer) 2))
 
 ;; null sink: discards everything, always succeeds.
 (defn null-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
@@ -94,9 +96,9 @@
 ;; its write-fn is constant), so every instance is interchangeable and sharing one is
 ;; unobservable — unlike fd-writer, whose ctx carries the fd.
 (defn null-writer [] (-> (ptr Writer))
-  (let [w (alloc-static Writer)]
-    (store! (field w write-fn) (fnptr-of null-write))
-    (store! (field w ctx) (cast (ptr i8) 0))
+  (let [w (alloc/static Writer)]
+    (primitive/store! (primitive/field w write-fn) (primitive/fnptr-of null-write))
+    (primitive/store! (primitive/field w ctx) (primitive/cast (ptr i8) 0))
     w))
 
 ; Buffered output for serializers that emit many tiny fragments. `write-byte`
@@ -111,35 +113,35 @@
 
 ;; Flush pending bytes to the wrapped writer.
 (defn buffered-flush [(b (ptr BufferedWriter))] (-> (Result :i64 IoError))
-  (let [n (load (field b len))]
-    (if (icmp-le n 0)
+  (let [n (primitive/load (primitive/field b len))]
+    (if (primitive/icmp-le n 0)
         (Ok 0)
-        (match (write-all (load (field b inner)) (load (field b data)) n)
+        (match (write-all (primitive/load (primitive/field b inner)) (primitive/load (primitive/field b data)) n)
           (Err [e] (Err e))
           (Ok [written]
               (do
-                (store! (field b len) 0)
+                (primitive/store! (primitive/field b len) 0)
                 (Ok written)))))))
 
 (defn buffered-write [(ctx (ptr i8)) (src (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (let [b (cast (ptr BufferedWriter) ctx)
-        cap (load (field b cap))]
-    (if (icmp-le len 0)
+  (let [b (primitive/cast (ptr BufferedWriter) ctx)
+        cap (primitive/load (primitive/field b cap))]
+    (if (primitive/icmp-le len 0)
         (Ok 0)
-        (if (icmp-le cap 0)
-            (write-all (load (field b inner)) src len)
-            (let [used (load (field b len))
-                  room (isub cap used)]
-              (if (icmp-le len room)
+        (if (primitive/icmp-le cap 0)
+            (write-all (primitive/load (primitive/field b inner)) src len)
+            (let [used (primitive/load (primitive/field b len))
+                  room (primitive/isub cap used)]
+              (if (primitive/icmp-le len room)
                   (do
-                    (memcpy (index (load (field b data)) used) src (cast isize len))
-                    (store! (field b len) (iadd used len))
+                    (memcpy (primitive/index (primitive/load (primitive/field b data)) used) src (primitive/cast isize len))
+                    (primitive/store! (primitive/field b len) (primitive/iadd used len))
                     (Ok len))
                   (match (buffered-flush b)
                     (Err [e] (Err e))
                     (Ok [_]
-                        (if (icmp-ge len cap)
-                            (write-all (load (field b inner)) src len)
+                        (if (primitive/icmp-ge len cap)
+                            (write-all (primitive/load (primitive/field b inner)) src len)
                             (buffered-write ctx src len))))))))))
 
 ;; Initialize a caller-owned writer/state pair over caller-owned storage.
@@ -148,12 +150,12 @@
                        (inner (ptr Writer))
                        (data (ptr i8))
                        (cap :i64)] (-> (ptr Writer))
-  (store! (field b inner) inner)
-  (store! (field b data) data)
-  (store! (field b len) 0)
-  (store! (field b cap) cap)
-  (store! (field w write-fn) (fnptr-of buffered-write))
-  (store! (field w ctx) (cast (ptr i8) b))
+  (primitive/store! (primitive/field b inner) inner)
+  (primitive/store! (primitive/field b data) data)
+  (primitive/store! (primitive/field b len) 0)
+  (primitive/store! (primitive/field b cap) cap)
+  (primitive/store! (primitive/field w write-fn) (primitive/fnptr-of buffered-write))
+  (primitive/store! (primitive/field w ctx) (primitive/cast (ptr i8) b))
   w)
 
 ; Convenient fixed-capacity owner for compiler dumps and similar bounded-stack
@@ -165,34 +167,34 @@
 
 ;; Initialize `out` and return its buffered writer.
 (defn buffered-output-writer [(out (ptr BufferedOutput)) (inner (ptr Writer))] (-> (ptr Writer))
-  (buffered-writer (field out writer)
-                   (field out state)
+  (buffered-writer (primitive/field out writer)
+                   (primitive/field out state)
                    inner
-                   (cast (ptr i8) (field out buffer))
+                   (primitive/cast (ptr i8) (primitive/field out buffer))
                    65536))
 
 ;; Flush a caller-owned `BufferedOutput`.
 (defn buffered-output-flush [(out (ptr BufferedOutput))] (-> (Result :i64 IoError))
-  (buffered-flush (field out state)))
+  (buffered-flush (primitive/field out state)))
 
 ;; fixed-buffer sink: writes into a caller-provided byte buffer, tracking how
 ;; much is used (Zig's fixedBufferStream). Errors with Errno 0 when full.
 (defstruct FixBuf [(data (ptr i8)) (len :i64) (cap :i64)])
 (defn fb-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (let [fb   (cast (ptr FixBuf) ctx)
-        cur  (load (field fb len))
-        room (isub (load (field fb cap)) cur)
-        n    (if (icmp-lt len room) len room)]
-    (memcpy (index (load (field fb data)) cur) buf (cast isize n))
-    (store! (field fb len) (iadd cur n))
-    (if (icmp-lt n len) (Err (Errno 0)) (Ok n))))
+  (let [fb   (primitive/cast (ptr FixBuf) ctx)
+        cur  (primitive/load (primitive/field fb len))
+        room (primitive/isub (primitive/load (primitive/field fb cap)) cur)
+        n    (if (primitive/icmp-lt len room) len room)]
+    (memcpy (primitive/index (primitive/load (primitive/field fb data)) cur) buf (primitive/cast isize n))
+    (primitive/store! (primitive/field fb len) (primitive/iadd cur n))
+    (if (primitive/icmp-lt n len) (Err (Errno 0)) (Ok n))))
 ;; Initialize a caller-owned Writer over an existing FixBuf (data/cap already set, len 0).
 ;; The Writer cell is the caller's: formatting into two buffers at once is the whole point
 ;; of this sink, and a shared static silently merged both into whichever was made last.
 (defn fixed-buffer-writer [(w (ptr Writer)) (fb (ptr FixBuf))] (-> (ptr Writer))
-  (store! (field fb len) 0)
-  (store! (field w write-fn) (fnptr-of fb-write))
-  (store! (field w ctx) (cast (ptr i8) fb))
+  (primitive/store! (primitive/field fb len) 0)
+  (primitive/store! (primitive/field w write-fn) (primitive/fnptr-of fb-write))
+  (primitive/store! (primitive/field w ctx) (primitive/cast (ptr i8) fb))
   w)
 
 ; ============================ Reader ========================================
@@ -201,7 +203,7 @@
    (ctx     (ptr i8))])
 
 (defn read-some [(r (ptr Reader)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (call-ptr (load (field r read-fn)) (load (field r ctx)) buf len))
+  (primitive/call-ptr (primitive/load (primitive/field r read-fn)) (primitive/load (primitive/field r ctx)) buf len))
 
 ;; Fill `buf` by looping over short reads until it holds `len` bytes OR the stream ends;
 ;; returns the total read (which is `< len` only at EOF). The read mirror of `write-all`
@@ -210,23 +212,23 @@
 ;; `read-fill`, not `read-all`, so it never collides with the s-expression reader's
 ;; `read-all` in src/stdlib/sexp.coil when both are imported.)
 (defn read-fill [(r (ptr Reader)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (if (icmp-le len 0)
+  (if (primitive/icmp-le len 0)
       (Ok 0)
       (match (read-some r buf len)
         (Err [e] (Err e))
         (Ok [n]
-          (if (icmp-le n 0)
+          (if (primitive/icmp-le n 0)
               (Ok 0)                                    ; EOF — no more bytes
-              (match (read-fill r (index buf n) (isub len n))
+              (match (read-fill r (primitive/index buf n) (primitive/isub len n))
                 (Err [e] (Err e))
-                (Ok [m] (Ok (iadd n m)))))))))
+                (Ok [m] (Ok (primitive/iadd n m)))))))))
 
 ;; Read EXACTLY `len` bytes, or fail: `(Err (Eof))` if the stream ends first. For
 ;; fixed-size records/headers where a short read is a real error, not a normal stop.
 (defn read-exact [(r (ptr Reader)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
   (match (read-fill r buf len)
     (Err [e] (Err e))
-    (Ok [n] (if (icmp-eq n len) (Ok n) (Err (Eof))))))
+    (Ok [n] (if (primitive/icmp-eq n len) (Ok n) (Err (Eof))))))
 
 ;; Read one line into `buf` (up to `cap` bytes): stop after a newline (consumed, NOT
 ;; stored), at `cap`, or at EOF. Returns the number of content bytes stored. `(Err (Eof))`
@@ -235,30 +237,30 @@
 ;; a byte at a time — correct and unbuffered; wrap a buffered reader for bulk throughput.
 (defn read-line [(r (ptr Reader)) (buf (ptr i8)) (cap :i64)] (-> (Result :i64 IoError))
   (let [(mut i) 0
-        one     (alloc-stack :u8)]
+        one     (alloc/stack :u8)]
     (block :done
       (loop
-        (if (icmp-ge (load i) cap)
-            (return-from :done (Ok (load i)))
+        (if (primitive/icmp-ge (primitive/load i) cap)
+            (return-from :done (Ok (primitive/load i)))
             0)
-        (match (read-some r (cast (ptr i8) one) 1)
+        (match (read-some r (primitive/cast (ptr i8) one) 1)
           (Err [e] (return-from :done (Err e)))
           (Ok [n]
-            (if (icmp-le n 0)
+            (if (primitive/icmp-le n 0)
                 (return-from :done
-                  (if (icmp-eq (load i) 0) (Err (Eof)) (Ok (load i))))   ; EOF
-                (let [c (load one)]
-                  (if (icmp-eq (cast :i64 c) \newline)
-                      (return-from :done (Ok (load i)))
-                      (do (store! (index buf (load i)) (cast i8 c))
-                          (store! i (iadd (load i) 1))))))))))))
+                  (if (primitive/icmp-eq (primitive/load i) 0) (Err (Eof)) (Ok (primitive/load i))))   ; EOF
+                (let [c (primitive/load one)]
+                  (if (primitive/icmp-eq (primitive/cast :i64 c) \newline)
+                      (return-from :done (Ok (primitive/load i)))
+                      (do (primitive/store! (primitive/index buf (primitive/load i)) (primitive/cast i8 c))
+                          (primitive/store! i (primitive/iadd (primitive/load i) 1))))))))))))
 
 (defn fd-read [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (let [n (cast :i64 (read (cast i32 ctx) buf (cast isize len)))]
-    (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
+  (let [n (primitive/cast :i64 (read (primitive/cast i32 ctx) buf (primitive/cast isize len)))]
+    (if (primitive/icmp-lt n 0) (Err (Errno n)) (Ok n))))
 ;; caller-owned, for the same reason as fd-writer.
 (defn fd-reader [(r (ptr Reader)) (fd :i64)] (-> (ptr Reader))
-  (store! (field r read-fn) (fnptr-of fd-read))
-  (store! (field r ctx) (cast (ptr i8) fd))
+  (primitive/store! (primitive/field r read-fn) (primitive/fnptr-of fd-read))
+  (primitive/store! (primitive/field r ctx) (primitive/cast (ptr i8) fd))
   r)
-(defn stdin [] (-> (ptr Reader)) (fd-reader (alloc-static Reader) 0))
+(defn stdin [] (-> (ptr Reader)) (fd-reader (alloc/static Reader) 0))

@@ -7,6 +7,8 @@
 ;   keys: 1/C = insert coin   2/Return = 1P start   ← → (or A/D) = move   Space = fire
 ; ============================================================================
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "objc.coil"    :use *)
 (import "i8080.coil"   :use *)
 (import "machine.coil" :use *)
@@ -24,12 +26,12 @@
 (defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
 
 (defn make-window [(w f64) (h f64)] (-> (ptr i8))
-  (let [rect (alloc-stack CGRect)
+  (let [rect (alloc/stack CGRect)
         win  (msg (ptr i8) (class c"NSWindow") (sel c"alloc") [])]
-    (do (store! (field rect x) 200.0) (store! (field rect y) 200.0)
-        (store! (field rect w) w)     (store! (field rect h) h)
+    (do (primitive/store! (primitive/field rect x) 200.0) (primitive/store! (primitive/field rect y) 200.0)
+        (primitive/store! (primitive/field rect w) w)     (primitive/store! (primitive/field rect h) h)
         (msg (ptr i8) win (sel c"initWithContentRect:styleMask:backing:defer:")
-             [CGRect i64 i64 i64] (load rect) 15 2 0))))
+             [CGRect i64 i64 i64] (primitive/load rect) 15 2 0))))
 
 ; Decode VRAM into an RGBA image and hand it to the layer. The classic gel-strip
 ; colour overlay: green along the bottom (player + shields), red near the top,
@@ -40,16 +42,16 @@
       (decode s fb)
       (for [y 0 256]
         (for [x 0 224]
-          (let [lit (cast :i64 (load (index fb (+ (* y 224) x))))
+          (let [lit (primitive/cast :i64 (primitive/load (primitive/index fb (+ (* y 224) x))))
                 o   (* (+ (* y 224) x) 4)]
             (do
               ; overlay tint by row band (upright image: y=0 top score, y=255 bottom)
               (cond
-                (< y 32)  (do (store! (index rgba o) (cast :u8 lit)) (store! (index rgba (+ o 1)) (cast :u8 0)) (store! (index rgba (+ o 2)) (cast :u8 0)))         ; red score strip
-                (> y 183) (do (store! (index rgba o) (cast :u8 0)) (store! (index rgba (+ o 1)) (cast :u8 lit)) (store! (index rgba (+ o 2)) (cast :u8 0)))         ; green player/shields
-                (do (store! (index rgba o) (cast :u8 lit)) (store! (index rgba (+ o 1)) (cast :u8 lit)) (store! (index rgba (+ o 2)) (cast :u8 lit))))                    ; white
-              (store! (index rgba (+ o 3)) (cast :u8 0xFF))))))
-      (let [ctx (CGBitmapContextCreate (index rgba 0) 224 256 8 896 space 1)
+                (< y 32)  (do (primitive/store! (primitive/index rgba o) (primitive/cast :u8 lit)) (primitive/store! (primitive/index rgba (+ o 1)) (primitive/cast :u8 0)) (primitive/store! (primitive/index rgba (+ o 2)) (primitive/cast :u8 0)))         ; red score strip
+                (> y 183) (do (primitive/store! (primitive/index rgba o) (primitive/cast :u8 0)) (primitive/store! (primitive/index rgba (+ o 1)) (primitive/cast :u8 lit)) (primitive/store! (primitive/index rgba (+ o 2)) (primitive/cast :u8 0)))         ; green player/shields
+                (do (primitive/store! (primitive/index rgba o) (primitive/cast :u8 lit)) (primitive/store! (primitive/index rgba (+ o 1)) (primitive/cast :u8 lit)) (primitive/store! (primitive/index rgba (+ o 2)) (primitive/cast :u8 lit))))                    ; white
+              (primitive/store! (primitive/index rgba (+ o 3)) (primitive/cast :u8 0xFF))))))
+      (let [ctx (CGBitmapContextCreate (primitive/index rgba 0) 224 256 8 896 space 1)
             img (CGBitmapContextCreateImage ctx)]
         (do (msg (ptr i8) layer (sel c"setContents:") [(ptr i8)] img)
             (CGImageRelease img) (CGContextRelease ctx) (CGColorSpaceRelease space) 0)))))
@@ -71,24 +73,24 @@
 (defn pump [(app (ptr i8)) (m (ptr Machine)) (mode (ptr i8))] (-> i64)
   (while 1
     (let [ev (msg (ptr i8) app (sel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
-                  [i64 (ptr i8) (ptr i8) i64] -1 (cast (ptr i8) 0) mode 1)]
-      (if (= (cast :i64 ev) 0) (break 0)
+                  [i64 (ptr i8) (ptr i8) i64] -1 (primitive/cast (ptr i8) 0) mode 1)]
+      (if (= (primitive/cast :i64 ev) 0) (break 0)
           (let [ty (msg i64 ev (sel c"type") [])]
             (do (if (= ty 10) (handle-key m ev 1) 0)
                 (if (= ty 11) (handle-key m ev 0) 0)
                 (msg (ptr i8) app (sel c"sendEvent:") [(ptr i8)] ev) 0))))))
 
 (defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
-  (if (< (cast :i64 argc) 2)
+  (if (< (primitive/cast :i64 argc) 2)
       (do (printf c"usage: invaders <invaders.rom>\n") 1)
-      (let [s    (alloc-stack Cpu)
-            m    (alloc-stack Machine)
-            fbb  (alloc-stack (array u8 57344))
-            rgb  (alloc-stack (array u8 229376))
+      (let [s    (alloc/stack Cpu)
+            m    (alloc/stack Machine)
+            fbb  (alloc/stack (array u8 57344))
+            rgb  (alloc/stack (array u8 229376))
             app  (msg (ptr i8) (class c"NSApplication") (sel c"sharedApplication") [])]
         (do
           (init s) (minit m)
-          (if (< (load-com s (load (index argv 1)) 0) 0)
+          (if (< (load-com s (primitive/load (primitive/index argv 1)) 0) 0)
               (do (printf c"invaders: cannot open ROM\n") 1)
               (let [win  (make-window 672.0 768.0)
                     mode (msg (ptr i8) (class c"NSString") (sel c"stringWithUTF8String:") [(ptr i8)] c"kCFRunLoopDefaultMode")
@@ -96,7 +98,7 @@
                 (do
                   (msg (ptr i8) app (sel c"setActivationPolicy:") [i64] 0)
                   (msg (ptr i8) (msg (ptr i8) win (sel c"contentView") []) (sel c"setWantsLayer:") [i64] 1)
-                  (msg (ptr i8) win (sel c"makeKeyAndOrderFront:") [(ptr i8)] (cast (ptr i8) 0))
+                  (msg (ptr i8) win (sel c"makeKeyAndOrderFront:") [(ptr i8)] (primitive/cast (ptr i8) 0))
                   (msg (ptr i8) app (sel c"activateIgnoringOtherApps:") [i64] 1)
                   (msg (ptr i8) app (sel c"finishLaunching") [])
                   (let [layer (msg (ptr i8) (msg (ptr i8) win (sel c"contentView") []) (sel c"layer") [])]
@@ -106,6 +108,6 @@
                       (while 1
                         (do (pump app m mode)
                             (step-frame s m)
-                            (blit s layer (index fbb 0) (index rgb 0))
+                            (blit s layer (primitive/index fbb 0) (primitive/index rgb 0))
                             (usleep 16000)))))
                   0)))))))

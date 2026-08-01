@@ -16,8 +16,9 @@
 ;   - byte registers 4..7 (sil/dil/spl/bpl need a bare REX to not mean ah/ch/dh/bh)
 ;   - the imm-size ladder in x64-mov-imm! (xor / mov32 / sign-extended / movabs)
 (module x64_selftest)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -29,29 +30,29 @@
 
 ; 0-9 -> '0'..'9', 10-15 -> 'a'..'f'  ('a' is 97, so the offset is 97-10 = 87)
 (defn hexdig [(v i64)] (-> i64)
-  (if (icmp-lt v 10) (iadd 48 v) (iadd 87 v)))
+  (if (primitive/icmp-lt v 10) (primitive/iadd 48 v) (primitive/iadd 87 v)))
 
 ; print the buffer as lowercase hex bytes, then a tab, then `asm`, then newline.
 ; The buffer is cleared afterwards so the next case starts empty.
 (defn emit-case! [(s (mut XAsm)) (asm (slice u8))] (-> i64)
-  (let [a (load (field s a))
+  (let [a (primitive/load (primitive/field s a))
         w (stdout)
-        n (al-len [u8] (load (field s buf)))
+        n (al-len [u8] (primitive/load (primitive/field s buf)))
         ; build the whole line in one byte list, then write it once
         (mut out) (al-new [u8] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [b (cast i64 (al-get [u8] (load (field s buf)) (load i)))]
-                  (al-push! (mut out) (cast u8 (hexdig (iand (ishr b 4) 15))))
-                  (al-push! (mut out) (cast u8 (hexdig (iand b 15)))))
-                (store! i (iadd (load i) 1)))))
-    (al-push! (mut out) (cast u8 9))  ; tab
-    (print-str w (al-slice [u8] (load out)))
+                (let [b (primitive/cast i64 (al-get [u8] (primitive/load (primitive/field s buf)) (primitive/load i)))]
+                  (al-push! (mut out) (primitive/cast u8 (hexdig (primitive/iand (primitive/ishr b 4) 15))))
+                  (al-push! (mut out) (primitive/cast u8 (hexdig (primitive/iand b 15)))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (al-push! (mut out) (primitive/cast u8 9))  ; tab
+    (print-str w (al-slice [u8] (primitive/load out)))
     (print-str w asm)
     (print-str w "\n")
-    (store! (field (field s buf) len) 0)
+    (primitive/store! (primitive/field (primitive/field s buf) len) 0)
     0))
 
 (defn main [] (-> i64)

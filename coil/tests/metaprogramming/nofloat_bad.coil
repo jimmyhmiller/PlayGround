@@ -1,7 +1,8 @@
 (module app)
+(import "primitive.coil" :as primitive)
 (import "nofloat.coil" :use *)
 (checker check-nofloat)
 ; getf returns f64 — the CALL (getf) has inferred type f64, flagged though no float
-; literal appears at the call site. Program is type-correct (cast to i64).
+; literal appears at the call site. Program is type-correct (primitive/cast to i64).
 (defn getf [] (-> f64) 1.5)
-(defn main [] (-> i64) (cast i64 (getf)))
+(defn main [] (-> i64) (primitive/cast i64 (getf)))

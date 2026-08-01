@@ -11,11 +11,12 @@
 ; terminates the METAPROGRAM THREAD via pthread_exit — never the pipeline thread.
 ; The engine (metaengine in expander.coil) always runs a compiled metaprogram on
 ; its own thread, joins it, and turns a recorded Diag into the ordinary
-; expand-macro Err, so `(error ...)`/bad-op behavior is byte-identical to the
+; expand-macro Err, so `(primitive/error ...)`/bad-op behavior is byte-identical to the
 ; interpreter's from the pipeline's point of view.
 (module metahost)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 (import "arraylist.coil" :use *)
@@ -47,24 +48,24 @@
    (interp i64)  ; 1 ⇒ metaprogram runs via the in-process interpreter (interp.coil)
    (halt i64)])  ; set by mh-halt in interp mode; polled by vm-exec to unwind cleanly
 (defn meta-host-box [] (-> (ptr MetaHostBox))
-  (alloc-static MetaHostBox))
+  (alloc/static MetaHostBox))
 (defn meta-host-set! [(cx (ptr CtCtx)) (registry (ptr (ArrayList (ptr Sexp))))] (-> i64)
   (let [b (meta-host-box)]
-    (store! (field b cx) cx)
-    (store! (field b registry) registry)
-    (store! (field b errset) 0)
+    (primitive/store! (primitive/field b cx) cx)
+    (primitive/store! (primitive/field b registry) registry)
+    (primitive/store! (primitive/field b errset) 0)
     0))
 (defn meta-host-onmain! [(v i64)] (-> i64)
-  (store! (field (meta-host-box) onmain) v)
+  (primitive/store! (primitive/field (meta-host-box) onmain) v)
   0)
 ; interpreter meta path: mark it active and clear the abort flag before an entry runs.
 (defn meta-host-interp! [(v i64)] (-> i64)
-  (let [b (meta-host-box)] (store! (field b interp) v) (store! (field b halt) 0) 0))
+  (let [b (meta-host-box)] (primitive/store! (primitive/field b interp) v) (primitive/store! (primitive/field b halt) 0) 0))
 (defn mh-interp-halted? [] (-> i64)
-  (load (field (meta-host-box) halt)))
+  (primitive/load (primitive/field (meta-host-box) halt)))
 (defn meta-host-err [] (-> (Option Diag))
   (let [b (meta-host-box)]
-    (if (icmp-eq (load (field b errset)) 0) (None [Diag]) (Some (load (field b err))))))
+    (if (primitive/icmp-eq (primitive/load (primitive/field b errset)) 0) (None [Diag]) (Some (primitive/load (primitive/field b err))))))
 
 ; A compiler bug in the boundary itself (unset context, impossible shapes) must be
 ; LOUD and immediate — never a metaprogram-level diagnostic.
@@ -78,41 +79,41 @@
 ; no thread to end, so print the diagnostic and fail the build directly.
 (defn mh-halt [(d Diag)] (-> i64)
   (let [b (meta-host-box)]
-    (if (icmp-ne (load (field b interp)) 0)
+    (if (primitive/icmp-ne (primitive/load (primitive/field b interp)) 0)
         ; interpreter meta path: record the diag and request a cooperative VM abort.
         ; We run in-process on the pipeline thread, so pthread_exit would kill the
         ; whole compile; instead set halt and let vm-exec unwind (mp-op-* then returns
         ; here into the metalowered (loop 0), but the abort poll breaks out first).
-        (do (store! (field b err) d) (store! (field b errset) 1) (store! (field b halt) 1) 0)
-        (if (icmp-ne (load (field b onmain)) 0)
+        (do (primitive/store! (primitive/field b err) d) (primitive/store! (primitive/field b errset) 1) (primitive/store! (primitive/field b halt) 1) 0)
+        (if (primitive/icmp-ne (primitive/load (primitive/field b onmain)) 0)
             (do
-              (fmt (stderr) "error: {s}\n" (load (field d msg)))
+              (fmt (stderr) "error: {s}\n" (primitive/load (primitive/field d msg)))
               (exit 1)
               0)
             (do
-              (store! (field b err) d)
-              (store! (field b errset) 1)
-              (pthread_exit (cast (ptr i8) 1)))))))
+              (primitive/store! (primitive/field b err) d)
+              (primitive/store! (primitive/field b errset) 1)
+              (pthread_exit (primitive/cast (ptr i8) 1)))))))
 
 (defn mh-cx [] (-> (ptr CtCtx))
   (let [b (meta-host-box)
-        cx (load (field b cx))]
-    (if (icmp-eq (cast i64 cx) 0) (do (mh-bug "code-op callback with no metaprogram context") (cast (ptr CtCtx) 0)) cx)))
+        cx (primitive/load (primitive/field b cx))]
+    (if (primitive/icmp-eq (primitive/cast i64 cx) 0) (do (mh-bug "code-op callback with no metaprogram context") (primitive/cast (ptr CtCtx) 0)) cx)))
 
 (defn mh-box-sexp [(s Sexp)] (-> (ptr i8))
   (let [p (unwrap-ptr [Sexp] (create [Sexp] (malloc-allocator)))]
-    (store! p s)
-    (cast (ptr i8) p)))
+    (primitive/store! p s)
+    (primitive/cast (ptr i8) p)))
 (defn mh-handle-sexp [(c (ptr i8))] (-> Sexp)
-  (if (icmp-eq (cast i64 c) 0) (do (mh-bug "null Code handle") (zeroed Sexp)) (load (cast (ptr Sexp) c))))
+  (if (primitive/icmp-eq (primitive/cast i64 c) 0) (do (mh-bug "null Code handle") (primitive/zeroed Sexp)) (primitive/load (primitive/cast (ptr Sexp) c))))
 
 ; String results cross as a host-owned {ptr,len} — layout mirrored in metashim.coil.
 (defstruct MetaBuf [(p (ptr u8)) (n i64)])
 (defn mh-buf [(s (slice u8))] (-> (ptr i8))
   (let [b (unwrap-ptr [MetaBuf] (create [MetaBuf] (malloc-allocator)))]
-    (store! (field b p) (slice-data s))
-    (store! (field b n) (slice-len s))
-    (cast (ptr i8) b)))
+    (primitive/store! (primitive/field b p) (slice-data s))
+    (primitive/store! (primitive/field b n) (slice-len s))
+    (primitive/cast (ptr i8) b)))
 
 ; ---- code-op argument builder (a boxed ArrayList CtVal) ------------------------
 ; A metaprogram's argument lists are strictly LIFO. metalower nests the builder
@@ -132,31 +133,31 @@
 ; loses the optimization rather than misbehaving.
 (defstruct ArgPool [(depth i64) (slots (array (ptr (ArrayList CtVal)) 64))])
 (defn arg-pool [] (-> (ptr ArgPool))
-  (alloc-static ArgPool))
+  (alloc/static ArgPool))
 (defn mh-arg-new [] (-> (ptr i8))
   (let [p (arg-pool)
-        d (load (field p depth))]
-    (if (icmp-ge d 64)
+        d (primitive/load (primitive/field p depth))]
+    (if (primitive/icmp-ge d 64)
         (do
-          (store! (field p depth) (iadd d 1))
-          (cast (ptr i8) (box-al [CtVal] (malloc-allocator) (al-new [CtVal] (malloc-allocator)))))
-        (let [sp (index (field p slots) d)]
-          (if (icmp-eq (cast i64 (load sp)) 0)
-              (store! sp (box-al [CtVal] (malloc-allocator) (al-new [CtVal] (malloc-allocator))))
-              (al-clear! [CtVal] (mut (load sp))))
-          (store! (field p depth) (iadd d 1))
-          (cast (ptr i8) (load sp))))))
+          (primitive/store! (primitive/field p depth) (primitive/iadd d 1))
+          (primitive/cast (ptr i8) (box-al [CtVal] (malloc-allocator) (al-new [CtVal] (malloc-allocator)))))
+        (let [sp (primitive/index (primitive/field p slots) d)]
+          (if (primitive/icmp-eq (primitive/cast i64 (primitive/load sp)) 0)
+              (primitive/store! sp (box-al [CtVal] (malloc-allocator) (al-new [CtVal] (malloc-allocator))))
+              (al-clear! [CtVal] (mut (primitive/load sp))))
+          (primitive/store! (primitive/field p depth) (primitive/iadd d 1))
+          (primitive/cast (ptr i8) (primitive/load sp))))))
 ; Pop the innermost list. Called once the op has run: code-op's result never points
 ; into the argument list (it returns Sexp handles and slices into Sexp-owned memory),
 ; so the list is dead the moment code-op returns. A failing op halts the metaprogram
 ; thread inside code-op and never gets here, which is fine — that thread is over.
 (defn mh-arg-pop! [] (-> i64)
   (let [p (arg-pool)
-        d (load (field p depth))]
-    (when (icmp-gt d 0) (store! (field p depth) (isub d 1)))
+        d (primitive/load (primitive/field p depth))]
+    (when (primitive/icmp-gt d 0) (primitive/store! (primitive/field p depth) (primitive/isub d 1)))
     0))
 (defn mh-arg-push [(b (ptr i8)) (v CtVal)] (-> (ptr i8))
-  (do (al-push! [CtVal] (cast (ptr (ArrayList CtVal)) b) v) b))
+  (do (al-push! [CtVal] (primitive/cast (ptr (ArrayList CtVal)) b) v) b))
 (defn mh-arg-c [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8))
   (mh-arg-push b (CCode (mh-handle-sexp c))))
 (defn mh-arg-i [(b (ptr i8)) (v i64)] (-> (ptr i8))
@@ -164,13 +165,13 @@
 (defn mh-arg-s [(b (ptr i8)) (p (ptr u8)) (n i64)] (-> (ptr i8))
   (mh-arg-push b (CStr (slice-new p n))))
 (defn mh-arg-b [(b (ptr i8)) (v i64)] (-> (ptr i8))
-  (mh-arg-push b (CBool (icmp-ne v 0))))
+  (mh-arg-push b (CBool (primitive/icmp-ne v 0))))
 (defn mh-arg-f [(b (ptr i8)) (x f64)] (-> (ptr i8))
   (mh-arg-push b (CFloat x)))
 
 ; ---- run an op through the interpreter's own dispatch --------------------------
 (defn mh-run [(op i64) (b (ptr i8))] (-> CtVal)
-  (match (code-op op (cast (ptr (ArrayList CtVal)) b) (mh-cx))
+  (match (code-op op (primitive/cast (ptr (ArrayList CtVal)) b) (mh-cx))
     (Err [d] (do (mh-halt d) (CInt 0)))
     (Ok [v] (do (mh-arg-pop!) v))))
 (defn mh-op-i [(op i64) (b (ptr i8))] (-> i64)
@@ -187,43 +188,43 @@
                 (CCode [c] (mh-box-sexp c))
                 (_ (match (ctval->sexp v)
                      (Ok [sx] (mh-box-sexp sx))
-                     (Err [d] (do (mh-halt d) (cast (ptr i8) 0))))))))
+                     (Err [d] (do (mh-halt d) (primitive/cast (ptr i8) 0))))))))
 (defn mh-op-s [(op i64) (b (ptr i8))] (-> (ptr i8))
   (match-else (mh-run op b)
               (CStr [s] (mh-buf s))
-              (_ (do (mh-bug "code-op result is not a string") (cast (ptr i8) 0)))))
+              (_ (do (mh-bug "code-op result is not a string") (primitive/cast (ptr i8) 0)))))
 
 ; ---- quote registry -------------------------------------------------------------
-; metalower collects every EQuote/QLit form (in lowering order) into a registry of
+; metalower collects every EQuote/QLit form (int lowering order) into a registry of
 ; stable (ptr Sexp); index k is baked into the dylib as (mp-quoted k). The handle
-; aliases the AST's own node — same sharing the interpreter's (CCode (load form)).
+; aliases the AST's own node — same sharing the interpreter's (CCode (primitive/load form)).
 (defn mh-quoted [(k i64)] (-> (ptr i8))
   (let [b (meta-host-box)
-        reg (load (field b registry))]
-    (if (icmp-eq (cast i64 reg) 0)
-        (do (mh-bug "quote registry unset") (cast (ptr i8) 0))
-        (if (or (icmp-lt k 0) (icmp-ge k (al-len [(ptr Sexp)] (load reg))))
-            (do (mh-bug "quote registry index out of range") (cast (ptr i8) 0))
-            (cast (ptr i8) (al-get [(ptr Sexp)] (load reg) k))))))
+        reg (primitive/load (primitive/field b registry))]
+    (if (primitive/icmp-eq (primitive/cast i64 reg) 0)
+        (do (mh-bug "quote registry unset") (primitive/cast (ptr i8) 0))
+        (if (or (primitive/icmp-lt k 0) (primitive/icmp-ge k (al-len [(ptr Sexp)] (primitive/load reg))))
+            (do (mh-bug "quote registry index out of range") (primitive/cast (ptr i8) 0))
+            (primitive/cast (ptr i8) (al-get [(ptr Sexp)] (primitive/load reg) k))))))
 
 ; ---- quasiquote builder (a boxed ArrayList Sexp) --------------------------------
 (defn mh-qq-new [] (-> (ptr i8))
-  (let [a (malloc-allocator)] (cast (ptr i8) (box-al [Sexp] a (al-new [Sexp] a)))))
+  (let [a (malloc-allocator)] (primitive/cast (ptr i8) (box-al [Sexp] a (al-new [Sexp] a)))))
 (defn mh-qq-push [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8))
-  (do (al-push! [Sexp] (cast (ptr (ArrayList Sexp)) b) (mh-handle-sexp c)) b))
+  (do (al-push! [Sexp] (primitive/cast (ptr (ArrayList Sexp)) b) (mh-handle-sexp c)) b))
 (defn mh-qq-splice [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8))
   (let [s (mh-handle-sexp c)
         tg (sx-tag s)]
-    (if (not (or (icmp-eq tg 6) (icmp-eq tg 7)))
+    (if (not (or (primitive/icmp-eq tg 6) (primitive/icmp-eq tg 7)))
         (do (mh-halt (derr "comptime: ~@ splice expects a Code list")) b)
         (let [items (sx-items s)
               n (sx-len items)
               (mut i) 0]
-          (loop (if (icmp-ge (load i) n)
+          (loop (if (primitive/icmp-ge (primitive/load i) n)
                     (break)
                     (do
-                      (al-push! [Sexp] (cast (ptr (ArrayList Sexp)) b) (sx-at items (load i)))
-                      (store! i (iadd (load i) 1)))))
+                      (al-push! [Sexp] (primitive/cast (ptr (ArrayList Sexp)) b) (sx-at items (primitive/load i)))
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
           b))))
 ; The head-qualification half of the interpreter's qualify-head. The "head is a
 ; LITERAL symbol in the template" guard is decided at LOWER time (metalower emits
@@ -231,32 +232,32 @@
 ; rewrite, via the CtCtx the interpreter would have consulted.
 (defn mh-qualify-head! [(items (ptr (ArrayList Sexp)))] (-> i64)
   (let [cx (mh-cx)]
-    (unless (icmp-eq (al-len [Sexp] (load items)) 0)
-            (match (load (field cx qmodule))
+    (unless (primitive/icmp-eq (al-len [Sexp] (primitive/load items)) 0)
+            (match (primitive/load (primitive/field cx qmodule))
               (None [] 0)
               (Some [m]
-                    (unless (icmp-eq (cast i64 (load (field cx module_fns))) 0)
+                    (unless (primitive/icmp-eq (primitive/cast i64 (primitive/load (primitive/field cx module_fns))) 0)
                             (let [hp (al-elem [Sexp] items 0)]
-                              (unless (icmp-ne (sx-tag (load hp)) 2)
-                                      (let [name (sx-sval (load hp))]
-                                        (unless (or (has-dot name) (icmp-ge (find-slash name) 0))
+                              (unless (primitive/icmp-ne (sx-tag (primitive/load hp)) 2)
+                                      (let [name (sx-sval (primitive/load hp))]
+                                        (unless (or (has-dot name) (primitive/icmp-ge (find-slash name) 0))
                                                 (match (resolve-in-module cx name m)
                                                   (None [] 0)
-                                                  (Some [q] (do (store! (field hp kind) (KSym q)) 0)))))))))))))
+                                                  (Some [q] (do (primitive/store! (primitive/field hp kind) (KSym q)) 0)))))))))))))
 (defn mh-qq-list [(b (ptr i8))] (-> (ptr i8))
-  (mh-box-sexp (sx-mklist (cast (ptr (ArrayList Sexp)) b))))
+  (mh-box-sexp (sx-mklist (primitive/cast (ptr (ArrayList Sexp)) b))))
 (defn mh-qq-listq [(b (ptr i8))] (-> (ptr i8))
   (do
-    (mh-qualify-head! (cast (ptr (ArrayList Sexp)) b))
-    (mh-box-sexp (sx-mklist (cast (ptr (ArrayList Sexp)) b)))))
+    (mh-qualify-head! (primitive/cast (ptr (ArrayList Sexp)) b))
+    (mh-box-sexp (sx-mklist (primitive/cast (ptr (ArrayList Sexp)) b)))))
 (defn mh-qq-vec [(b (ptr i8))] (-> (ptr i8))
-  (mh-box-sexp (mk-sexp (KVec (cast (ptr (ArrayList Sexp)) b)) -1 -1)))
+  (mh-box-sexp (mk-sexp (KVec (primitive/cast (ptr (ArrayList Sexp)) b)) -1 -1)))
 
 ; ---- unquote conversions: EXACTLY ctval->sexp's scalar arms ---------------------
 (defn mh-unq-int [(v i64)] (-> (ptr i8))
   (mh-box-sexp (sx-mkint v)))
 (defn mh-unq-bool [(v i64)] (-> (ptr i8))
-  (mh-box-sexp (sx-sym (if (icmp-ne v 0) "true" "false"))))
+  (mh-box-sexp (sx-sym (if (primitive/icmp-ne v 0) "true" "false"))))
 (defn mh-unq-float [(x f64)] (-> (ptr i8))
   (mh-box-sexp (mk-sexp (KFloat (f64-bits x)) -1 -1)))
 (defn mh-unq-str [(p (ptr u8)) (n i64)] (-> (ptr i8))
@@ -266,9 +267,9 @@
 ; Sites the interpreter rejects only WHEN EVALUATED; metalower emits a call here so
 ; the compiled engine fails at the same moment with the same message.
 (defn mh-fail [(code i64)] (-> i64)
-  (cond (icmp-eq code 1) (mh-halt (derr "comptime: can't unquote an aggregate value into code"))
-        (icmp-eq code 2) (mh-halt (derr "comptime: ~@ splice expects a Code list"))
-        (icmp-eq code 3) (mh-halt (derr "comptime: ~@ (splice) is only valid inside a list/vector"))
+  (cond (primitive/icmp-eq code 1) (mh-halt (derr "comptime: can't unquote an aggregate value into code"))
+        (primitive/icmp-eq code 2) (mh-halt (derr "comptime: ~@ splice expects a Code list"))
+        (primitive/icmp-eq code 3) (mh-halt (derr "comptime: ~@ (splice) is only valid inside a list/vector"))
         :else (mh-bug "unknown failure code")))
 
 ; ---- the vtable handed to the dylib (see metashim.coil MetaVt — FIELD ORDER IS ABI)
@@ -303,7 +304,7 @@
 ; vtable holds — all raw scalar (ptr/i64/f64) ABI, no struct-by-value.
 ;
 ; These are THIN forwarding wrappers, deliberately NOT the mh-* functions
-; themselves: meta-vtable takes the address of every mh-* via (fnptr-of …), and an
+; themselves: meta-vtable takes the address of every mh-* via (primitive/fnptr-of …), and an
 ; export-c'd + address-taken function makes LLVM's wasm backend emit a GOT.func.*
 ; global import the single-unit finalizer cannot resolve. Keeping mh-* internal
 ; (their fnptr-of stays a plain TABLE_INDEX reloc) and export-c'ing wrappers that
@@ -382,59 +383,59 @@
 ; with the same raw-scalar ABI the wasm export bridge uses. Args arrive as i64 cells;
 ; f64 params (mh_arg_f / mh_unq_float) carry the IEEE-754 bit pattern.
 (defn mh-bits->f64 [(bits i64)] (-> f64)
-  (let [p (alloc-stack i64)] (store! p bits) (load (cast (ptr f64) p))))
+  (let [p (alloc/stack i64)] (primitive/store! p bits) (primitive/load (primitive/cast (ptr f64) p))))
 (defn mh-interp-dispatch [(nmd (ptr u8)) (nml i64) (buf (ptr i64)) (n i64)] (-> i64)
   (let [nm (slice-new nmd nml)]
-    (cond (str-eq nm "mh_arg_new") (cast i64 (mh-arg-new))
+    (cond (str-eq nm "mh_arg_new") (primitive/cast i64 (mh-arg-new))
           (str-eq nm "mh_arg_c")
-            (cast i64 (mh-arg-c (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1)))))
-          (str-eq nm "mh_arg_i") (cast i64 (mh-arg-i (cast (ptr i8) (load (index buf 0))) (load (index buf 1))))
+            (primitive/cast i64 (mh-arg-c (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0))) (primitive/cast (ptr i8) (primitive/load (primitive/index buf 1)))))
+          (str-eq nm "mh_arg_i") (primitive/cast i64 (mh-arg-i (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0))) (primitive/load (primitive/index buf 1))))
           (str-eq nm "mh_arg_s")
-            (cast i64
-                  (mh-arg-s (cast (ptr i8) (load (index buf 0)))
-                            (cast (ptr u8) (load (index buf 1)))
-                            (load (index buf 2))))
-          (str-eq nm "mh_arg_b") (cast i64 (mh-arg-b (cast (ptr i8) (load (index buf 0))) (load (index buf 1))))
+            (primitive/cast i64
+                  (mh-arg-s (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0)))
+                            (primitive/cast (ptr u8) (primitive/load (primitive/index buf 1)))
+                            (primitive/load (primitive/index buf 2))))
+          (str-eq nm "mh_arg_b") (primitive/cast i64 (mh-arg-b (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0))) (primitive/load (primitive/index buf 1))))
           (str-eq nm "mh_arg_f")
-            (cast i64
-                  (mh-arg-f (cast (ptr i8) (load (index buf 0))) (mh-bits->f64 (load (index buf 1)))))
-          (str-eq nm "mh_op_i") (mh-op-i (load (index buf 0)) (cast (ptr i8) (load (index buf 1))))
-          (str-eq nm "mh_op_h") (cast i64 (mh-op-h (load (index buf 0)) (cast (ptr i8) (load (index buf 1)))))
-          (str-eq nm "mh_op_s") (cast i64 (mh-op-s (load (index buf 0)) (cast (ptr i8) (load (index buf 1)))))
-          (str-eq nm "mh_quoted") (cast i64 (mh-quoted (load (index buf 0))))
-          (str-eq nm "mh_qq_new") (cast i64 (mh-qq-new))
+            (primitive/cast i64
+                  (mh-arg-f (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0))) (mh-bits->f64 (primitive/load (primitive/index buf 1)))))
+          (str-eq nm "mh_op_i") (mh-op-i (primitive/load (primitive/index buf 0)) (primitive/cast (ptr i8) (primitive/load (primitive/index buf 1))))
+          (str-eq nm "mh_op_h") (primitive/cast i64 (mh-op-h (primitive/load (primitive/index buf 0)) (primitive/cast (ptr i8) (primitive/load (primitive/index buf 1)))))
+          (str-eq nm "mh_op_s") (primitive/cast i64 (mh-op-s (primitive/load (primitive/index buf 0)) (primitive/cast (ptr i8) (primitive/load (primitive/index buf 1)))))
+          (str-eq nm "mh_quoted") (primitive/cast i64 (mh-quoted (primitive/load (primitive/index buf 0))))
+          (str-eq nm "mh_qq_new") (primitive/cast i64 (mh-qq-new))
           (str-eq nm "mh_qq_push")
-            (cast i64
-                  (mh-qq-push (cast (ptr i8) (load (index buf 0)))
-                              (cast (ptr i8) (load (index buf 1)))))
+            (primitive/cast i64
+                  (mh-qq-push (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0)))
+                              (primitive/cast (ptr i8) (primitive/load (primitive/index buf 1)))))
           (str-eq nm "mh_qq_splice")
-            (cast i64
-                  (mh-qq-splice (cast (ptr i8) (load (index buf 0)))
-                                (cast (ptr i8) (load (index buf 1)))))
-          (str-eq nm "mh_qq_list") (cast i64 (mh-qq-list (cast (ptr i8) (load (index buf 0)))))
+            (primitive/cast i64
+                  (mh-qq-splice (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0)))
+                                (primitive/cast (ptr i8) (primitive/load (primitive/index buf 1)))))
+          (str-eq nm "mh_qq_list") (primitive/cast i64 (mh-qq-list (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0)))))
           (str-eq nm "mh_qq_listq")
-            (cast i64
-                  (mh-qq-listq (cast (ptr i8) (load (index buf 0)))))
+            (primitive/cast i64
+                  (mh-qq-listq (primitive/cast (ptr i8) (primitive/load (primitive/index buf 0)))))
           (str-eq nm "mh_qq_vec")
-            (cast i64
-                  (mh-qq-vec (cast (ptr i8)
-                                   (load (index buf 0)))))
-          (str-eq nm "mh_unq_int") (cast i64 (mh-unq-int (load (index buf 0))))
+            (primitive/cast i64
+                  (mh-qq-vec (primitive/cast (ptr i8)
+                                   (primitive/load (primitive/index buf 0)))))
+          (str-eq nm "mh_unq_int") (primitive/cast i64 (mh-unq-int (primitive/load (primitive/index buf 0))))
           (str-eq nm "mh_unq_bool")
-            (cast i64
-                  (mh-unq-bool (load (index buf 0))))
+            (primitive/cast i64
+                  (mh-unq-bool (primitive/load (primitive/index buf 0))))
           (str-eq nm "mh_unq_float")
-            (cast i64
-                  (mh-unq-float (mh-bits->f64 (load (index buf
+            (primitive/cast i64
+                  (mh-unq-float (mh-bits->f64 (primitive/load (primitive/index buf
                                                            0)))))
           (str-eq nm "mh_unq_str")
-            (cast i64
-                  (mh-unq-str (cast (ptr u8)
-                                    (load (index buf
+            (primitive/cast i64
+                  (mh-unq-str (primitive/cast (ptr u8)
+                                    (primitive/load (primitive/index buf
                                                  0)))
-                              (load (index buf
+                              (primitive/load (primitive/index buf
                                            1))))
-          (str-eq nm "mh_fail") (mh-fail (load (index buf 0)))
+          (str-eq nm "mh_fail") (mh-fail (primitive/load (primitive/index buf 0)))
           :else
             (do
               (mh-bug (sconcat3 (malloc-allocator)
@@ -444,26 +445,26 @@
               0))))
 
 (defn meta-vtable [] (-> (ptr i8))
-  (let [v (alloc-static MetaVt)]
-    (store! (field v arg_new) (fnptr-of mh-arg-new))
-    (store! (field v arg_c) (fnptr-of mh-arg-c))
-    (store! (field v arg_i) (fnptr-of mh-arg-i))
-    (store! (field v arg_s) (fnptr-of mh-arg-s))
-    (store! (field v arg_b) (fnptr-of mh-arg-b))
-    (store! (field v arg_f) (fnptr-of mh-arg-f))
-    (store! (field v op_i) (fnptr-of mh-op-i))
-    (store! (field v op_h) (fnptr-of mh-op-h))
-    (store! (field v op_s) (fnptr-of mh-op-s))
-    (store! (field v quoted) (fnptr-of mh-quoted))
-    (store! (field v qq_new) (fnptr-of mh-qq-new))
-    (store! (field v qq_push) (fnptr-of mh-qq-push))
-    (store! (field v qq_splice) (fnptr-of mh-qq-splice))
-    (store! (field v qq_list) (fnptr-of mh-qq-list))
-    (store! (field v qq_listq) (fnptr-of mh-qq-listq))
-    (store! (field v qq_vec) (fnptr-of mh-qq-vec))
-    (store! (field v unq_int) (fnptr-of mh-unq-int))
-    (store! (field v unq_bool) (fnptr-of mh-unq-bool))
-    (store! (field v unq_float) (fnptr-of mh-unq-float))
-    (store! (field v unq_str) (fnptr-of mh-unq-str))
-    (store! (field v fail) (fnptr-of mh-fail))
-    (cast (ptr i8) v)))
+  (let [v (alloc/static MetaVt)]
+    (primitive/store! (primitive/field v arg_new) (primitive/fnptr-of mh-arg-new))
+    (primitive/store! (primitive/field v arg_c) (primitive/fnptr-of mh-arg-c))
+    (primitive/store! (primitive/field v arg_i) (primitive/fnptr-of mh-arg-i))
+    (primitive/store! (primitive/field v arg_s) (primitive/fnptr-of mh-arg-s))
+    (primitive/store! (primitive/field v arg_b) (primitive/fnptr-of mh-arg-b))
+    (primitive/store! (primitive/field v arg_f) (primitive/fnptr-of mh-arg-f))
+    (primitive/store! (primitive/field v op_i) (primitive/fnptr-of mh-op-i))
+    (primitive/store! (primitive/field v op_h) (primitive/fnptr-of mh-op-h))
+    (primitive/store! (primitive/field v op_s) (primitive/fnptr-of mh-op-s))
+    (primitive/store! (primitive/field v quoted) (primitive/fnptr-of mh-quoted))
+    (primitive/store! (primitive/field v qq_new) (primitive/fnptr-of mh-qq-new))
+    (primitive/store! (primitive/field v qq_push) (primitive/fnptr-of mh-qq-push))
+    (primitive/store! (primitive/field v qq_splice) (primitive/fnptr-of mh-qq-splice))
+    (primitive/store! (primitive/field v qq_list) (primitive/fnptr-of mh-qq-list))
+    (primitive/store! (primitive/field v qq_listq) (primitive/fnptr-of mh-qq-listq))
+    (primitive/store! (primitive/field v qq_vec) (primitive/fnptr-of mh-qq-vec))
+    (primitive/store! (primitive/field v unq_int) (primitive/fnptr-of mh-unq-int))
+    (primitive/store! (primitive/field v unq_bool) (primitive/fnptr-of mh-unq-bool))
+    (primitive/store! (primitive/field v unq_float) (primitive/fnptr-of mh-unq-float))
+    (primitive/store! (primitive/field v unq_str) (primitive/fnptr-of mh-unq-str))
+    (primitive/store! (primitive/field v fail) (primitive/fnptr-of mh-fail))
+    (primitive/cast (ptr i8) v)))

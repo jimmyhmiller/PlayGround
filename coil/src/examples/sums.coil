@@ -1,3 +1,5 @@
+(module example.sums)
+(import "primitive.coil" :as primitive)
 ; Sum types (tagged unions) + match, including generic ones. Reuses the generics
 ; machinery: (Option i64) monomorphizes to a concrete tagged union.
 ;   coil run src/examples/sums.coil; echo $?   => 42
@@ -15,9 +17,9 @@
 
 (defn area [(s Shape)] (-> :i64)
   (match s
-    (Circle [r] (imul 3 (imul r r)))   ; ~pi r^2
-    (Rect [w h] (imul w h))))
+    (Circle [r] (primitive/imul 3 (primitive/imul r r)))   ; ~pi r^2
+    (Rect [w h] (primitive/imul w h))))
 
 (defn main [] (-> :i64)
-  (iadd (unwrap-or [i64] (Some [i64] 30) 0)   ; 30
+  (primitive/iadd (unwrap-or [i64] (Some [i64] 30) 0)   ; 30
         (area (Rect 4 3))))                    ; 12  -> 42

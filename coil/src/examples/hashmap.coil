@@ -3,6 +3,7 @@
 ; supplies the safe byte-wise ops for scalar keys.
 ;   coil run src/examples/hashmap.coil; echo $?   => 42
 (module app)
+(import "primitive.coil" :as primitive)
 (import "src/stdlib/hashmap.coil" :use *)
 (import "src/stdlib/alloc.coil" :use *)
 (import "src/stdlib/result.coil" :use *)
@@ -14,7 +15,7 @@
     (for [i 0 30] (hm-put! (mut m) i i))   ; 0..29, several resizes/rehashes
     (hm-put! (mut m) 13 9)                  ; update key 13 -> 9
     (hm-remove! (mut m) 1)                  ; tombstone key 1
-    (let [r (iadd (match (hm-get [i64 i64] m 13) (None [] -1) (Some [v] v))   ; 9
+    (let [r (primitive/iadd (match (hm-get [i64 i64] m 13) (None [] -1) (Some [v] v))   ; 9
                   (hm-len m))]                                                 ; 29 -> 38? 9+29=38
       (hm-free! (mut m))
-      (iadd r 4))))                          ; 38 + 4 = 42
+      (primitive/iadd r 4))))                          ; 38 + 4 = 42

@@ -1,8 +1,0 @@
-(defn classify [(x i64)] (-> i64) (if (= x 1) 100 (if (= x 2) 200 (if (= x 3) 300 999))))
-
-(defn sign2 [(x i64)] (-> i64) (if (< x 0) -1 (if (> x 0) 1 0)))
-
-(defn already-cond [(x i64)] (-> i64) (if (= x 1) 10 (if (= x 2) 20 (if (= x 3) 30 99))))
-
-(defn main [] (-> i64) (+ (classify 3) (+ (sign2 -5) (already-cond 2))))
-

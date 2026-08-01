@@ -1,4 +1,5 @@
 (module arbitrary_test)
+(import "primitive.coil" :as primitive)
 ; Run with the COMPILED metaprogram engine (the interpreter cannot run these
 ; macros — generics, HashMap, FFI, malloc at compile time):
 ;   COIL_META=compiled coil run tests/metaprogramming/compile-and-run/arbitrary_test.coil
@@ -15,9 +16,9 @@
         d (static-strlen "hello, metaprogram")
         ; a NAME built with the StrBuf library: binds the local temp-3
         e (let [(const-name temp 3) 99] temp-3)]
-    (if (icmp-ne a 385) 1
-    (if (icmp-ne b 42) 2
-    (if (icmp-ne c 2026) 3
-    (if (icmp-ne d 18) 4
-    (if (icmp-ne e 99) 5
+    (if (primitive/icmp-ne a 385) 1
+    (if (primitive/icmp-ne b 42) 2
+    (if (primitive/icmp-ne c 2026) 3
+    (if (primitive/icmp-ne d 18) 4
+    (if (primitive/icmp-ne e 99) 5
         0)))))))

@@ -7,9 +7,45 @@ the root package, and the dependency rules are executable. Cal.com's production
 build and 60-test Playwright gate demonstrate that the extracted layers compose
 at real-application scale.
 
-This document covers the work required to turn that successful extraction into
-a deliberate, stable extension architecture. It is not a second rewrite. Each
-step should tighten one boundary while preserving behavior.
+This document originally covered the work required to turn that successful
+extraction into a deliberate, stable extension architecture. That work is now
+complete. The priorities below remain as the design record and acceptance
+contract for future changes.
+
+## Completion record
+
+Completed on 2026-08-01:
+
+- Web is framework-neutral; Vite owns config evaluation, environment exposure,
+  public-directory behavior, and manifest compatibility through a Web adapter.
+- Next owns its environment/source policy and has no Vite dependency. TanStack's
+  intentional Vite dependency is confined to its integration layer.
+- Runtime contributions are named and owned, exclusive capabilities conflict
+  explicitly, required capabilities validate before rendering, and every final
+  browser/server profile has a composition snapshot.
+- `diffpack-default-loader::BuildEngine` is the supported external facade. The
+  workspace external-provider example exercises resolution, virtual loading,
+  transforms, emitted assets, watches, incremental rebuilds, externals, warnings,
+  and fatal diagnostics.
+- The supported API and stability policy are documented in
+  [PUBLIC_API.md](PUBLIC_API.md) and [EXTENDING_DIFFPACK.md](EXTENDING_DIFFPACK.md).
+  `cargo public-api` is recorded in `public-api.snapshot` and checked by the
+  extraction gates.
+- Next and TanStack profile preparation/emission, Vite manifest emission, and
+  Next production layout/prerender assembly live in their integration crates.
+  The root selects profiles and orchestrates their commands.
+
+Validation at completion:
+
+- `./scripts/check-extraction.sh phase` passes all 775 extracted-crate unit tests.
+- `./scripts/check-extraction.sh final` passes the full workspace, corpus, rustdoc,
+  dependency-boundary, and public-API gates.
+- The pinned Cal.com reference and Diffpack production builds both pass the heavy
+  build-only gate after running Cal.com's declared static-input preparation task.
+- The long Cal.com Playwright run remains a separate release gate. Its first
+  attempt was invalidated by the corpus build's deliberately dead database URL;
+  a correctly configured rerun was stopped by request rather than blocking this
+  architecture cleanup.
 
 ## Desired end state
 
@@ -42,7 +78,7 @@ lower layers. The important constraints are:
   Vite-shaped implementation.
 - The root package selects and composes profiles; it does not implement them.
 
-## Priority 1: remove Vite semantics from `diffpack-web`
+## Priority 1: remove Vite semantics from `diffpack-web` — complete
 
 ### Problem
 
@@ -90,7 +126,7 @@ Keep or move into `diffpack-vite-compat`:
 - Existing Vite build, preview, proxy, HMR, environment, and manifest tests pass.
 - The dependency-boundary script rejects a future Web-to-Vite edge.
 
-## Priority 2: remove Vite-shaped utilities from Next and TanStack
+## Priority 2: remove Vite-shaped utilities from Next and TanStack — complete
 
 ### Problem
 
@@ -133,7 +169,7 @@ Move generic mechanism downward only when its semantics are framework-neutral:
   adapter and is covered by integration tests.
 - No API with `Vite` in its name is used to implement Next semantics.
 
-## Priority 3: make policy composition explicit and safe
+## Priority 3: make policy composition explicit and safe — complete
 
 ### Problem
 
@@ -190,7 +226,7 @@ the profile explicitly selects one.
 - Invalid policy combinations fail before rendering any chunks.
 - A profile test can explain the origin and order of every emitted prelude.
 
-## Priority 4: provide one ergonomic external-tool facade
+## Priority 4: provide one ergonomic external-tool facade — complete
 
 ### Problem
 
@@ -245,7 +281,7 @@ The example must not import private root modules or reach into driver fields.
   maps are never silently discarded.
 - The example is compiled and executed in CI.
 
-## Priority 5: define and reduce the public surface
+## Priority 5: define and reduce the public surface — complete
 
 ### Problem
 
@@ -275,7 +311,7 @@ dense-module-id representations.
 - Framework crates consume stable lower-layer facades rather than arbitrary
   internal modules.
 
-## Priority 6: finish root composition cleanup
+## Priority 6: finish root composition cleanup — complete
 
 The root package is now correctly a CLI/composition layer, but `src/main.rs`
 remains large. Line count alone is not a defect; framework behavior in that file
@@ -345,6 +381,10 @@ clear dependency diff, focused tests, and no compatibility regression.
 
 ## Architecture definition of done
 
+All architecture criteria below are satisfied. The final real-application
+browser suite is intentionally tracked as a release-validation gate, as noted in
+the completion record, rather than unfinished ownership work.
+
 - Core and default-loader remain free of browser and framework semantics.
 - Web no longer depends on Vite compatibility.
 - Next no longer depends on Vite compatibility.
@@ -354,3 +394,51 @@ clear dependency diff, focused tests, and no compatibility regression.
 - Public APIs are intentionally selected rather than migration-era exposure.
 - Root remains CLI/composition only.
 - Workspace, corpus, and Cal.com gates meet or exceed the pre-cleanup baseline.
+
+## Native Next.js bundler integration
+
+The native integration follows one dependency direction:
+
+```text
+Next CLI/build/dev orchestration
+  -> @diffpack/next-bindings (versioned transport and raw binding shapes)
+  -> diffpack-next (Next routes, entry templates, manifests, and artifacts)
+  -> diffpack-web/default-loader/core (framework-neutral compilation)
+```
+
+Next continues to load ordinary `next.config.*`, run type checking, collect
+route data, perform static generation, write its global manifests, and serve
+with `next start`. `--diffpack` selects Diffpack explicitly; applications do not
+need a custom Next configuration.
+
+The per-route server artifact must be a Diffpack-compiled instance of Next's
+official App Page or App Route entry template. A module that only copies a
+pre-rendered document is not an acceptable production substitute: Next's build
+workers call the entry renderer ABI (`patchFetch`, metadata construction,
+segment collection, prerender helpers, and the route handler), and development
+adds subscriptions and HMR on the same endpoint identity. Manifest and client
+asset translation remains in `diffpack-next`; the JavaScript binding must not
+accumulate filesystem or route semantics.
+
+Production integration progress on 2026-08-01:
+
+- Diffpack compiles Next's official App Page entry ABI, including implicit
+  not-found and global-error entries, and emits the native `.next/server/app`
+  artifacts and client-reference manifests consumed by Next build workers.
+- Diffpack mechanically expands the installed Next version's official App
+  Route template using the same route fields as `next-app-loader`. The binding
+  transports standard `nextConfig.output` instead of requiring an
+  application-specific configuration escape hatch.
+- A zero-custom-config App Router fixture completes `next build --diffpack`,
+  static generation, and `next start`; its page and a real `GET /api/ping`
+  route both return 200 through Next's production server.
+- Mixed Pages Router artifacts, Cal.com validation, native development
+  subscriptions/HMR, and comparative benchmarks remain release blockers.
+
+Completion requires native `next build --diffpack`, `next start`, and
+`next dev --diffpack`, standard Next option coverage, mixed App/Pages Router
+support, at least 60 passing Cal.com E2E tests, and production/dev benchmarks
+against the existing bundler with material regressions fixed.
+
+The live implementation status, verified evidence, and ordered remaining work are
+tracked in [NATIVE_NEXT_DIFFPACK_STATUS.md](NATIVE_NEXT_DIFFPACK_STATUS.md).

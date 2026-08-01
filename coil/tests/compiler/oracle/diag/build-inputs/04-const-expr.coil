@@ -1,2 +1,4 @@
-(const A (iadd 1 2))
+(module oracle.04-const-expr)
+(import "primitive.coil" :as primitive)
+(const A (primitive/iadd 1 2))
 (defn main [] (-> i64) A)

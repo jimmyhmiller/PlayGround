@@ -59,7 +59,7 @@ pub const MISSING_RUNTIME_HELP: &str = "\n  this is diffpack's requirement, not 
 /// The subpaths diffpack's generated code imports. Each is aliased to the concrete
 /// file the environment's conditions select; nothing else in the package is aliased,
 /// so an unexpected subpath fails to resolve loudly instead of being redirected.
-const SUBPATHS: [&str; 2] = ["client", "server"];
+const SUBPATHS: [&str; 3] = ["client", "server", "static"];
 
 /// Where Next keeps its vendored copy, relative to the `next` package root.
 const VENDORED_RELATIVE: [&str; 3] = ["dist", "compiled", PACKAGE];
@@ -69,7 +69,7 @@ const VENDORED_RELATIVE: [&str; 3] = ["dist", "compiled", PACKAGE];
 /// when no copy exists anywhere (the unresolved import is then the build's own error).
 ///
 /// `client` selects the browser resolution rules (the `browser` alias field), matching
-/// [`crate::bundler`]'s `resolve_options` for `Target::Client`.
+/// the default loader's client resolve options.
 pub fn aliases(root: &Path, conditions: &[String], client: bool) -> Vec<(String, String)> {
     if installed_in_app(root) {
         return Vec::new();
@@ -109,7 +109,7 @@ const VENDORED_REACT_PACKAGES: [&str; 2] = ["react", "react-dom"];
 /// Empty when the installed `next` vendors no React (nothing better to alias to, so
 /// the app's own copy is used exactly as before) or when there is no `next` at all.
 ///
-/// Longest specifier first: [`crate::bundler`]'s alias table also rewrites PREFIX
+/// Longest specifier first: the default loader's alias table also rewrites prefix
 /// matches, so `react/jsx-runtime` must be found as an exact alias before the bare
 /// `react` entry can claim it as a prefix.
 pub fn react_aliases(root: &Path, conditions: &[String], client: bool) -> Vec<(String, String)> {
@@ -143,6 +143,209 @@ pub fn react_aliases(root: &Path, conditions: &[String], client: bool) -> Vec<(S
     // entry must be seen before a shorter one could claim it as a prefix.
     aliases.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()).then(left.cmp(right)));
     aliases
+}
+
+/// Next's Node.js React Server layer aliases.
+///
+/// Native `.next` route entries execute inside Next's app-page runtime. They must use
+/// the same vendored facade modules as that runtime, not merely resolve the underlying
+/// compiled React packages to equivalent files. The facades are the module-identity
+/// boundary shared by the renderer, Flight writer, and Next's route module.
+pub fn native_next_rsc_aliases(next_root: &Path) -> Result<Vec<(String, String)>, String> {
+    let entries = [
+        (
+            "react",
+            "dist/server/route-modules/app-page/vendored/rsc/react.js",
+        ),
+        (
+            "react/compiler-runtime",
+            "dist/server/route-modules/app-page/vendored/rsc/react-compiler-runtime.js",
+        ),
+        (
+            "react/jsx-dev-runtime",
+            "dist/server/route-modules/app-page/vendored/rsc/react-jsx-dev-runtime.js",
+        ),
+        (
+            "react/jsx-runtime",
+            "dist/server/route-modules/app-page/vendored/rsc/react-jsx-runtime.js",
+        ),
+        (
+            "react-dom",
+            "dist/server/route-modules/app-page/vendored/rsc/react-dom.js",
+        ),
+        ("react-dom/client", "dist/compiled/react-dom/client.js"),
+        ("react-dom/server", "dist/compiled/react-dom/server.node.js"),
+        (
+            "react-dom/server.browser",
+            "dist/compiled/react-dom/server.browser.js",
+        ),
+        ("react-dom/static", "dist/compiled/react-dom/static.node.js"),
+        (
+            "react-server-dom-webpack/client",
+            "dist/compiled/react-server-dom-webpack/client.node.js",
+        ),
+        (
+            "react-server-dom-webpack/server",
+            "dist/server/route-modules/app-page/vendored/rsc/react-server-dom-webpack-server.js",
+        ),
+        (
+            "react-server-dom-webpack/server.node",
+            "dist/server/route-modules/app-page/vendored/rsc/react-server-dom-webpack-server.js",
+        ),
+        (
+            "react-server-dom-webpack/static",
+            "dist/server/route-modules/app-page/vendored/rsc/react-server-dom-webpack-static.js",
+        ),
+    ];
+    let mut aliases = Vec::with_capacity(entries.len());
+    for (specifier, relative) in entries {
+        let path = next_root.join(relative);
+        if !path.is_file() {
+            return Err(format!(
+                "installed Next is missing its native RSC runtime entry {}",
+                path.display()
+            ));
+        }
+        aliases.push((specifier.to_string(), path.to_string_lossy().into_owned()));
+    }
+    aliases.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()).then(left.cmp(right)));
+    Ok(aliases)
+}
+
+/// Next's Node.js SSR/client React layer aliases used while turning a Flight
+/// response into HTML. These facades share React's dispatcher with the app-page
+/// runtime that owns the render.
+pub fn native_next_ssr_aliases(next_root: &Path) -> Result<Vec<(String, String)>, String> {
+    let entries = [
+        (
+            "react",
+            "dist/server/route-modules/app-page/vendored/ssr/react.js",
+        ),
+        (
+            "react/compiler-runtime",
+            "dist/server/route-modules/app-page/vendored/ssr/react-compiler-runtime.js",
+        ),
+        (
+            "react/jsx-dev-runtime",
+            "dist/server/route-modules/app-page/vendored/ssr/react-jsx-dev-runtime.js",
+        ),
+        (
+            "react/jsx-runtime",
+            "dist/server/route-modules/app-page/vendored/ssr/react-jsx-runtime.js",
+        ),
+        (
+            "react-dom",
+            "dist/server/route-modules/app-page/vendored/ssr/react-dom.js",
+        ),
+        // The SSR module graph includes application dependencies which import
+        // these public renderer entry points directly. They must stay on the
+        // same vendored React ABI as Next's app-page runtime; falling back to
+        // the application's ReactDOM (Cal currently carries React 18 here)
+        // creates elements the React 19 route renderer cannot consume.
+        ("react-dom/server", "dist/compiled/react-dom/server.node.js"),
+        (
+            "react-dom/server.browser",
+            "dist/compiled/react-dom/server.browser.js",
+        ),
+        ("react-dom/static", "dist/compiled/react-dom/static.node.js"),
+        (
+            "react-server-dom-webpack/client",
+            "dist/server/route-modules/app-page/vendored/ssr/react-server-dom-webpack-client.js",
+        ),
+    ];
+    let mut aliases = Vec::with_capacity(entries.len());
+    for (specifier, relative) in entries {
+        let path = next_root.join(relative);
+        if !path.is_file() {
+            return Err(format!(
+                "installed Next is missing its native SSR runtime entry {}",
+                path.display()
+            ));
+        }
+        aliases.push((specifier.to_string(), path.to_string_lossy().into_owned()));
+    }
+    aliases.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()).then(left.cmp(right)));
+    Ok(aliases)
+}
+
+/// The shared-runtime replacements from Next's Node webpack configuration.
+/// Next source imports these contexts relatively from several depths; every spelling
+/// is redirected to the app-page runtime facade so RSC and SSR observe one provider.
+pub fn native_next_context_aliases(next_root: &Path) -> Result<Vec<(String, String)>, String> {
+    let entries = [
+        (
+            "../../../shared/lib/app-router-context.shared-runtime",
+            "app-router-context",
+        ),
+        (
+            "../../shared/lib/app-router-context.shared-runtime",
+            "app-router-context",
+        ),
+        (
+            "../../shared/lib/hooks-client-context.shared-runtime",
+            "hooks-client-context",
+        ),
+        (
+            "../../shared/lib/router-context.shared-runtime",
+            "router-context",
+        ),
+        (
+            "../../shared/lib/server-inserted-html.shared-runtime",
+            "server-inserted-html",
+        ),
+    ];
+    entries
+        .into_iter()
+        .map(|(specifier, module)| {
+            let path = next_root.join(format!(
+                "dist/server/route-modules/app-page/vendored/contexts/{module}.js"
+            ));
+            if !path.is_file() {
+                return Err(format!(
+                    "installed Next is missing its native context entry {}",
+                    path.display()
+                ));
+            }
+            Ok((specifier.to_string(), path.to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
+/// Next's Pages Node layer applies the `.shared-runtime` replacement rule to
+/// the Pages runtime's context table.
+pub fn native_pages_context_aliases(next_root: &Path) -> Result<Vec<(String, String)>, String> {
+    let modules = [
+        "app-router-context",
+        "head-manager-context",
+        "hooks-client-context",
+        "html-context",
+        "image-config-context",
+        "loadable-context",
+        "loadable",
+        "router-context",
+        "server-inserted-html",
+    ];
+    let mut aliases = Vec::new();
+    for module in modules {
+        let path = next_root.join(format!(
+            "dist/server/route-modules/pages/vendored/contexts/{module}.js"
+        ));
+        if !path.is_file() {
+            return Err(format!(
+                "installed Next is missing its native Pages context entry {}",
+                path.display()
+            ));
+        }
+        let target = path.to_string_lossy().into_owned();
+        for depth in 1..=5 {
+            aliases.push((
+                format!("{}shared/lib/{module}.shared-runtime", "../".repeat(depth)),
+                target.clone(),
+            ));
+        }
+    }
+    aliases.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()).then(left.cmp(right)));
+    Ok(aliases)
 }
 
 /// `react/jsx-runtime` -> `next/dist/compiled/react/jsx-runtime`: the same entry point
@@ -229,6 +432,22 @@ fn node_modules_ancestors(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     root.ancestors().map(|dir| dir.join("node_modules"))
 }
 
+/// Resolve an installed package using Node's nearest-ancestor `node_modules`
+/// lookup. Native Next integration must support hoisted monorepos such as Cal.com,
+/// where the application directory intentionally has no local `node_modules/next`.
+pub fn installed_package_root(root: &Path, package: &str) -> Result<PathBuf, String> {
+    node_modules_ancestors(root)
+        .map(|node_modules| node_modules.join(package))
+        .find(|candidate| candidate.join("package.json").is_file())
+        .and_then(|candidate| candidate.canonicalize().ok())
+        .ok_or_else(|| {
+            format!(
+                "cannot resolve installed package {package} from {}",
+                root.display()
+            )
+        })
+}
+
 /// Resolve options that find the VENDORED package by its bare name: `modules` is the
 /// directory containing it rather than `node_modules`, so `exports` applies exactly as
 /// it would for an installed package. Conditions mirror `bundler::resolve_options` (the
@@ -301,6 +520,10 @@ mod tests {
                 "./server": {
                   "react-server": { "node": "./server.node.js" },
                   "default": "./server.js"
+                },
+                "./static": {
+                  "react-server": { "node": "./static.node.js" },
+                  "default": "./static.js"
                 }
               }
             }"#,
@@ -311,6 +534,8 @@ mod tests {
             "client.browser.js",
             "server.node.js",
             "server.js",
+            "static.node.js",
+            "static.js",
             "index.js",
         ] {
             std::fs::write(vendored.join(file), "module.exports = {};\n").unwrap();
@@ -358,6 +583,10 @@ mod tests {
                 (
                     "react-server-dom-webpack/server".into(),
                     "server.node.js".into()
+                ),
+                (
+                    "react-server-dom-webpack/static".into(),
+                    "static.node.js".into()
                 ),
             ],
         );

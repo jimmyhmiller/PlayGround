@@ -1,4 +1,5 @@
 (module coil.mem)
+(import "primitive.coil" :as primitive)
 ; Low-level memory operations — typed, generic wrappers over libc, each sizing
 ; itself with `sizeof T`. They operate on raw `(ptr T)` regions and need no
 ; allocator. Foundational: depends only on libc (no other Coil module), so any
@@ -16,17 +17,17 @@
 
 ;; Copy n elements src -> dst (regions must NOT overlap).
 (defn mem-copy [T] [(dst (ptr T)) (src (ptr T)) (n :i64)] (-> :i64)
-  (memcpy (cast (ptr i8) dst) (cast (ptr i8) src) (cast isize (imul n (sizeof T))))
+  (memcpy (primitive/cast (ptr i8) dst) (primitive/cast (ptr i8) src) (primitive/cast isize (primitive/imul n (primitive/sizeof T))))
   0)
 
 ;; Copy n elements src -> dst, safe when the regions overlap.
 (defn mem-move [T] [(dst (ptr T)) (src (ptr T)) (n :i64)] (-> :i64)
-  (memmove (cast (ptr i8) dst) (cast (ptr i8) src) (cast isize (imul n (sizeof T))))
+  (memmove (primitive/cast (ptr i8) dst) (primitive/cast (ptr i8) src) (primitive/cast isize (primitive/imul n (primitive/sizeof T))))
   0)
 
 ;; Zero the first n elements.
 (defn mem-zero [T] [(dst (ptr T)) (n :i64)] (-> :i64)
-  (memset (cast (ptr i8) dst) 0 (cast isize (imul n (sizeof T))))
+  (memset (primitive/cast (ptr i8) dst) 0 (primitive/cast isize (primitive/imul n (primitive/sizeof T))))
   0)
 
 ;; Set each of the first n elements to v (element-wise — works for any T, unlike
@@ -34,12 +35,12 @@
 (defn mem-fill [T] [(dst (ptr T)) (v T) (n :i64)] (-> :i64)
   (let [(mut i) 0]
     (loop
-      (if (icmp-ge (load i) n)
+      (if (primitive/icmp-ge (primitive/load i) n)
           (break)
-          (do (store! (index dst (load i)) v)
-              (store! i (iadd (load i) 1))))))
+          (do (primitive/store! (primitive/index dst (primitive/load i)) v)
+              (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
   0)
 
 ;; True if the first n elements of a and b are byte-identical.
 (defn mem-eql [T] [(a (ptr T)) (b (ptr T)) (n :i64)] (-> bool)
-  (icmp-eq (memcmp (cast (ptr i8) a) (cast (ptr i8) b) (cast isize (imul n (sizeof T)))) 0))
+  (primitive/icmp-eq (memcmp (primitive/cast (ptr i8) a) (primitive/cast (ptr i8) b) (primitive/cast isize (primitive/imul n (primitive/sizeof T)))) 0))

@@ -11,6 +11,8 @@
 ; ============================================================================
 
 (module i8080)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (export Cpu init load-com emulate gen-interrupt
         reg setr rb wb rpc spc getf pop16 ienabled)
 
@@ -30,12 +32,12 @@
    (sp i64) (pc i64) (f i64) (ie i64)])
 
 ; ---- register / memory access ----------------------------------------------
-(defn reg  [(s (ptr Cpu)) (i i64)] (-> i64) (cast :i64 (load (index (field s regs) i))))
+(defn reg  [(s (ptr Cpu)) (i i64)] (-> i64) (primitive/cast :i64 (primitive/load (primitive/index (primitive/field s regs) i))))
 (defn setr [(s (ptr Cpu)) (i i64) (v i64)] (-> i64)
-  (do (store! (index (field s regs) i) (cast :u8 v)) 0))
-(defn rb   [(s (ptr Cpu)) (a i64)] (-> i64) (cast :i64 (load (index (field s mem) (& a 0xFFFF)))))
+  (do (primitive/store! (primitive/index (primitive/field s regs) i) (primitive/cast :u8 v)) 0))
+(defn rb   [(s (ptr Cpu)) (a i64)] (-> i64) (primitive/cast :i64 (primitive/load (primitive/index (primitive/field s mem) (& a 0xFFFF)))))
 (defn wb   [(s (ptr Cpu)) (a i64) (v i64)] (-> i64)
-  (do (store! (index (field s mem) (& a 0xFFFF)) (cast :u8 v)) 0))
+  (do (primitive/store! (primitive/index (primitive/field s mem) (& a 0xFFFF)) (primitive/cast :u8 v)) 0))
 (defn hl   [(s (ptr Cpu))] (-> i64) (| (<< (reg s 4) 8) (reg s 5)))
 
 ; M-aware register read/write: index 6 means the byte at HL.
@@ -43,8 +45,8 @@
 (defn setr8 [(s (ptr Cpu)) (i i64) (v i64)] (-> i64) (if (= i 6) (wb s (hl s) v) (setr s i v)))
 
 ; ---- pc / sp ---------------------------------------------------------------
-(defn rpc [(s (ptr Cpu))] (-> i64) (load (field s pc)))
-(defn spc [(s (ptr Cpu)) (v i64)] (-> i64) (do (store! (field s pc) (& v 0xFFFF)) 0))
+(defn rpc [(s (ptr Cpu))] (-> i64) (primitive/load (primitive/field s pc)))
+(defn spc [(s (ptr Cpu)) (v i64)] (-> i64) (do (primitive/store! (primitive/field s pc) (& v 0xFFFF)) 0))
 (defn addpc [(s (ptr Cpu)) (n i64)] (-> i64) (spc s (+ (rpc s) n)))
 
 ; ---- 16-bit register pairs (code 0=BC 1=DE 2=HL 3=SP) ----------------------
@@ -52,36 +54,36 @@
   (cond (= code 0) (| (<< (reg s 0) 8) (reg s 1))
         (= code 1) (| (<< (reg s 2) 8) (reg s 3))
         (= code 2) (| (<< (reg s 4) 8) (reg s 5))
-        (load (field s sp))))
+        (primitive/load (primitive/field s sp))))
 (defn pset [(s (ptr Cpu)) (code i64) (v i64)] (-> i64)
   (let [hi (& (>> v 8) 0xFF) lo (& v 0xFF)]
     (cond (= code 0) (do (setr s 0 hi) (setr s 1 lo))
           (= code 1) (do (setr s 2 hi) (setr s 3 lo))
           (= code 2) (do (setr s 4 hi) (setr s 5 lo))
-          (do (store! (field s sp) (& v 0xFFFF)) 0))))
+          (do (primitive/store! (primitive/field s sp) (& v 0xFFFF)) 0))))
 
 ; ---- stack -----------------------------------------------------------------
 (defn push16 [(s (ptr Cpu)) (v i64)] (-> i64)
-  (let [sp (load (field s sp))]
+  (let [sp (primitive/load (primitive/field s sp))]
     (do (wb s (& (- sp 1) 0xFFFF) (& (>> v 8) 0xFF))
         (wb s (& (- sp 2) 0xFFFF) (& v 0xFF))
-        (store! (field s sp) (& (- sp 2) 0xFFFF)) 0)))
+        (primitive/store! (primitive/field s sp) (& (- sp 2) 0xFFFF)) 0)))
 (defn pop16 [(s (ptr Cpu))] (-> i64)
-  (let [sp (load (field s sp)) lo (rb s sp) hi (rb s (+ sp 1))]
-    (do (store! (field s sp) (& (+ sp 2) 0xFFFF)) (| (<< hi 8) lo))))
+  (let [sp (primitive/load (primitive/field s sp)) lo (rb s sp) hi (rb s (+ sp 1))]
+    (do (primitive/store! (primitive/field s sp) (& (+ sp 2) 0xFFFF)) (| (<< hi 8) lo))))
 
 ; ---- flags (bit positions: CY=0 P=2 AC=4 Z=6 S=7) --------------------------
-(defn getf [(s (ptr Cpu)) (bit i64)] (-> i64) (& (>> (load (field s f)) bit) 1))
+(defn getf [(s (ptr Cpu)) (bit i64)] (-> i64) (& (>> (primitive/load (primitive/field s f)) bit) 1))
 (defn setf [(s (ptr Cpu)) (bit i64) (v i64)] (-> i64)
-  (let [cur (load (field s f))]
-    (do (store! (field s f) (| (& cur (^ 0xFF (<< 1 bit))) (<< (& v 1) bit))) 0)))
+  (let [cur (primitive/load (primitive/field s f))]
+    (do (primitive/store! (primitive/field s f) (| (& cur (^ 0xFF (<< 1 bit))) (<< (& v 1) bit))) 0)))
 
 (defn parity8 [(x i64)] (-> i64)
-  (let [p (alloc-stack i64) y (alloc-stack i64)]
-    (do (store! p 0) (store! y (& x 0xFF))
-        (for [i 0 8] (do (store! p (+ (load p) (& (load y) 1)))
-                         (store! y (>> (load y) 1))))
-        (if (= (& (load p) 1) 0) 1 0))))
+  (let [p (alloc/stack i64) y (alloc/stack i64)]
+    (do (primitive/store! p 0) (primitive/store! y (& x 0xFF))
+        (for [i 0 8] (do (primitive/store! p (+ (primitive/load p) (& (primitive/load y) 1)))
+                         (primitive/store! y (>> (primitive/load y) 1))))
+        (if (= (& (primitive/load p) 1) 0) 1 0))))
 
 (defn flags-zsp [(s (ptr Cpu)) (val i64)] (-> i64)
   (let [v (& val 0xFF)]
@@ -190,10 +192,10 @@
     (cond
       (= (& op 0xCF) 0xC5)                                                     ; PUSH rp (rp3 = PSW)
         (let [rp (& (>> op 4) 3)]
-          (if (= rp 3) (push16 s (| (<< (reg s 7) 8) (load (field s f)))) (push16 s (pget s rp))))
+          (if (= rp 3) (push16 s (| (<< (reg s 7) 8) (primitive/load (primitive/field s f)))) (push16 s (pget s rp))))
       (= (& op 0xCF) 0xC1)                                                     ; POP rp
         (let [rp (& (>> op 4) 3) v (pop16 s)]
-          (if (= rp 3) (do (setr s 7 (& (>> v 8) 0xFF)) (store! (field s f) (& v 0xFF)) 0)
+          (if (= rp 3) (do (setr s 7 (& (>> v 8) 0xFF)) (primitive/store! (primitive/field s f) (& v 0xFF)) 0)
               (pset s rp v)))
       (= (& op 0xC7) 0xC7) (let [n (& (>> op 3) 7) ret (+ (rpc s) 2)]  ; RST n (ref: pc+2)
                                       (do (push16 s ret) (spc s (* n 8))))
@@ -218,14 +220,14 @@
                           (do (flags-zsp s x) (setf s 0 0) (setr s 7 x) (addpc s 1)))
       (= op 0xFE) (let [old (reg s 7) x (& (- (reg s 7) b1) 0xFF)]          ; CPI
                           (do (flags-zsp s x) (setf s 0 (if (< old b1) 1 0)) (addpc s 1)))
-      (= op 0xE3) (let [sp (load (field s sp)) l (reg s 5) h (reg s 4)]           ; XTHL
+      (= op 0xE3) (let [sp (primitive/load (primitive/field s sp)) l (reg s 5) h (reg s 4)]           ; XTHL
                           (do (setr s 5 (rb s sp)) (setr s 4 (rb s (+ sp 1))) (wb s sp l) (wb s (+ sp 1) h)))
       (= op 0xE9) (spc s (hl s))                                                  ; PCHL
       (= op 0xEB) (let [d (reg s 2) e (reg s 3)]                                  ; XCHG
                           (do (setr s 2 (reg s 4)) (setr s 3 (reg s 5)) (setr s 4 d) (setr s 5 e)))
-      (= op 0xF9) (do (store! (field s sp) (hl s)) 0)                             ; SPHL
-      (= op 0xF3) (do (store! (field s ie) 0) 0)                                  ; DI
-      (= op 0xFB) (do (store! (field s ie) 1) 0)                                  ; EI
+      (= op 0xF9) (do (primitive/store! (primitive/field s sp) (hl s)) 0)                             ; SPHL
+      (= op 0xF3) (do (primitive/store! (primitive/field s ie) 0) 0)                                  ; DI
+      (= op 0xFB) (do (primitive/store! (primitive/field s ie) 1) 0)                                  ; EI
       (= op 0xD3) (addpc s 1)                                                     ; OUT (machine intercepts)
       (= op 0xDB) (addpc s 1)                                                     ; IN  (machine intercepts)
       0)))
@@ -241,25 +243,25 @@
                                             (setr8 s (& (>> op 3) 7) (getr s (& op 7)))) ; MOV
           (= (& op 0xC0) 0x80) (alu s op)
           (hi s op b1 b2))
-        (cast :i64 (load (index (field s cyc) op))))))
+        (primitive/cast :i64 (primitive/load (primitive/index (primitive/field s cyc) op))))))
 
 (defn gen-interrupt [(s (ptr Cpu)) (n i64)] (-> i64)
-  (do (push16 s (rpc s)) (spc s (* n 8)) (store! (field s ie) 0) 0))
-(defn ienabled [(s (ptr Cpu))] (-> i64) (load (field s ie)))
+  (do (push16 s (rpc s)) (spc s (* n 8)) (primitive/store! (primitive/field s ie) 0) 0))
+(defn ienabled [(s (ptr Cpu))] (-> i64) (primitive/load (primitive/field s ie)))
 
 ; ---- setup -----------------------------------------------------------------
 ; cycles8080[] from the reference, one 16-wide row per call.
 (defn crow [(s (ptr Cpu)) (o i64)
             (a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64)
             (i i64) (j i64) (k i64) (l i64) (m i64) (n i64) (p i64) (q i64)] (-> i64)
-  (do (store! (index (field s cyc) (+ o 0)) (cast :u8 a))  (store! (index (field s cyc) (+ o 1)) (cast :u8 b))
-      (store! (index (field s cyc) (+ o 2)) (cast :u8 c))  (store! (index (field s cyc) (+ o 3)) (cast :u8 d))
-      (store! (index (field s cyc) (+ o 4)) (cast :u8 e))  (store! (index (field s cyc) (+ o 5)) (cast :u8 f))
-      (store! (index (field s cyc) (+ o 6)) (cast :u8 g))  (store! (index (field s cyc) (+ o 7)) (cast :u8 h))
-      (store! (index (field s cyc) (+ o 8)) (cast :u8 i))  (store! (index (field s cyc) (+ o 9)) (cast :u8 j))
-      (store! (index (field s cyc) (+ o 10)) (cast :u8 k)) (store! (index (field s cyc) (+ o 11)) (cast :u8 l))
-      (store! (index (field s cyc) (+ o 12)) (cast :u8 m)) (store! (index (field s cyc) (+ o 13)) (cast :u8 n))
-      (store! (index (field s cyc) (+ o 14)) (cast :u8 p)) (store! (index (field s cyc) (+ o 15)) (cast :u8 q)) 0))
+  (do (primitive/store! (primitive/index (primitive/field s cyc) (+ o 0)) (primitive/cast :u8 a))  (primitive/store! (primitive/index (primitive/field s cyc) (+ o 1)) (primitive/cast :u8 b))
+      (primitive/store! (primitive/index (primitive/field s cyc) (+ o 2)) (primitive/cast :u8 c))  (primitive/store! (primitive/index (primitive/field s cyc) (+ o 3)) (primitive/cast :u8 d))
+      (primitive/store! (primitive/index (primitive/field s cyc) (+ o 4)) (primitive/cast :u8 e))  (primitive/store! (primitive/index (primitive/field s cyc) (+ o 5)) (primitive/cast :u8 f))
+      (primitive/store! (primitive/index (primitive/field s cyc) (+ o 6)) (primitive/cast :u8 g))  (primitive/store! (primitive/index (primitive/field s cyc) (+ o 7)) (primitive/cast :u8 h))
+      (primitive/store! (primitive/index (primitive/field s cyc) (+ o 8)) (primitive/cast :u8 i))  (primitive/store! (primitive/index (primitive/field s cyc) (+ o 9)) (primitive/cast :u8 j))
+      (primitive/store! (primitive/index (primitive/field s cyc) (+ o 10)) (primitive/cast :u8 k)) (primitive/store! (primitive/index (primitive/field s cyc) (+ o 11)) (primitive/cast :u8 l))
+      (primitive/store! (primitive/index (primitive/field s cyc) (+ o 12)) (primitive/cast :u8 m)) (primitive/store! (primitive/index (primitive/field s cyc) (+ o 13)) (primitive/cast :u8 n))
+      (primitive/store! (primitive/index (primitive/field s cyc) (+ o 14)) (primitive/cast :u8 p)) (primitive/store! (primitive/index (primitive/field s cyc) (+ o 15)) (primitive/cast :u8 q)) 0))
 (defn load-cycles [(s (ptr Cpu))] (-> i64)
   (do
     (crow s 0x00  4 10 7 5 5 5 7 4 4 10 7 5 5 5 7 4)
@@ -279,10 +281,10 @@
     (crow s 0xE0  11 10 10 18 17 11 7 11 11 5 10 5 17 17 7 11)
     (crow s 0xF0  11 10 10 4 17 11 7 11 11 5 10 4 17 17 7 11) 0))
 
-(defn init [(s (ptr Cpu))] (-> i64) (do (memset s 0 (sizeof Cpu)) (load-cycles s) 0))
+(defn init [(s (ptr Cpu))] (-> i64) (do (memset s 0 (primitive/sizeof Cpu)) (load-cycles s) 0))
 
 ; load a raw image at `at`; returns 0 on success, -1 if the file won't open.
 (defn load-com [(s (ptr Cpu)) (path (ptr i8)) (at i64)] (-> i64)
-  (let [fd (cast :i64 (open path 0))]
+  (let [fd (primitive/cast :i64 (open path 0))]
     (if (< fd 0) -1
-        (do (read (cast i32 fd) (index (field s mem) at) (- 65536 at)) (close fd) 0))))
+        (do (read (primitive/cast i32 fd) (primitive/index (primitive/field s mem) at) (- 65536 at)) (close fd) 0))))

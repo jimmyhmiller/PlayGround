@@ -1,4 +1,5 @@
 (module own_bad)
+(import "primitive.coil" :as primitive)
 ; Three ownership violations the checker must catch and locate; the build is
 ; vetoed. The shadow case in own_ok proves it is not just name-matching.
 (import "tests/metaprogramming/compile-and-run/ownership.coil" :use *)
@@ -19,4 +20,4 @@
     (release h)          ; expected violation B
     0))
 
-(defn main [] (-> :i64) (iadd (use-after) (double)))
+(defn main [] (-> :i64) (primitive/iadd (use-after) (double)))

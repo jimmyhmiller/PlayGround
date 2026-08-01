@@ -54,6 +54,14 @@ impl SourceMapChoice {
             Self::Off => false,
         }
     }
+
+    fn override_value(self) -> Option<bool> {
+        match self {
+            Self::Auto => None,
+            Self::On => Some(true),
+            Self::Off => Some(false),
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -247,7 +255,8 @@ fn run() -> Result<(), String> {
             // Production source maps, composed through the minify pass. With NO flag
             // the app's own framework config decides, per graph — for a Next app that
             // is `next build`'s policy: server maps always, browser maps only under
-            // `productionBrowserSourceMaps` (see `next_adapter::default_source_maps`),
+            // `productionBrowserSourceMaps` / `experimental.serverSourceMaps`
+            // (see `next_adapter::default_source_maps`),
             // which is what makes a diffpack build comparable with a `next build` of
             // the same app. `--sourcemap` / `--no-sourcemap` force it either way.
             let source_map =
@@ -269,6 +278,9 @@ fn run() -> Result<(), String> {
                 .find(|value| !value.to_string_lossy().starts_with("--"))
                 .and_then(|value| value.to_str().map(str::to_string))
                 .unwrap_or_else(|| "client".to_string());
+            let references_only = remaining
+                .iter()
+                .any(|value| value.to_str() == Some("--references-only"));
 
             // `static` — the SSG prerender phase (Full SSG). It builds NO graph: it
             // reuses the three already-emitted bundles (client / react-server render /
@@ -280,7 +292,10 @@ fn run() -> Result<(), String> {
                 let static_export = remaining
                     .iter()
                     .any(|value| value.to_str() == Some("--static-export"));
-                return build_static(Path::new(&project_root), static_export);
+                return diffpack_next::production::build_static(
+                    Path::new(&project_root),
+                    static_export,
+                );
             }
 
             // `production` — the one-command production build: run every graph in
@@ -304,7 +319,12 @@ fn run() -> Result<(), String> {
             if !diffpack_next::next_adapter::is_app_router(Path::new(&project_root))
                 && diffpack_next::next_pages::is_pages_router(Path::new(&project_root))
             {
-                return build_pages_app(Path::new(&project_root), &environment, minify, source_map);
+                return diffpack_next::production::build_pages_environment(
+                    Path::new(&project_root),
+                    &environment,
+                    minify,
+                    source_map.override_value(),
+                );
             }
 
             // Next.js app-router apps have no TanStack/src entry; their "entry" is
@@ -342,135 +362,18 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| format!("no {environment} entry found for the app"))?;
             let output_root = Path::new(&project_root).join(".diffpack-output");
 
-            // Natively generate `src/routeTree.gen.ts` from `src/routes/` BEFORE
-            // discovery, so the bundler consumes a diffpack-generated route tree
-            // instead of one produced by TanStack Router's Vite plugin. This is a
-            // build-emit step off the incremental hot path (mirroring native
-            // manifest generation), so the thesis guards are unaffected. A
-            // non-file-routed project (no `src/routes`) is a no-op.
-            if !is_next_app {
-                if let Some(route_count) =
-                    diffpack_tanstack::route_tree::generate_for_project(Path::new(&project_root))?
-                {
-                    println!(
-                        "generated src/{} natively ({route_count} route(s))",
-                        diffpack_tanstack::route_tree::ROUTE_TREE_FILE,
-                    );
-                }
-            }
-
-            // A server build's TanStack manifest module (`tanstack-start-manifest:v`)
-            // maps each route to the CLIENT build's emitted chunk URLs, so it is
-            // generated natively from the client build's persisted route/chunk
-            // manifest. Register it as a virtual module before discovery, so the
-            // server's `router-manifest.js` import resolves and loads it. A missing
-            // client manifest is a hard, specific error (run the client build first)
-            // rather than a silent empty manifest.
-            // RSC server actions — client transport. A `"use server"` module built
-            // for the client is rewritten into `createServerReference(id, callServer)`
-            // stubs importing `callServer` from `#diffpack-call-server`; register the
-            // embedded transport under that specifier so the stub resolves. Harmless
-            // (unreachable) when the app has no `"use server"` module.
             if is_next_app {
-                config.build.virtual_modules.push((
-                    diffpack_next::rsc::CALL_SERVER_SPECIFIER.to_string(),
-                    diffpack_next::rsc::call_server_module_source().to_string(),
-                ));
-            }
-
-            if config.environment != "client" {
-                if !is_next_app {
-                    let client_manifest_path =
-                        output_root.join(diffpack_tanstack::manifest::CLIENT_MANIFEST_FILE);
-                    let client_manifest = diffpack_tanstack::manifest::ClientRouteManifest::read(
-                        &client_manifest_path,
-                    )?;
-                    config.build.virtual_modules.push((
-                        diffpack_tanstack::manifest::START_MANIFEST_SPECIFIER.to_string(),
-                        client_manifest.to_start_manifest_source(),
-                    ));
-                    // The sibling dev-only virtual module `loadVirtualModule.js`
-                    // statically references (only used under TSS_DEV_SERVER, but its
-                    // `import()` literal must still resolve). Register it too so the
-                    // server build resolves cleanly on react-start versions that emit it.
-                    config.build.virtual_modules.push((
-                        diffpack_tanstack::manifest::INJECTED_HEAD_SCRIPTS_SPECIFIER.to_string(),
-                        diffpack_tanstack::manifest::injected_head_scripts_module_source(),
-                    ));
-                    println!(
-                        "loaded client route manifest ({} routes) from {}",
-                        client_manifest.routes.len(),
-                        client_manifest_path.display(),
-                    );
-
-                    // Server functions: register the native server-fn resolver module
-                    // (`#tanstack-start-server-fn-resolver`) that `getServerFnById`
-                    // dispatches through. It is generated from a pre-scan of the app
-                    // source for `createServerFn(...).handler(...)` declarations, keyed
-                    // by the same deterministic function id the server transform bakes
-                    // into each handler — so an HTTP server-fn request reaches exactly
-                    // the registered handler. Registered before discovery so the
-                    // subpath import resolves to it instead of the framework's fake
-                    // (undefined-returning) resolver.
-                    let server_fns = diffpack_tanstack::server_fn::scan_project_server_fns(
-                        Path::new(&project_root),
-                    )?;
-                    config.build.virtual_modules.push((
-                        diffpack_tanstack::server_fn::RESOLVER_SPECIFIER.to_string(),
-                        diffpack_tanstack::server_fn::generate_resolver_module(&server_fns),
-                    ));
-                    println!(
-                        "registered {} server function(s) in the native server-fn resolver",
-                        server_fns.len(),
-                    );
-                }
-
-                if is_next_app {
-                    // RSC server actions — server dispatch. Register the generated action
-                    // resolver (`#diffpack-rsc-action-resolver`) that `getServerActionById`
-                    // dispatches through, keyed by the same `"<moduleId>#<name>"` id the
-                    // client stub and the server registration derive, plus the embedded
-                    // `handleServerAction` endpoint (`#diffpack-rsc-action-handler`). The
-                    // resolver is generated from a pre-scan of the app source for
-                    // `"use server"` modules. Registered before discovery so the subpath
-                    // imports resolve to the native modules.
-                    let server_actions =
-                        diffpack_next::rsc::scan_project_server_actions(Path::new(&project_root))?;
-                    config.build.virtual_modules.push((
-                        diffpack_next::rsc::ACTION_RESOLVER_SPECIFIER.to_string(),
-                        diffpack_next::rsc::generate_action_resolver_module(&server_actions),
-                    ));
-                    config.build.virtual_modules.push((
-                        diffpack_next::rsc::ACTION_HANDLER_SPECIFIER.to_string(),
-                        diffpack_next::rsc::action_handler_module_source().to_string(),
-                    ));
-                    println!(
-                        "registered {} server action(s) in the native rsc action resolver",
-                        server_actions.len(),
-                    );
-
-                    // RSC flight — SSR consumer manifest (Manifest #2). The SSR pass
-                    // consumes the flight stream with `createFromReadableStream`, which
-                    // resolves the client references it carries through this manifest.
-                    // It is derived natively from the client build's Manifest #1 (the
-                    // client-references manifest), so the SSR graph resolves each
-                    // client reference to the real module under diffpack's one runtime-id
-                    // scheme. Registered under `#diffpack-rsc-ssr-consumer-manifest`; an
-                    // app with no `"use client"` module gets an empty (but valid) map.
-                    let client_references_path =
-                        output_root.join(diffpack_next::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
-                    let client_references = diffpack_next::rsc::ClientReferencesManifest::read(
-                        &client_references_path,
-                    )?;
-                    config.build.virtual_modules.push((
-                        diffpack_next::rsc::SSR_CONSUMER_MANIFEST_SPECIFIER.to_string(),
-                        client_references.to_ssr_consumer_manifest_module(None),
-                    ));
-                    println!(
-                        "registered the rsc ssr consumer manifest ({} client reference(s))",
-                        client_references.entries.len(),
-                    );
-                }
+                diffpack_next::profile::prepare_build(
+                    Path::new(&project_root),
+                    &output_root,
+                    &mut config,
+                )?;
+            } else {
+                diffpack_tanstack::profile::prepare_build(
+                    Path::new(&project_root),
+                    &output_root,
+                    &mut config,
+                )?;
             }
 
             println!(
@@ -553,221 +456,35 @@ fn run() -> Result<(), String> {
                 source_map,
                 ..EmitOptions::default()
             };
-            if config.environment == "client" {
-                // BOTH manifests the server-like graphs consume are pure functions
-                // of the discovered graph (live-module refinement + the chunk
-                // plan), not of any emitted bytes — so they are computed and
-                // published FIRST. The production orchestrator watches for them
-                // and starts the react-server and ssr builds the moment they
-                // exist, overlapping those whole builds with this one's
-                // render/minify tail. Each is staged and renamed into place so a
-                // watcher can never read a half-written manifest.
-                let manifests_stage = diffpack_core::build_profile::stage("emit/client-manifests");
-                let client_manifest = diffpack_tanstack::manifest::from_bundle_graph(
-                    &bundler.integration_manifest_graph(&reachable, "client.js")?,
-                    "/",
-                )?;
-                let client_manifest_path =
-                    output_root.join(diffpack_tanstack::manifest::CLIENT_MANIFEST_FILE);
-                let client_references = diffpack_next::rsc::client_references_from_bundle_graph(
-                    &bundler.integration_manifest_graph(&reachable, "client.js")?,
-                );
-                let client_references_path =
-                    output_root.join(diffpack_next::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
-                std::fs::create_dir_all(&output_root)
-                    .map_err(|error| format!("cannot create {}: {error}", output_root.display()))?;
-                let publish = |write: &dyn Fn(&Path) -> Result<(), String>,
-                               path: &Path|
-                 -> Result<(), String> {
-                    let staged = path.with_extension(format!("staged-{}", std::process::id()));
-                    write(&staged)?;
-                    std::fs::rename(&staged, path)
-                        .map_err(|error| format!("cannot publish {}: {error}", path.display()))
-                };
-                publish(&|path| client_manifest.write(path), &client_manifest_path)?;
-                publish(
-                    &|path| client_references.write(path),
-                    &client_references_path,
-                )?;
-                drop(manifests_stage);
-                let emit_stage = diffpack_core::build_profile::stage("emit/public");
-                let summary = bundler.emit_public(&reachable, &output_root, emit_options)?;
-                drop(emit_stage);
-                let copy_stage = diffpack_core::build_profile::stage("emit/copy-static-public");
-                let static_files = diffpack::config::copy_static_public(
-                    Path::new(&project_root),
-                    &summary.output_dir,
-                )?;
-                drop(copy_stage);
-                // next/image (Slice J): emit downscaled responsive variants for every
-                // raster under `public/` into `<public>/_diffpack-image/`. The runtime
-                // shim's `srcset` points at these static files (no image server). A
-                // no-op for a non-Next project (no public images / no app-router).
-                //
-                // An app whose next.config turns Next's optimizer off (or replaces it
-                // with its own loader) gets NO variants — the emitted `<img>` can never
-                // reference one. Reported, never silent: skipping this is a large chunk
-                // of a build on an image-heavy app and must be visible in the log.
-                if let diffpack_next::next_adapter::ImageOptimization::Disabled(reason) =
-                    diffpack_next::next_adapter::ImageOptimization::for_project(Path::new(
-                        &project_root,
-                    ))
-                {
-                    println!(
-                        "next/image: {reason}, so no build-time variants are generated \
-                         (every <Image> renders a plain <img src> with no srcset, as under next build)"
-                    );
-                }
-                let scan_stage = diffpack_core::build_profile::stage("image/scan-public");
-                let public_images =
-                    diffpack_next::next_adapter::scan_public_images(Path::new(&project_root))?;
-                drop(scan_stage);
-                if !public_images.is_empty() {
-                    let variants_stage = diffpack_core::build_profile::stage("image/emit-variants");
-                    let variants = diffpack_next::next_adapter::emit_image_variants(
-                        Path::new(&project_root),
-                        &summary.output_dir,
-                        &public_images,
+            if is_next_app {
+                if references_only {
+                    diffpack_next::profile::emit_server_references(
+                        &output_root,
+                        &config,
+                        &bundler,
+                        &reachable,
                     )?;
-                    drop(variants_stage);
-                    if variants > 0 {
-                        println!(
-                            "emitted {variants} next/image variant file(s) under {}/_diffpack-image",
-                            summary.output_dir.display(),
-                        );
-                    }
+                } else {
+                    diffpack_next::profile::emit_build(
+                        Path::new(&project_root),
+                        &output_root,
+                        &config,
+                        &bundler,
+                        &reachable,
+                        emit_options,
+                        &server_dir_name,
+                    )?;
                 }
-                // Metadata IMAGE file conventions (app/icon.png, app/favicon.ico, ...):
-                // copy them to the served public/ so their build-emitted head links
-                // resolve. Zero per-request cost (served by the static-asset path).
-                let meta_images = diffpack_next::next_adapter::emit_metadata_images(
-                    Path::new(&project_root),
-                    &summary.output_dir,
-                )?;
-                if meta_images > 0 {
-                    println!(
-                        "copied {meta_images} metadata image file(s) to {}",
-                        summary.output_dir.display(),
-                    );
-                }
-                // `next/font/local`: copy the app's own font files to the hashed URLs the
-                // generated @font-face rules already point at. Driven by the manifest the
-                // adapter wrote while generating that CSS, so the two cannot disagree.
-                let fonts = diffpack_next::next_font::emit_font_assets(
-                    Path::new(&project_root),
-                    &summary.output_dir,
-                )?;
-                if fonts > 0 {
-                    println!(
-                        "emitted {fonts} next/font/local file(s) under {}/{}",
-                        summary.output_dir.display(),
-                        diffpack_next::next_font::FONT_ASSET_DIR,
-                    );
-                }
-                println!(
-                    "wrote {} ({} client reference(s))",
-                    client_references_path.display(),
-                    client_references.entries.len(),
-                );
-                println!(
-                    "emitted {}: {} public .js, {} .css, {} asset(s), {} static file(s)",
-                    summary.output_dir.display(),
-                    summary.javascript_files,
-                    summary.css_files,
-                    summary.asset_files,
-                    static_files,
-                );
-                println!(
-                    "wrote {} ({} routes mapped to client chunks)",
-                    client_manifest_path.display(),
-                    client_manifest.routes.len(),
-                );
             } else {
-                let emit_stage = diffpack_core::build_profile::stage("emit/server");
-                let summary = bundler.emit_server_into(
+                diffpack_tanstack::profile::emit_build(
+                    Path::new(&project_root),
+                    &output_root,
+                    &config,
+                    &bundler,
                     &reachable,
-                    &output_root.join(&server_dir_name),
                     emit_options,
+                    &server_dir_name,
                 )?;
-                drop(emit_stage);
-                // The react-server graph is authoritative for the app's CSS (Server
-                // Components render there, so its CSS-Module class scoping matches the
-                // flight-rendered classNames). Preserve its compiled `server.css` to
-                // the served, non-pruned `public/rsc.css` (the SSR build would
-                // otherwise prune it from `server/`); the adapter links it into the
-                // document head. Next injects the route's stylesheets the same way.
-                //
-                // The FILE NAME is the shared constant the render entry's head-link
-                // guard reads (`RSC_EMITTED_CSS_FILE`): the entry links `/rsc.css` iff
-                // this same file sits beside it, so the link and the artifact are one
-                // fact and cannot disagree. Absent = the graph compiled no CSS = no
-                // link, which is why nothing is copied and nothing is reported.
-                if config.environment == "react-server" {
-                    let css = output_root
-                        .join(&server_dir_name)
-                        .join(diffpack_next::next_adapter::RSC_EMITTED_CSS_FILE);
-                    if css.is_file() {
-                        let dest = output_root
-                            .join("public")
-                            .join(diffpack_next::next_adapter::RSC_CSS_URL.trim_start_matches('/'));
-                        if let Some(parent) = dest.parent() {
-                            std::fs::create_dir_all(parent).map_err(|error| {
-                                format!("cannot create {}: {error}", parent.display())
-                            })?;
-                        }
-                        std::fs::copy(&css, &dest).map_err(|error| {
-                            format!(
-                                "cannot preserve react-server CSS to {}: {error}",
-                                dest.display()
-                            )
-                        })?;
-                        println!("preserved react-server CSS -> {}", dest.display());
-                    }
-                }
-                // Persist THIS server build's own client-references manifest (its
-                // runtime ids + hosting chunks for every `"use client"` module). The
-                // SSR-of-flight pass needs it: the flight carries the CLIENT build's
-                // ids, but the SSR graph resolves references through its OWN registry
-                // under different ids. Joining the client manifest (client ids) with
-                // this one (this build's ids) on the shared canonical module id yields
-                // the `ssrModuleMapping` (Manifest #2's `moduleMap` keyed by client id
-                // -> this build's id). Written under a build-distinct file name so the
-                // react-server render build and the SSR build do not clobber each
-                // other's manifest: both server-like graphs emit into this one output
-                // root and the ssr pass runs last, so a shared name would lose the
-                // react-server graph's set — the set that says which client references
-                // a flight can actually carry.
-                let server_references = diffpack_next::rsc::client_references_from_bundle_graph(
-                    &bundler.integration_manifest_graph(&reachable, "server.mjs")?,
-                );
-                let server_references_path =
-                    output_root.join(if config.environment == "react-server" {
-                        diffpack_next::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE
-                    } else {
-                        diffpack_next::rsc::SERVER_REFERENCES_MANIFEST_FILE
-                    });
-                server_references.write(&server_references_path)?;
-                println!(
-                    "wrote {} ({} client reference(s) under this build's ids)",
-                    server_references_path.display(),
-                    server_references.entries.len(),
-                );
-                println!(
-                    "emitted {}: {} server .mjs, {} .css, {} asset(s)",
-                    summary.output_dir.display(),
-                    summary.javascript_files,
-                    summary.css_files,
-                    summary.asset_files,
-                );
-                println!(
-                    "  server graph gate (>= 35 .mjs): {} .mjs emitted -> {}",
-                    summary.javascript_files,
-                    if summary.javascript_files >= 35 {
-                        "PASS"
-                    } else {
-                        "not yet"
-                    }
-                );
             }
             Ok(())
         }
@@ -1225,7 +942,15 @@ fn web_build(
     minify: bool,
     source_map: bool,
 ) -> Result<(), String> {
-    let mut config = diffpack::config::derive_web_config(root, vite)?;
+    let vite_profile = if vite {
+        Some(diffpack::config::derive_vite_web_config(root)?)
+    } else {
+        None
+    };
+    let mut config = match &vite_profile {
+        Some(profile) => profile.web.clone(),
+        None => diffpack::config::derive_web_config(root)?,
+    };
     // See `build-app`: the per-module map is paid for only when maps are emitted.
     config.build.source_maps = source_map;
 
@@ -1285,7 +1010,7 @@ fn web_build(
     };
     println!(
         "web build{}: {} page(s) -> {}",
-        if config.vite { " (vite mode)" } else { "" },
+        if vite { " (vite mode)" } else { "" },
         pages.len(),
         out_dir.display(),
     );
@@ -1393,7 +1118,7 @@ fn web_build(
             .strip_prefix(root)
             .ok()
             .map(|rel| rel.to_string_lossy().replace('\\', "/"));
-        manifest_pages.push(diffpack_vite_compat::vite_manifest::PageRecord {
+        manifest_pages.push(diffpack_web::config::EmittedPage {
             key,
             file: entry_file,
             css: if has_css { vec![css_file] } else { Vec::new() },
@@ -1407,7 +1132,10 @@ fn web_build(
     diffpack_default_loader::output::prune_output(&out_dir, &written)?;
 
     // The `public/` passthrough directory is a Vite convention.
-    let static_files = if config.vite {
+    let static_files = if vite_profile
+        .as_ref()
+        .is_some_and(|profile| profile.copy_public_dir)
+    {
         diffpack::config::copy_static_public(root, &out_dir)?
     } else {
         0
@@ -1415,26 +1143,27 @@ fn web_build(
 
     // The Vite build manifest (`build.manifest`).
     let mut manifest_note = String::new();
-    if config.emit_manifest {
-        let manifest = diffpack_vite_compat::vite_manifest::render(&manifest_pages);
-        let manifest_path = out_dir.join(&config.manifest_name);
-        if let Some(parent) = manifest_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-        }
-        std::fs::write(&manifest_path, manifest)
-            .map_err(|error| format!("cannot write {}: {error}", manifest_path.display()))?;
-        manifest_note = format!(", manifest {}", config.manifest_name);
+    if let Some(manifest_name) = vite_profile
+        .as_ref()
+        .map(|profile| profile.write_manifest(&out_dir, &manifest_pages))
+        .transpose()?
+        .flatten()
+    {
+        manifest_note = format!(", manifest {manifest_name}");
     }
 
     // `optimizeDeps.exclude`: Diffpack bundles every dependency natively (no
     // pre-bundle step), so an exclusion is satisfied by construction — reported so it
     // is never silently ignored.
-    if !config.optimize_deps_exclude.is_empty() {
+    let optimize_deps_exclude = vite_profile
+        .as_ref()
+        .map(|profile| profile.optimize_deps_exclude.as_slice())
+        .unwrap_or_default();
+    if !optimize_deps_exclude.is_empty() {
         println!(
             "optimizeDeps.exclude: {} dep(s) ({}) — diffpack does not pre-bundle, so exclusion is inherent",
-            config.optimize_deps_exclude.len(),
-            config.optimize_deps_exclude.join(", "),
+            optimize_deps_exclude.len(),
+            optimize_deps_exclude.join(", "),
         );
     }
 
@@ -1444,139 +1173,6 @@ fn web_build(
         pages.len(),
         static_files,
     );
-    Ok(())
-}
-
-/// Recursively copy `src` into `dest` (used to publish the react-server bundle from
-/// `server/` to `rsc-render/` before the ssr build overwrites `server/`).
-fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest)
-        .map_err(|error| format!("cannot create {}: {error}", dest.display()))?;
-    for entry in
-        std::fs::read_dir(src).map_err(|error| format!("cannot read {}: {error}", src.display()))?
-    {
-        let entry =
-            entry.map_err(|error| format!("cannot read entry in {}: {error}", src.display()))?;
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        let kind = entry
-            .file_type()
-            .map_err(|error| format!("cannot stat {}: {error}", from.display()))?;
-        if kind.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to).map_err(|error| {
-                format!(
-                    "cannot copy {} -> {}: {error}",
-                    from.display(),
-                    to.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
-/// The pages-router per-environment build (`build-app <root> client|ssr`). Classic
-/// (non-RSC) React SSR: the `client` environment emits the browser hydration bundle
-/// to `public/`; any other environment emits the Node ESM SSR bundle to
-/// `server/server.mjs` (whose `handleRequest` the pages orchestrator drives). The
-/// `production` one-command build (`build_production`) chains client -> ssr and
-/// writes the orchestrator.
-fn build_pages_app(
-    project_root: &Path,
-    environment: &str,
-    minify: bool,
-    source_map: SourceMapChoice,
-) -> Result<(), String> {
-    let mut config = diffpack::config::configure_next_pages(project_root, environment, false)?
-        .ok_or_else(|| {
-            "next pages-router configure returned None for a pages project".to_string()
-        })?;
-    // See `build-app`: the per-module map is paid for only when maps are emitted, and
-    // with no CLI flag the framework default the adapter chose stands.
-    config.build.source_maps = source_map.resolve(config.build.source_maps);
-    let source_map = config.build.source_maps;
-    println!(
-        "next pages-router adapter: scaffolded {} for environment={environment}",
-        diffpack_next::next_pages::ADAPTER_DIR,
-    );
-    let entry = config
-        .entry
-        .clone()
-        .ok_or_else(|| format!("no {environment} entry found for the pages app"))?;
-    let output_root = project_root.join(".diffpack-output");
-
-    println!(
-        "pages app: environment={} ({} aliases), entry={}",
-        config.environment,
-        config.build.aliases.len(),
-        entry.display(),
-    );
-    let (bundler, update) = diffpack::bundler::discover_next_with_config(&entry, &config.build)?;
-    let warnings = diffpack::bundler::partition_diagnostics(
-        &update.diagnostics,
-        &format!("pages {} build", config.environment),
-    )?;
-    let reachable = bundler.reachable_modules_direct();
-    println!(
-        "reachable {} modules; {} warning(s)",
-        reachable.len(),
-        warnings.len()
-    );
-    for warning in &warnings {
-        println!("  warning: {warning}");
-    }
-
-    let emit_options = EmitOptions {
-        minify,
-        source_map,
-        ..EmitOptions::default()
-    };
-    if config.environment == "client" {
-        let summary = bundler.emit_public(&reachable, &output_root, emit_options)?;
-        let static_files = diffpack::config::copy_static_public(project_root, &summary.output_dir)?;
-        println!(
-            "emitted {}: {} public .js, {} .css, {} asset(s), {} static file(s)",
-            summary.output_dir.display(),
-            summary.javascript_files,
-            summary.css_files,
-            summary.asset_files,
-            static_files,
-        );
-    } else {
-        let summary = bundler.emit_server(&reachable, &output_root, emit_options)?;
-        println!(
-            "emitted {}: {} server .mjs, {} .css, {} asset(s)",
-            summary.output_dir.display(),
-            summary.javascript_files,
-            summary.css_files,
-            summary.asset_files,
-        );
-    }
-    Ok(())
-}
-
-/// Run the pages-router SSG prerenderer against a completed `.diffpack-output`: writes
-/// the `pages-prerender.mjs` driver, spawns node on it (the app's own bundled React —
-/// the same oracle the orchestrator uses; the graph bundling stayed native Rust), and
-/// leaves `prerender.json` next to the SSR bundle. A prerender failure fails the build
-/// (never silently skipped).
-fn pages_prerender(output_root: &Path) -> Result<(), String> {
-    let driver = output_root.join("pages-prerender.mjs");
-    std::fs::write(&driver, diffpack_next::next_pages::PRERENDER_DRIVER)
-        .map_err(|error| format!("cannot write {}: {error}", driver.display()))?;
-    let status = std::process::Command::new("node")
-        .arg(&driver)
-        .arg(output_root)
-        .status()
-        .map_err(|error| format!("cannot spawn node for the pages SSG prerenderer: {error}"))?;
-    if !status.success() {
-        return Err(format!(
-            "the pages SSG prerenderer (node {}) failed with {status}",
-            driver.display()
-        ));
-    }
     Ok(())
 }
 
@@ -1629,14 +1225,10 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         // build time and write `prerender.json`; the orchestrator seeds its ISR cache
         // from it so static pages are served with zero per-request data fetch.
         println!("=== prerender (SSG getStaticProps) ===");
-        pages_prerender(&out)?;
+        diffpack_next::production::prerender_pages(&out)?;
         // Emit the pages orchestrator (`pages-server.mjs`): plain Node that imports
         // the SSR bundle's `handleRequest` and serves the client `public/` assets.
-        std::fs::write(
-            out.join("pages-server.mjs"),
-            diffpack_next::next_pages::ORCHESTRATOR,
-        )
-        .map_err(|error| format!("cannot write pages production server: {error}"))?;
+        diffpack_next::production::write_pages_server(&out)?;
         println!(
             "\nproduction build complete -> {}\n  serve it:  diffpack start {} [port]",
             out.display(),
@@ -1646,8 +1238,8 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
     }
     if diffpack_next::next_adapter::is_app_router(project_root) {
         println!("=== production build (next app-router): client -> (react-server || ssr) ===");
-        // The react-server and ssr builds depend only on the CLIENT build's two
-        // manifests — pure graph facts the client publishes (atomically, via
+        // The react-server and ssr builds depend only on the CLIENT build's
+        // client-reference manifest — a pure graph fact published atomically, via
         // rename) BEFORE its emit — never on the client's emitted bytes or on
         // each other's output. So all three overlap: the client build streams
         // its logs live; the moment both manifests exist the other two spawn,
@@ -1657,10 +1249,7 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         // after the client logs so the three builds' reporting never
         // interleaves. Stale manifests from an earlier build are removed first,
         // or the server builds would launch against the previous graph.
-        let rsc_render = out.join("rsc-render");
-        let client_manifest_path = out.join(diffpack_tanstack::manifest::CLIENT_MANIFEST_FILE);
         let client_references_path = out.join(diffpack_next::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
-        let _ = std::fs::remove_file(&client_manifest_path);
         let _ = std::fs::remove_file(&client_references_path);
         let client_stage = diffpack_core::build_profile::stage("build/client");
         let mut client_child = std::process::Command::new(&exe)
@@ -1670,9 +1259,9 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
             .args(&passthrough)
             .spawn()
             .map_err(|error| format!("cannot run build-app client: {error}"))?;
-        // Wait for the manifests (or for the client to fail first).
+        // Wait for the client-reference manifest (or for the client to fail first).
         loop {
-            if client_manifest_path.is_file() && client_references_path.is_file() {
+            if client_references_path.is_file() {
                 break;
             }
             match client_child.try_wait() {
@@ -1753,16 +1342,7 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         // makes the `<img>`'s `/assets/...` srcset URLs resolve. Names are
         // content-hashed, so this is a copy of new files only (zero per-request
         // cost, no image server). A no-op when the graph emitted no assets.
-        let rsc_assets = rsc_render.join("assets");
-        if rsc_assets.is_dir() {
-            copy_dir_recursive(&rsc_assets, &out.join("public/assets"))?;
-        }
-        std::fs::write(
-            out.join("next-server.mjs"),
-            include_str!("../scripts/rsc/next-server.mjs"),
-        )
-        .map_err(|error| format!("cannot write production server: {error}"))?;
-        write_ssr_module_map(&out)?;
+        diffpack_next::production::assemble_server(&out)?;
         // instrumentation.{ts,js}: the app's boot hook (register() runs once at server
         // startup — OpenTelemetry/Sentry-style). Write the generated boot-entry wrapper
         // (which CALLS register at module load) then bundle it NATIVELY (self-invoke our
@@ -1780,7 +1360,7 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
             // no framework config to consult, so the server policy resolved here is
             // passed explicitly; without it this was the one server artifact of a
             // `--sourcemap` build that shipped with no map at all.
-            let instrumentation_maps = source_map_choice.resolve(true);
+            let instrumentation_maps = source_map_choice.resolve(false);
             let status = std::process::Command::new(&exe)
                 .arg("bundle")
                 .arg(&wrapper)
@@ -1807,7 +1387,7 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         // Dynamic routes are recorded, never dropped. A prerender failure fails the
         // build (naming the route).
         println!("=== prerender (static / SSG / ISR) ===");
-        next_prerender(project_root, &out, false)?;
+        diffpack_next::production::prerender_app(project_root, &out, false)?;
         println!(
             "\nproduction build complete -> {}\n  serve it:  diffpack start {} [port]",
             out.display(),
@@ -1862,120 +1442,6 @@ fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mod
         result.frontend_lower_cpu_ms,
         result.frontend_resolve_cpu_ms,
     );
-}
-
-/// The embedded SSG node scripts (guest code kept in REAL files under scripts/rsc/,
-/// embedded so the built binary is self-contained; written next to the output so the
-/// sibling `import "./next-render-core.mjs"` resolves regardless of cwd).
-const NEXT_RENDER_CORE_MJS: &str = include_str!("../scripts/rsc/next-render-core.mjs");
-const NEXT_PRERENDER_MJS: &str = include_str!("../scripts/rsc/next-prerender.mjs");
-
-/// The manifest-join module both the orchestrator (`next-server.mjs`) and the render
-/// seam (`next-render-core.mjs`) import as a SIBLING, so it must be written next to
-/// whichever of them lands in the output dir. Shared, not duplicated, so the rule for
-/// which client references are resolvable is stated in exactly one place.
-pub(crate) fn write_ssr_module_map(output_root: &Path) -> Result<(), String> {
-    let path = output_root.join(diffpack_next::rsc::SSR_MODULE_MAP_FILE);
-    std::fs::write(&path, include_str!("../scripts/rsc/ssr-module-map.mjs"))
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))
-}
-
-/// `diffpack build-app <root> static` — the SSG prerender phase. Builds NO graph:
-/// reuses the three already-emitted bundles + manifests, re-runs native route
-/// classification to write the prerender plan, then spawns the node prerenderer (the
-/// app's own React runtime — the explicitly-allowed oracle) to write `.html` + `.rsc`
-/// for every static/SSG route. Dynamic routes are recorded, never dropped.
-fn build_static(project_root: &Path, static_export: bool) -> Result<(), String> {
-    let output_root = project_root.join(".diffpack-output");
-
-    // Hard-error (naming which) if any of the five inputs is missing — mirrors the
-    // orchestrator's fail() checks. The SSG render reuses these verbatim.
-    for (label, rel) in [
-        ("react-server render bundle", "rsc-render/server.mjs"),
-        ("SSR bundle", "server/server.mjs"),
-        (
-            "client-references manifest",
-            diffpack_next::rsc::CLIENT_REFERENCES_MANIFEST_FILE,
-        ),
-        (
-            "react-server-references manifest",
-            diffpack_next::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE,
-        ),
-        (
-            "ssr-references manifest",
-            diffpack_next::rsc::SERVER_REFERENCES_MANIFEST_FILE,
-        ),
-    ] {
-        let p = output_root.join(rel);
-        if !p.exists() {
-            return Err(format!(
-                "{label} not found at {} — run the client -> react-server (cp -> rsc-render) -> ssr builds first",
-                p.display(),
-            ));
-        }
-    }
-
-    next_prerender(project_root, &output_root, static_export)?;
-    println!(
-        "next SSG: prerendered static routes -> {}",
-        output_root.join("static").display(),
-    );
-    Ok(())
-}
-
-/// Classify every app-router route and prerender the static / SSG / ISR ones to
-/// `<output_root>/static/*.html` + `*.rsc` (+ `prerender-manifest.json`). Shared by
-/// `build-app static` and `build-app production` — the latter serves these from a cache
-/// (with ISR revalidation) instead of rendering them per request. Assumes the client /
-/// react-server (`rsc-render/`) / ssr (`server/`) bundles are already built.
-fn next_prerender(
-    project_root: &Path,
-    output_root: &Path,
-    static_export: bool,
-) -> Result<(), String> {
-    // Native route classification -> the machine-readable prerender plan.
-    let plan_stage = diffpack_core::build_profile::stage("prerender/classify-routes");
-    let route_count = diffpack_next::next_adapter::write_prerender_plan(project_root, output_root)?;
-    drop(plan_stage);
-    println!(
-        "next SSG/ISR: classified {route_count} route(s) -> {}",
-        output_root.join("static/prerender-plan.json").display(),
-    );
-
-    // Materialize the embedded node scripts next to the output.
-    let core_path = output_root.join("next-render-core.mjs");
-    let prerender_path = output_root.join("next-prerender.mjs");
-    std::fs::write(&core_path, NEXT_RENDER_CORE_MJS)
-        .map_err(|error| format!("cannot write {}: {error}", core_path.display()))?;
-    std::fs::write(&prerender_path, NEXT_PRERENDER_MJS)
-        .map_err(|error| format!("cannot write {}: {error}", prerender_path.display()))?;
-    write_ssr_module_map(output_root)?;
-
-    // Spawn the prerenderer (the app's own React runtime; the bundling stays native
-    // Rust). Its stdout/stderr stream straight through; a nonzero exit fails the build.
-    let mut command = std::process::Command::new("node");
-    command.arg(&prerender_path).arg(output_root);
-    // The environment evaluating `next.config` produced. `next build` prerenders inside
-    // the process that loaded the config, so a route's `getStaticProps`/server component
-    // sees whatever the config put in `process.env` (for cal.com, its entire `.env`).
-    command.envs(diffpack_next::next_adapter::config_env_from_manifest(
-        project_root,
-    ));
-    if static_export {
-        command.arg("--static-export");
-    }
-    let render_stage = diffpack_core::build_profile::stage("prerender/render-routes");
-    let status = command
-        .status()
-        .map_err(|error| format!("cannot spawn node for the SSG prerenderer: {error}"))?;
-    drop(render_stage);
-    if !status.success() {
-        return Err(format!(
-            "the SSG prerenderer (node {}) failed with {status}",
-            prerender_path.display(),
-        ));
-    }
-    Ok(())
 }
 
 fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {

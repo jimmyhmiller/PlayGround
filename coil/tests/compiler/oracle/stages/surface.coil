@@ -1,0 +1,13 @@
+(module oracle.surface)
+
+(defstruct Pair [T] [(left T) (right T)])
+(defsum Choice [T] (Neither) (One [(value T)]) (Both [(left T) (right T)]))
+
+(defn choose [(flag bool)] (-> (Choice i64))
+  (if flag (One 42) (Neither)))
+
+(defn main [] (-> i64)
+  (match (choose true)
+    (Neither [] 1)
+    (One [value] (if (= value 42) 0 2))
+    (Both [left right] (+ left right))))

@@ -2,6 +2,7 @@
 ; events are `externref` (real JS values held by the wasm runtime). There is no
 ; DOM-specific JavaScript anywhere.
 (module dom)
+(import "primitive.coil" :as primitive)
 (import "slice.coil" :use *)
 (import "js.coil"    :use *)
 
@@ -32,7 +33,7 @@
 
 ; a callback handle: the exported Coil `handler` bound with `userdata` (its first arg).
 (defn make-cb [(handler (slice u8)) (userdata i32)] (-> externref)
-  (js_cb (slice-data [u8] handler) (cast i32 (slice-len [u8] handler)) userdata))
+  (js_cb (slice-data [u8] handler) (primitive/cast i32 (slice-len [u8] handler)) userdata))
 (defn add-listener! [(node externref) (evt (slice u8)) (cb externref)] (-> externref)
   (js-call2 node "addEventListener" (js-str evt) cb))
 (defn on! [(node externref) (evt (slice u8)) (handler (slice u8)) (userdata i32)] (-> externref)

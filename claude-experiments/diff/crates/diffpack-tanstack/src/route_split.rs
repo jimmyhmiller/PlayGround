@@ -10,7 +10,7 @@
 //!
 //! This module implements the `component` property, which is the shape every
 //! route in the reference app uses. Two operations, both source-to-source so the
-//! result flows back through the normal [`crate::transform::transform_module`]
+//! result flows back through the normal compiler transform
 //! pipeline unchanged:
 //!
 //! * [`split_reference_route`] rewrites the *reference* file: the `component`

@@ -1,0 +1,64 @@
+(module async-timer-test)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
+
+(import "async_runtime.coil" :use *)
+(import "async.coil" :use *)
+(import "time.coil" :use *)
+(import "assert.coil" :use *)
+
+(defn runtime-init-ok [(result (Result (ptr Runtime) RuntimeError))] (-> bool)
+  (match result (Ok [_] true) (Err [_] false)))
+
+(defn runtime-close-ok [(result (Result i64 RuntimeError))] (-> bool)
+  (match result (Ok [_] true) (Err [_] false)))
+
+(defn timer-init-ok [(result (Result (ptr (Task (Result i64 TimerError))) TimerError))] (-> bool)
+  (match result (Ok [_] true) (Err [_] false)))
+
+(defn timer-init-invalid [(result (Result (ptr (Task (Result i64 TimerError))) TimerError))] (-> bool)
+  (match result
+    (Ok [_] false)
+    (Err [error]
+         (match error
+           (InvalidDuration [] true)
+           (Clock [_] false)))))
+
+(defn timer-run-ok [(result (Result (Result i64 TimerError) TaskError))] (-> bool)
+  (match result
+    (Err [_] false)
+    (Ok [timer-result]
+        (match timer-result (Ok [_] true) (Err [_] false)))))
+
+(defn monotonic-value [(result (Result i64 TimeError))] (-> i64)
+  (match result (Ok [value] value) (Err [_] -1)))
+
+(defn main [] (-> i64)
+  (let [runtime (alloc/stack Runtime)
+        cx (alloc/stack Context)
+        parker (alloc/stack Parker)
+        state (alloc/stack TimerState)
+        task (alloc/stack (Task (Result i64 TimerError)))]
+    (assert (runtime-init-ok (runtime-init runtime)))
+    (runtime-context cx runtime)
+    (runtime-parker parker runtime)
+    
+    (let [before (monotonic-value (monotonic-now-ms))]
+      (assert (>= before 0))
+      (assert (timer-init-ok (timer-after-ms runtime task state 25)))
+      (assert (timer-run-ok (task-run task cx parker)))
+      (let [elapsed (- (monotonic-value (monotonic-now-ms)) before)]
+        (assert (>= elapsed 20))
+        (assert (< elapsed 2000))))
+    (assert-eq (task-close task) 0)
+    
+    ; Cancellation before the deadline is safe and idempotent.
+    (assert (timer-init-ok (timer-after-ms runtime task state 1000)))
+    (assert-eq (task-close task) 0)
+    (assert-eq (task-close task) 0)
+    
+    (assert (timer-init-invalid (timer-after-ms runtime task state -1)))
+    (assert (>= (monotonic-value (wall-now-ms)) 0))
+    (assert (runtime-close-ok (runtime-close runtime)))
+    (assert (runtime-close-ok (runtime-close runtime)))
+    0))

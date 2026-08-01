@@ -630,7 +630,7 @@ pub fn replace_tracked(
 ///
 /// The single pass is a CORRECTNESS requirement, not an optimization. A
 /// [`LineTrack`]'s edits are all measured against the one text the module map
-/// describes, and [`LineOrigin::remap_column`] reads them in increasing column
+/// describes, and `LineOrigin::remap_column` reads them in increasing column
 /// order (see [`LineTrack::record_edit`]). Applying the replacements as N
 /// successive passes measures pass 2's columns in the text pass 1 already
 /// rewrote, so a single edit list ends up holding two coordinate systems — which

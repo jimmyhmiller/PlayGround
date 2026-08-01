@@ -1,4 +1,5 @@
 (module m)
-(defn a [] (-> i64) (iadd bad1 1))
-(defn b [] (-> i64) (iadd bad2 2))
+(import "primitive.coil" :as primitive)
+(defn a [] (-> i64) (primitive/iadd bad1 1))
+(defn b [] (-> i64) (primitive/iadd bad2 2))
 (defn main [] (-> i64) 0)

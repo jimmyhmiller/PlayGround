@@ -36,7 +36,7 @@
 //! with no `srcset`, and `priority` hoists a `<link rel="preload" as="image">`).
 //! A `diffpack dev` topology (Slice K) also drives this adapter: [`is_app_router`]
 //! dispatches a Next app to `dev_server::next`, which builds these same three graphs
-//! via [`configure_dev`] (development React + HMR) and serves them with
+//! via the development configuration entry point and serves them with
 //! state-preserving Fast Refresh for `"use client"` islands and a correct reload for
 //! Server-Component edits. Parallel (`@slot`) / intercepting (`(.)`) routes remain the
 //! documented remaining gaps (see `docs/RSC_NEXT_GAP.md`).
@@ -44,7 +44,7 @@
 //! Generated glue lives under `<root>/.diffpack-next/` (gitignored, like the other
 //! build outputs). Generating entry/shim source as Rust strings follows the exact
 //! precedent of [`crate::rsc::generate_action_resolver_module`] and
-//! [`crate::server_fn::generate_resolver_module`]: diffpack-authored build glue, not
+//! the equivalent TanStack server-function generator: diffpack-authored build glue, not
 //! guest source hidden in a string.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -147,7 +147,7 @@ fn recorded_eager_islands(adapter_dir: &Path) -> BTreeSet<String> {
 }
 
 /// The pinned-island list (canonical paths) the last scaffold recorded in
-/// [`ISLANDS_FILE`]. Empty when the project has never been scaffolded.
+/// the adapter's islands file. Empty when the project has never been scaffolded.
 pub fn recorded_islands(root: &Path) -> Vec<String> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let Ok(text) = std::fs::read_to_string(root.join(ADAPTER_DIR).join(ISLANDS_FILE)) else {
@@ -158,7 +158,7 @@ pub fn recorded_islands(root: &Path) -> Vec<String> {
 
 /// After a client/ssr graph discovery: intersect the pinned islands with the
 /// graph's async closure and reconcile the result against
-/// [`ASYNC_ISLANDS_FILE`]. Returns `true` when the recorded UNION changed —
+/// the adapter's async-islands file. Returns `true` when the recorded UNION changed —
 /// meaning the entries on disk were generated from a stale eager set, and the
 /// caller must re-run `configure` (which rewrites them) and rediscover. A
 /// non-app-router project (no recorded island list) always reconciles to
@@ -426,7 +426,7 @@ fn next_compiled_dir(root: &Path) -> Option<PathBuf> {
         .filter(|compiled| compiled.is_dir())
 }
 
-/// The app's `next.config.<ext>` (see [`NEXT_CONFIG_EXTS`]), or None. A `next.config` is
+/// The app's `next.config.<ext>`, or None. A `next.config` is
 /// OPTIONAL in Next.js, so its absence is not evidence that a project is not a Next app.
 pub fn next_config_path(root: &Path) -> Option<PathBuf> {
     crate::next_config::next_config_path(root)
@@ -481,7 +481,7 @@ fn detect_app_router(root: &Path) -> Option<PathBuf> {
 }
 
 /// Whether `root` is a Next.js app-router project this adapter handles. Public
-/// wrapper over [`detect_app_router`] so the dev server can dispatch a Next app to
+/// wrapper over the private detector so the dev server can dispatch a Next app to
 /// its own topology (three RSC graphs + the next orchestrator) before the
 /// TanStack/SPA detection. Canonicalizes defensively (a bad path is simply "not a
 /// Next app", never a panic).
@@ -521,7 +521,7 @@ fn instrumentation_entry_module(user_path: &Path) -> String {
 }
 
 /// If the app has an `instrumentation.{{ts,js}}`, write the generated boot-entry wrapper
-/// (see [`instrumentation_entry_module`]) under `<root>/.diffpack-next/` and return its
+/// under `<root>/.diffpack-next/` and return its
 /// path so the production build can bundle it natively to `<out>/instrumentation.mjs`.
 /// Returns `Ok(None)` when the app has no instrumentation file.
 pub fn write_instrumentation_wrapper(root: &Path) -> Result<Option<PathBuf>, String> {
@@ -2760,6 +2760,9 @@ pub struct RoutePattern {
     /// The discovery spelling (`/booking/[uid]`), which is the scope key.
     pub url_path: String,
     pub kind: PatternKind,
+    /// Absolute source module that owns the route, when discovered from a project.
+    /// Synthetic patterns created with [`RoutePattern::parse`] have no source.
+    pub source_path: Option<PathBuf>,
     segments: Vec<Seg>,
 }
 
@@ -2772,6 +2775,7 @@ impl RoutePattern {
         RoutePattern {
             url_path: url_path.to_string(),
             kind,
+            source_path: None,
             segments: url_path
                 .split('/')
                 .filter(|part| !part.is_empty())
@@ -2839,6 +2843,7 @@ pub fn discover_route_patterns(root: &Path) -> Result<Option<Vec<RoutePattern>>,
         patterns.push(RoutePattern {
             url_path: handler.url_path.clone(),
             kind: PatternKind::Endpoint,
+            source_path: Some(handler.file.clone()),
             segments: handler.segments.clone(),
         });
     }
@@ -2846,6 +2851,7 @@ pub fn discover_route_patterns(root: &Path) -> Result<Option<Vec<RoutePattern>>,
         patterns.push(RoutePattern {
             url_path: endpoint.url_path.clone(),
             kind: PatternKind::Endpoint,
+            source_path: Some(endpoint.file.clone()),
             segments: endpoint.segments.clone(),
         });
     }
@@ -2853,6 +2859,7 @@ pub fn discover_route_patterns(root: &Path) -> Result<Option<Vec<RoutePattern>>,
         patterns.push(RoutePattern {
             url_path: route.url_path.clone(),
             kind: PatternKind::Page,
+            source_path: Some(route.page.clone()),
             segments: route.segments.clone(),
         });
     }
@@ -3070,7 +3077,7 @@ fn js_str(value: &str) -> String {
 }
 
 /// If `root` is an app-router project, scaffold `.diffpack-next/` and return the
-/// [`AppConfig`] for `environment` (`client` | `react-server` | `ssr`/anything
+/// [`AppRouterAppConfig`] for `environment` (`client` | `react-server` | `ssr`/anything
 /// else server-like). Returns `Ok(None)` for a non-Next project so the caller
 /// falls back to the TanStack `derive_config` path unchanged. This is the
 /// PRODUCTION entry point (`build-app`): byte-identical to before the dev server
@@ -3083,7 +3090,7 @@ pub fn configure_app_router(
     configure_inner(root, environment, false, &RouteScope::All)
 }
 
-/// The DEV variant of [`configure`] (the `diffpack dev` Next topology, Slice K):
+/// The development variant of [`configure_app_router`] (the `diffpack dev` Next topology):
 /// same scaffold, but the returned config is switched to development —
 /// `build.hmr = true`, `process.env.NODE_ENV` defined as `"development"` (so React's
 /// development build, which alone exposes the Fast Refresh renderer hook, is
@@ -3429,6 +3436,30 @@ fn configure_inner(
     if !islands.contains(&script_canon) {
         islands.push(script_canon.clone());
     }
+    // Native Next's official App Page entry always installs its built-in global
+    // error boundary in the loader tree. Pin that client boundary into the same
+    // browser graph when the native bridge is active so its Flight reference has
+    // a real client module and chunk, just like an application global-error.tsx.
+    if std::env::var_os("DIFFPACK_NATIVE_NEXT_OUTPUT").is_some()
+        && let Ok(next_root) = crate::rsc_runtime_resolve::installed_package_root(&root, "next")
+    {
+        for relative in [
+            "dist/client/components/builtin/global-error.js",
+            "dist/client/components/client-page.js",
+            "dist/client/components/client-segment.js",
+            "dist/client/components/http-access-fallback/error-boundary.js",
+            "dist/client/components/instant-validation/boundary.js",
+            "dist/client/components/layout-router.js",
+            "dist/client/components/render-from-template-context.js",
+            "dist/lib/framework/boundary-components.js",
+            "dist/lib/metadata/generate/icon-mark.js",
+        ] {
+            let builtin = next_root.join(relative);
+            if builtin.is_file() && !islands.contains(&builtin) {
+                islands.push(builtin);
+            }
+        }
+    }
     // THE PIN SET. A pin exists for exactly one reason: to put an island into the client
     // and SSR graphs so the client reference the flight carries for it resolves. The
     // react-server graph knows precisely which those are — every `"use client"` module it
@@ -3613,6 +3644,22 @@ fn configure_inner(
             process_browser_define(target).to_string(),
         ),
     ];
+    if !dev {
+        // Next's shared app entry-base is authored for Turbopack and references
+        // these compiler intrinsics as free identifiers. A production build has
+        // no hot-update cache to clear or apply; compile the optional hooks to
+        // null exactly as the entry-base's declared contract permits.
+        defines.extend([
+            (
+                "__turbopack_clear_chunk_cache__".to_string(),
+                "null".to_string(),
+            ),
+            (
+                "__turbopack_server_hmr_apply__".to_string(),
+                "null".to_string(),
+            ),
+        ]);
+    }
     // `NEXT_PUBLIC_*` is inlined in EVERY compilation, exactly as `next build`
     // does (see `next_public_env`). Server graphs additionally get the full
     // config environment at runtime via the manifest; the browser has only
@@ -3643,12 +3690,11 @@ fn configure_inner(
             virtual_modules: Vec::new(),
             private_chunk_names: Vec::new(),
             target,
-            source_policy: std::sync::Arc::new(
-                diffpack_vite_compat::source_policy::ViteSourcePolicy {
-                    defines,
-                    ..Default::default()
-                },
-            ),
+            source_policy: std::sync::Arc::new(crate::source_policy::NextSourcePolicy {
+                defines,
+                external_singletons: Vec::new(),
+                ..Default::default()
+            }),
             hmr: dev,
             // Next's own source-map policy, so `diffpack build-app` and `next build`
             // of the same app produce comparable artifacts (see
@@ -3724,7 +3770,7 @@ pub(crate) fn run_next_config_eval(root: &Path) -> Option<serde_json::Value> {
 /// every process diffpack spawns. Removals are reported by the script but not applied:
 /// unsetting a variable the real environment provided is not something the propagation
 /// can do to an already-spawned parent, and no config in the wild deletes one.
-/// [`config_env`] read back from the manifest the build persisted, for the steps that
+/// Configuration environment values are read back from the persisted manifest for steps that
 /// run AFTER the compile (the SSG prerenderer, the dev orchestrator) and therefore no
 /// longer hold the evaluated config in memory. Empty when there is no manifest — an app
 /// with no `next.config` has no side effects to propagate.
@@ -3757,10 +3803,8 @@ pub fn config_env_from_output(output: &Path) -> Vec<(String, String)> {
 /// and `next build` of the same app produce comparable artifacts — otherwise a
 /// build-time comparison between them is measuring different work:
 ///
-/// - **Server** graphs (`react-server`, `ssr`) ALWAYS get maps. Next does not make
-///   this configurable, because a production stack trace out of a Server Component
-///   or a route handler is unreadable without one, and server maps never leave the
-///   server.
+/// - **Server** graphs (`react-server`, `ssr`) get maps only when the app enables
+///   Next's `experimental.serverSourceMaps`. Next defaults this off.
 /// - **Browser** graphs get maps only when the app asks, via
 ///   `productionBrowserSourceMaps`. These ship to every visitor and publish the
 ///   app's source, so Next defaults them off and so does diffpack.
@@ -3776,8 +3820,15 @@ pub(crate) fn default_source_maps(
     }
     match target {
         Target::Client => production_browser_source_maps(next_config),
-        Target::Server | Target::IsolatedServer => true,
+        Target::Server | Target::IsolatedServer => server_source_maps(next_config),
     }
+}
+
+/// next.config `experimental.serverSourceMaps`, flattened by the config evaluator.
+pub(crate) fn server_source_maps(eval: Option<&serde_json::Value>) -> bool {
+    eval.and_then(|value| value.get("serverSourceMaps"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// next.config `productionBrowserSourceMaps`, as reported by `next-config-eval.mjs`.
@@ -3840,7 +3891,8 @@ fn next_public_env(
         };
         // A malformed env file is reported by the config-eval path already;
         // here it only loses the file's contribution to the inline set.
-        let Ok(pairs) = diffpack_vite_compat::env_file::parse(&text, &path.display().to_string())
+        let Ok(pairs) =
+            diffpack_default_loader::env_file::parse(&text, &path.display().to_string())
         else {
             continue;
         };
@@ -7540,7 +7592,7 @@ fn scan_public_images_dir(
     Ok(())
 }
 
-/// Opaque handle over the internal [`ImageEntry`] so `main.rs` can drive the variant
+/// Opaque handle over the internal image record so callers can drive the variant
 /// emit without depending on the private shape.
 pub struct PublicImage(ImageEntry);
 
@@ -7555,7 +7607,7 @@ pub struct PublicImage(ImageEntry);
 /// is emitted by the react-server entry, so serving them is zero per-request cost
 /// (they flow through the orchestrator's existing static-asset path). Returns the count
 /// copied; a no-op for an app with no convention images. Reuses the SAME discovery
-/// ([`scan_metadata_images`]) as the head-link emitter, so the copied files and the
+/// as the head-link emitter, so the copied files and the
 /// linked URLs cannot drift.
 pub fn emit_metadata_images(root: &Path, out_public: &Path) -> Result<usize, String> {
     // A no-op (not an error) for a project with no app dir at all: main.rs calls this on
@@ -13202,16 +13254,16 @@ console.log("OK");
     /// an app never asked for publishes its source to every visitor.
     #[test]
     fn the_default_source_map_policy_is_next_s_own() {
-        let asked = serde_json::json!({ "productionBrowserSourceMaps": true });
+        let asked = serde_json::json!({
+            "productionBrowserSourceMaps": true,
+            "serverSourceMaps": true
+        });
         let silent = serde_json::json!({ "basePath": "" });
 
         for target in [Target::Server, Target::IsolatedServer] {
-            assert!(
-                default_source_maps(target, false, Some(&silent))
-                    && default_source_maps(target, false, None),
-                "{target:?} maps are NOT configurable in Next — they are always emitted, \
-                 config or no config"
-            );
+            assert!(!default_source_maps(target, false, Some(&silent)));
+            assert!(!default_source_maps(target, false, None));
+            assert!(default_source_maps(target, false, Some(&asked)));
         }
 
         assert!(

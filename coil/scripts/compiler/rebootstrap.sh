@@ -11,7 +11,7 @@
 # The seed is NEVER trusted blindly. Every run re-derives the compiler from source and proves
 # the result faithful two independent ways, so a stale or tampered seed cannot slip through:
 #   * FIXPOINT : stage2.o == stage3.o byte-identical  (the arm64 backend is fully deterministic)
-#   * GATES    : gate-full  (emitted IR byte-exact vs the reference snapshot, whole corpus)
+#   * GATES    : curated stage snapshots + behavioral runtime/CLI corpora
 #                arm64 gate-run  (built programs produce identical stdout+exit)
 #                gate-meta-engines (compiled-meta == interp-meta: corpus + byte-identical self-build)
 #                gate-wasm  (interp-meta running in a single static wasm module; skips w/o node)
@@ -88,12 +88,12 @@ echo "=== GATES ==="
 python3 scripts/oracle.py gate all --compiler /tmp/coil-rb2 >/dev/null \
   || { echo "compiler snapshot gates FAIL; run: python3 scripts/oracle.py gate all --compiler /tmp/coil-rb2 --verbose"; exit 1; }
 echo "  snapshot gates: PASS (read/ast/load/resolve/check/expand/mono/ir/diag/x86/full byte-exact)"
-# Compiler-free consistency check on the SHARED corpus manifest: an entry blessed for
+# Compiler-free consistency check on the shared curated IR manifest: an entry blessed for
 # only one platform breaks the other platform's gate-full with a missing-file error,
 # which is exactly how fs_lib.coil landed (Linux reference only, macOS gate dead).
 python3 scripts/oracle.py coverage >/dev/null \
   || { echo "snapshot coverage FAIL"; python3 scripts/oracle.py coverage; exit 1; }
-echo "  corpus coverage: PASS (every corpus entry blessed on both platforms)"
+echo "  IR coverage: PASS (every curated entry blessed on both platforms)"
 python3 scripts/oracle.py runtime gate arm64 --compiler /tmp/coil-rb2 >/dev/null || { echo "arm64 runtime gate FAIL — runtime divergence"; exit 1; }
 echo "  arm64 gate-run: PASS (programs run identically)"
 ./scripts/compiler/oracle/gate-cli.sh /tmp/coil-rb2 >/dev/null      || { echo "gate-cli FAIL — the CLI contract regressed"; exit 1; }

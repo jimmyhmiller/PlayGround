@@ -30,6 +30,8 @@
 ; number rather than a crash. Exit code is 0 on success, or the number of the
 ; first failing check.
 (module sysvabi)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 
 (import "io.coil" :use *)
 (import "control.coil" :use *)
@@ -54,7 +56,7 @@
   (print-str (stderr) "sysv-abi: check ")
   (print-int (stderr) n)
   (print-str (stderr) " FAILED\n")
-  (when (icmp-eq (load firstbad) 0) (store! firstbad n) 0)
+  (when (primitive/icmp-eq (primitive/load firstbad) 0) (primitive/store! firstbad n) 0)
   0)
 
 ; ============================================================================
@@ -63,8 +65,8 @@
 ; ============================================================================
 (defn intspill [(a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64)
                 (x f64) (y f64) (z f64)] (-> i64)
-  (iadd (iadd (iadd (iadd a b) (iadd c d)) (iadd (iadd e f) g))
-        (cast i64 (fadd x (fadd y z)))))
+  (primitive/iadd (primitive/iadd (primitive/iadd (primitive/iadd a b) (primitive/iadd c d)) (primitive/iadd (primitive/iadd e f) g))
+        (primitive/cast i64 (primitive/fadd x (primitive/fadd y z)))))
 
 ; ============================================================================
 ; 2. SSE registers run out (8) while INTEGER registers are still free.
@@ -73,9 +75,9 @@
 (defn ssespill [(x1 f64) (x2 f64) (x3 f64) (x4 f64) (x5 f64)
                 (x6 f64) (x7 f64) (x8 f64) (x9 f64)
                 (a i64) (b i64)] (-> i64)
-  (iadd (cast i64 (fadd (fadd (fadd x1 x2) (fadd x3 x4))
-                        (fadd (fadd (fadd x5 x6) (fadd x7 x8)) x9)))
-        (iadd a b)))
+  (primitive/iadd (primitive/cast i64 (primitive/fadd (primitive/fadd (primitive/fadd x1 x2) (primitive/fadd x3 x4))
+                        (primitive/fadd (primitive/fadd (primitive/fadd x5 x6) (primitive/fadd x7 x8)) x9)))
+        (primitive/iadd a b)))
 
 ; ============================================================================
 ; 3. A 16-byte INTEGER,INTEGER aggregate that does NOT fit in the remaining
@@ -93,18 +95,18 @@
   ; writes only the pair's first eightbyte leaves the trailing `f` sitting where
   ; p.b belongs, so p.b and f swap — with equal weights that is invisible
   ; (the sum is the same), which is exactly how this bug escaped the first time.
-  (iadd (iadd (iadd (iadd a b) (iadd c d)) (iadd e h))
-        (iadd (iadd (load (field p a)) (imul (load (field p b)) 7))
-              (imul f 31))))
+  (primitive/iadd (primitive/iadd (primitive/iadd (primitive/iadd a b) (primitive/iadd c d)) (primitive/iadd e h))
+        (primitive/iadd (primitive/iadd (primitive/load (primitive/field p a)) (primitive/imul (primitive/load (primitive/field p b)) 7))
+              (primitive/imul f 31))))
 
 ; ============================================================================
 ; 4. Two SSE eightbytes (F2), also forced onto the stack, with an int after.
 ; ============================================================================
 (defn f2spill [(x1 f64) (x2 f64) (x3 f64) (x4 f64)
                (x5 f64) (x6 f64) (x7 f64) (q F2) (n i64)] (-> i64)
-  (iadd (cast i64 (fadd (fadd (fadd x1 x2) (fadd x3 x4))
-                        (fadd (fadd x5 x6) x7)))
-        (iadd (cast i64 (fadd (load (field q x)) (load (field q y)))) n)))
+  (primitive/iadd (primitive/cast i64 (primitive/fadd (primitive/fadd (primitive/fadd x1 x2) (primitive/fadd x3 x4))
+                        (primitive/fadd (primitive/fadd x5 x6) x7)))
+        (primitive/iadd (primitive/cast i64 (primitive/fadd (primitive/load (primitive/field q x)) (primitive/load (primitive/field q y)))) n)))
 
 ; ============================================================================
 ; 5. Mixed-class aggregates: one eightbyte in a GPR, the other in an xmm.
@@ -112,11 +114,11 @@
 ;    an f32 and an i32 sharing eightbyte 0, which the merge rule makes INTEGER.
 ; ============================================================================
 (defn mixed [(m MIX) (p PACK) (g MERGE)] (-> i64)
-  (iadd (iadd (cast i64 (load (field m x))) (load (field m n)))
-        (iadd (iadd (cast i64 (load (field p a))) (cast i64 (load (field p b))))
-              (iadd (load (field p n))
-                    (iadd (cast i64 (load (field g a)))
-                          (iadd (cast i64 (load (field g n))) (load (field g m))))))))
+  (primitive/iadd (primitive/iadd (primitive/cast i64 (primitive/load (primitive/field m x))) (primitive/load (primitive/field m n)))
+        (primitive/iadd (primitive/iadd (primitive/cast i64 (primitive/load (primitive/field p a))) (primitive/cast i64 (primitive/load (primitive/field p b))))
+              (primitive/iadd (primitive/load (primitive/field p n))
+                    (primitive/iadd (primitive/cast i64 (primitive/load (primitive/field g a)))
+                          (primitive/iadd (primitive/cast i64 (primitive/load (primitive/field g n))) (primitive/load (primitive/field g m))))))))
 
 ; ============================================================================
 ; 6. >16B aggregates are MEMORY in both directions: passed by value on the
@@ -124,53 +126,53 @@
 ;    back in rax.
 ; ============================================================================
 (defn bigret [(n i64)] (-> BIG)
-  (let [r (alloc-stack BIG)]
-    (store! (field r a) n)
-    (store! (field r b) (iadd n 1))
-    (store! (field r c) (iadd n 2))
-    (store! (field r d) (iadd n 3))
-    (load r)))
+  (let [r (alloc/stack BIG)]
+    (primitive/store! (primitive/field r a) n)
+    (primitive/store! (primitive/field r b) (primitive/iadd n 1))
+    (primitive/store! (primitive/field r c) (primitive/iadd n 2))
+    (primitive/store! (primitive/field r d) (primitive/iadd n 3))
+    (primitive/load r)))
 (defn bigsum [(v BIG)] (-> i64)
-  (iadd (iadd (load (field v a)) (load (field v b)))
-        (iadd (load (field v c)) (load (field v d)))))
+  (primitive/iadd (primitive/iadd (primitive/load (primitive/field v a)) (primitive/load (primitive/field v b)))
+        (primitive/iadd (primitive/load (primitive/field v c)) (primitive/load (primitive/field v d)))))
 ; a >16B return AND a >16B by-value argument in the same signature: the hidden
 ; sret pointer must not be confused with the first real argument.
 (defn bigboth [(v BIG) (k i64)] (-> BIG)
-  (let [r (alloc-stack BIG)]
-    (store! (field r a) (iadd (load (field v a)) k))
-    (store! (field r b) (iadd (load (field v b)) k))
-    (store! (field r c) (iadd (load (field v c)) k))
-    (store! (field r d) (iadd (load (field v d)) k))
-    (load r)))
+  (let [r (alloc/stack BIG)]
+    (primitive/store! (primitive/field r a) (primitive/iadd (primitive/load (primitive/field v a)) k))
+    (primitive/store! (primitive/field r b) (primitive/iadd (primitive/load (primitive/field v b)) k))
+    (primitive/store! (primitive/field r c) (primitive/iadd (primitive/load (primitive/field v c)) k))
+    (primitive/store! (primitive/field r d) (primitive/iadd (primitive/load (primitive/field v d)) k))
+    (primitive/load r)))
 
 ; ============================================================================
 ; 7. Small aggregates returned in registers: 8B in rax / xmm0, 16B in the
 ;    (rax,rdx) / (xmm0,xmm1) / mixed pairs.
 ; ============================================================================
 (defn mkp1 [(n i64)] (-> P1)
-  (let [r (alloc-stack P1)] (store! (field r a) n) (load r)))
+  (let [r (alloc/stack P1)] (primitive/store! (primitive/field r a) n) (primitive/load r)))
 (defn mkp2 [(n i64)] (-> P2)
-  (let [r (alloc-stack P2)] (store! (field r a) n) (store! (field r b) (imul n 2)) (load r)))
+  (let [r (alloc/stack P2)] (primitive/store! (primitive/field r a) n) (primitive/store! (primitive/field r b) (primitive/imul n 2)) (primitive/load r)))
 (defn mkf1 [(v f64)] (-> F1)
-  (let [r (alloc-stack F1)] (store! (field r x) v) (load r)))
+  (let [r (alloc/stack F1)] (primitive/store! (primitive/field r x) v) (primitive/load r)))
 (defn mkf2 [(v f64)] (-> F2)
-  (let [r (alloc-stack F2)] (store! (field r x) v) (store! (field r y) (fmul v 2.0)) (load r)))
+  (let [r (alloc/stack F2)] (primitive/store! (primitive/field r x) v) (primitive/store! (primitive/field r y) (primitive/fmul v 2.0)) (primitive/load r)))
 (defn mkmix [(v f64) (n i64)] (-> MIX)
-  (let [r (alloc-stack MIX)] (store! (field r x) v) (store! (field r n) n) (load r)))
+  (let [r (alloc/stack MIX)] (primitive/store! (primitive/field r x) v) (primitive/store! (primitive/field r n) n) (primitive/load r)))
 
 (defn main [] (-> i64)
   (let [w (stdout)
-        fb (alloc-stack i64)]
-    (store! fb 0)
+        fb (alloc/stack i64)]
+    (primitive/store! fb 0)
     ; ---- 1. int registers exhausted, floats still in registers
     ; 1+2+3+4+5+6+7 = 28, floats 1.5+2.5+3.0 = 7.0 -> 28+7 = 35
     (let [r (intspill 1 2 3 4 5 6 7 1.5 2.5 3.0)]
-      (unless (icmp-eq r 35) (note-fail! fb 1)))
+      (unless (primitive/icmp-eq r 35) (note-fail! fb 1)))
 
     ; ---- 2. SSE registers exhausted, ints still in registers
     ; 1..9 = 45, ints 10+20 = 30 -> 75
     (let [r (ssespill 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10 20)]
-      (unless (icmp-eq r 75) (note-fail! fb 2)))
+      (unless (primitive/icmp-eq r 75) (note-fail! fb 2)))
 
     ; ---- 3. a 16B INTEGER pair spilled whole to the stack, int after it
     ; 1+2+3+4+5+6 = 21, p={100,200} -> 100 + 200*7 = 1500, f=7 -> 7*31 = 217
@@ -178,61 +180,61 @@
     ; 7*7 + 200*31 = 6370, so the weights make the mistake visible.
     (let [p (mkp2 100)
           r (pairspill 1 2 3 4 5 6 p 7)]
-      (unless (icmp-eq r 1738) (note-fail! fb 3)))
+      (unless (primitive/icmp-eq r 1738) (note-fail! fb 3)))
 
     ; ---- 4. a 16B SSE pair spilled whole to the stack, int after it
     ; 1..7 = 28, q = {3.0, 6.0} -> 9, trailing 5 -> 42
     (let [q (mkf2 3.0)
           r (f2spill 1.0 2.0 3.0 4.0 5.0 6.0 7.0 q 5)]
-      (unless (icmp-eq r 42) (note-fail! fb 4)))
+      (unless (primitive/icmp-eq r 42) (note-fail! fb 4)))
 
     ; ---- 5. mixed-class eightbytes
     ; m = {2.0, 5}      -> 2 + 5   = 7
     ; p = {1.5f,2.5f,4} -> 1 + 2 + 4 = 7   (casts truncate)
     ; g = {3.5f, 6, 9}  -> 3 + 6 + 9 = 18
     ; total 32
-    (let [m (alloc-stack MIX)
-          p (alloc-stack PACK)
-          g (alloc-stack MERGE)]
-      (store! (field m x) 2.0)
-      (store! (field m n) 5)
-      (store! (field p a) (cast f32 1.5))
-      (store! (field p b) (cast f32 2.5))
-      (store! (field p n) 4)
-      (store! (field g a) (cast f32 3.5))
-      (store! (field g n) (cast i32 6))
-      (store! (field g m) 9)
-      (let [r (mixed (load m) (load p) (load g))]
-        (unless (icmp-eq r 32) (note-fail! fb 5))))
+    (let [m (alloc/stack MIX)
+          p (alloc/stack PACK)
+          g (alloc/stack MERGE)]
+      (primitive/store! (primitive/field m x) 2.0)
+      (primitive/store! (primitive/field m n) 5)
+      (primitive/store! (primitive/field p a) (primitive/cast f32 1.5))
+      (primitive/store! (primitive/field p b) (primitive/cast f32 2.5))
+      (primitive/store! (primitive/field p n) 4)
+      (primitive/store! (primitive/field g a) (primitive/cast f32 3.5))
+      (primitive/store! (primitive/field g n) (primitive/cast i32 6))
+      (primitive/store! (primitive/field g m) 9)
+      (let [r (mixed (primitive/load m) (primitive/load p) (primitive/load g))]
+        (unless (primitive/icmp-eq r 32) (note-fail! fb 5))))
 
     ; ---- 6. >16B by value and >16B returned through the hidden pointer
     ; bigret 10 -> {10,11,12,13}, sum 46
     (let [v (bigret 10)]
-      (unless (icmp-eq (bigsum v) 46) (note-fail! fb 6))
+      (unless (primitive/icmp-eq (bigsum v) 46) (note-fail! fb 6))
       ; both at once: {10,11,12,13} + 5 each -> {15,16,17,18}, sum 66
       (let [v2 (bigboth v 5)]
-        (unless (icmp-eq (bigsum v2) 66) (note-fail! fb 7))))
+        (unless (primitive/icmp-eq (bigsum v2) 66) (note-fail! fb 7))))
 
     ; ---- 7. small aggregates returned in registers
     (let [a (mkp1 42)]
-      (unless (icmp-eq (load (field a a)) 42) (note-fail! fb 8)))
+      (unless (primitive/icmp-eq (primitive/load (primitive/field a a)) 42) (note-fail! fb 8)))
     (let [b (mkp2 7)]
-      (unless (icmp-eq (iadd (load (field b a)) (load (field b b))) 21) (note-fail! fb 9)))
+      (unless (primitive/icmp-eq (primitive/iadd (primitive/load (primitive/field b a)) (primitive/load (primitive/field b b))) 21) (note-fail! fb 9)))
     (let [c (mkf1 2.5)]
-      (unless (fcmp-eq (load (field c x)) 2.5) (note-fail! fb 10)))
+      (unless (primitive/fcmp-eq (primitive/load (primitive/field c x)) 2.5) (note-fail! fb 10)))
     (let [d (mkf2 1.5)]
-      (unless (fcmp-eq (fadd (load (field d x)) (load (field d y))) 4.5) (note-fail! fb 11)))
+      (unless (primitive/fcmp-eq (primitive/fadd (primitive/load (primitive/field d x)) (primitive/load (primitive/field d y))) 4.5) (note-fail! fb 11)))
     (let [e (mkmix 3.5 4)]
-      (unless (fcmp-eq (load (field e x)) 3.5) (note-fail! fb 12))
-      (unless (icmp-eq (load (field e n)) 4) (note-fail! fb 13)))
+      (unless (primitive/fcmp-eq (primitive/load (primitive/field e x)) 3.5) (note-fail! fb 12))
+      (unless (primitive/icmp-eq (primitive/load (primitive/field e n)) 4) (note-fail! fb 13)))
 
     ; ---- 8. a by-value aggregate round-trips through a call chain unchanged
     ; (catches a copy that clobbers its own source pointer)
     (let [v (bigret 100)
           v2 (bigboth (bigboth v 1) 2)]
       ; {100,101,102,103} +1 +2 -> {103,104,105,106}, sum 418
-      (unless (icmp-eq (bigsum v2) 418) (note-fail! fb 14)))
+      (unless (primitive/icmp-eq (bigsum v2) 418) (note-fail! fb 14)))
 
-    (if (icmp-eq (load fb) 0)
+    (if (primitive/icmp-eq (primitive/load fb) 0)
         (do (print-str w "sysv-abi: all checks passed\n") 0)
-        (load fb))))
+        (primitive/load fb))))

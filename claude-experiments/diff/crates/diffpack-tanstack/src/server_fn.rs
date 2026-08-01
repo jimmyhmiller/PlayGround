@@ -18,7 +18,7 @@
 //!
 //! Diffpack replaces that plugin natively. This module performs the same rewrite
 //! in Rust on the Oxc AST (source-to-source, so the result flows back through the
-//! normal [`crate::transform::transform_module`] pipeline unchanged) and generates
+//! normal compiler transform pipeline unchanged) and generates
 //! the resolver module from a pre-scan of the app source. The rewrite is gated on
 //! a cheap `source.contains("createServerFn")` string check before any parse, so
 //! non-server-fn modules pay nothing and the incremental graph is preserved.

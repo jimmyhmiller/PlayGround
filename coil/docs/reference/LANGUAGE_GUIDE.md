@@ -126,7 +126,7 @@ valid. Public/package namespaces may also use a leading owner scope, for example
 imports still use file paths, and callers normally choose a short local `:as` alias.
 
 The bundled standard library follows the same rule under `coil.*`: `coil.core`,
-`coil.json`, `coil.http`, `coil.slice`, etc. Bare import filenames such as
+`coil.json`, `coil.http.client`, `coil.http.server`, `coil.slice`, etc. Bare import filenames such as
 `"json.coil"` remain unchanged.
 
 Paths resolve relative to the **importing file's own directory**; bare stdlib
@@ -238,7 +238,7 @@ object pointer and a compiler-generated vtable pointer. It is valid in every ord
 type position: fields, sums, locals, parameters, returns, arrays, and generic containers.
 The legacy `dyn` module and `(defdyn Trait)` remain available to request explicit
 object-safety diagnostics, but are not required. A concrete `(ptr Implementer)` coerces automatically wherever a
-`(dyn Trait)` is expected, or explicitly with `(make-dyn Trait p)`. The trait's methods
+`(dyn Trait)` is expected, or explicitly with `(primitive/make-dyn Trait p)`. The trait's methods
 must take `(self (ptr Self))`; later parameters and the return type may not mention
 `Self`. Copying the dynamic value does not copy or preserve the concrete object: its
 `data` pointer follows the same validity rules as any other Coil pointer.
@@ -249,11 +249,11 @@ Int types `i8 i16 i32 i64 u8 u32 u64 …` (arbitrary width, real signedness).
 Floats `f32 f64`. `bool` is real (`true`/`false`). Literals infer width from
 context; hex `0x1F`, binary `0b1010`, octal `0o17`, underscores `1_000`.
 
-`(cast T x)` converts: `(cast i64 f)` truncates f64→i64 (numeric), `(cast f64 i)`
-converts int→float, `(cast (ptr T) x)` reinterprets pointers, `(cast i64 p)` is a
+`(primitive/cast T x)` converts: `(primitive/cast i64 f)` truncates f64→i64 (numeric), `(primitive/cast f64 i)`
+converts int→float, `(primitive/cast (ptr T) x)` reinterprets pointers, `(primitive/cast i64 p)` is a
 pointer's address. ⚠ `cast` between f64 and i64 is a **numeric conversion, not a
 bit reinterpret**. For a bitcast (e.g. NaN-boxing) round-trip through memory:
-`(let [p (alloc-stack i64)] (store! p bits) (load (cast (ptr f64) p)))` — LLVM at
+`(let [p (alloc/stack i64)] (primitive/store! p bits) (primitive/load (primitive/cast (ptr f64) p)))` — LLVM at
 -O3 folds this to a register move.
 
 ## Control flow
@@ -274,7 +274,7 @@ import: `when unless cond case case-by while for and or not`.
 
 ⚠ `if` needs matching branch types. For effect-only conditionals write
 `(if c (do …effects… 0) 0)` so both sides are `i64`. `store!` yields unit (canonical
-`i64` 0), so `(if c (store! p ptr) 0)` type-checks directly — no wrapping `do` needed.
+`i64` 0), so `(if c (primitive/store! p ptr) 0)` type-checks directly — no wrapping `do` needed.
 
 There is no `return`. Structure with `if`, or use `(block :b … (return-from :b v))`.
 Self-tail-recursion is constant-stack (guaranteed `musttail`).
@@ -284,21 +284,21 @@ Self-tail-recursion is constant-stack (guaranteed `musttail`).
     (defstruct Point [(x i64) (y i64)])
     (defstruct Rect  [(lo Point) (hi Point) (data (ptr u8)) (buf (array u8 64))])
 
-- `(field p name)` → a `(ptr FieldType)` (a place); then `load`/`store!`.
-  Requires `p : (ptr Struct)`. Nested: `(field (field s lo) x)`. Array field
-  element: `(index (field s buf) i)`.
-- `(load place)` reads, `(store! place v)` writes.
-- `(zeroed T)` = a zero value; `(sizeof T)`, `(alignof T)`, `(offsetof S f)` are
+- `(primitive/field p name)` → a `(ptr FieldType)` (a place); then `load`/`store!`.
+  Requires `p : (ptr Struct)`. Nested: `(primitive/field (primitive/field s lo) x)`. Array field
+  element: `(primitive/index (primitive/field s buf) i)`.
+- `(primitive/load place)` reads, `(primitive/store! place v)` writes.
+- `(primitive/zeroed T)` = a zero value; `(primitive/sizeof T)`, `(primitive/alignof T)`, `(primitive/offsetof S f)` are
   compile-time.
 - Passing: `(p Point)` = **immutable ref** (a `store!` through it won't type-check);
   `(mut Point)` = **mutable ref**, pass a place with `(mut place)`; `(ptr Point)` =
   raw pointer (metal / FFI / allocators). A `let` of struct/array type is a stack place.
-- ⚠ `(field rvalue name)` fails — `field` needs a place (a pointer), not a value.
+- ⚠ `(primitive/field rvalue name)` fails — `field` needs a place (a pointer), not a value.
   Load into a place first, or take its address.
 
 **Struct "inheritance" (C-style):** embed a header struct as the first field and
-cast pointers — the header is at offset 0, so `(cast (ptr Sub) hdrptr)` and
-`(cast (ptr Hdr) subptr)` are the same address.
+cast pointers — the header is at offset 0, so `(primitive/cast (ptr Sub) hdrptr)` and
+`(primitive/cast (ptr Hdr) subptr)` are the same address.
 
 ## Sum types (tagged unions)
 
@@ -333,17 +333,26 @@ fields and does not make new cases visible to the type checker.
 
 ## Pointers, memory, allocation
 
-Three allocation *operations*, each yields `(ptr T)`:
+Import the allocation API with `(import "alloc.coil" :as alloc)`. Its three
+allocation operations each yield `(ptr T)`:
 
-- `(alloc-stack T)` → `alloca`, this frame. ⚠ **NEVER call `alloc-stack` inside a
+- `(alloc/stack T)` → `alloca`, this frame. ⚠ **NEVER call `alloc/stack` inside a
   loop that runs many times** — alloca isn't freed until the function returns, so
   it leaks the C stack per iteration and eventually segfaults. Hoist it into a
   `let` outside the loop and reuse the slot.
-- `(alloc-static T)` → one global cell per call site (see Globals).
-- `(alloc-heap T)` → `malloc` (pair with `free`).
+- `(alloc/static T)` → one global cell per call site (see Globals).
+- `(alloc/heap T)` → `malloc` (pair with `primitive/free`).
 
-`(index p i)` → `(ptr T)` at element i (pointer arithmetic, scaled by `sizeof T`);
-`(index p -1)` is p−1. Null: `(cast (ptr T) 0)`; null test `(= (cast i64 p) 0)`.
+Low-level compiler operations are definitions in `coil.primitive`, not ambient
+syntax. Import it explicitly with `(import "primitive.coil" :as primitive)` and
+write `(primitive/load p)`, `(primitive/store! p v)`, `(primitive/iadd a b)`, etc.
+The old bare spellings such as `(load p)`, `(iadd a b)`, and `(alloc-stack T)` are
+ordinary unresolved function calls. `defprimitive` associates a definition with
+an internal opcode keyword; those keywords are compiler metadata and cannot be
+called directly.
+
+`(primitive/index p i)` → `(ptr T)` at element i (pointer arithmetic, scaled by `sizeof T`);
+`(primitive/index p -1)` is p−1. Null: `(primitive/cast (ptr T) 0)`; null test `(= (primitive/cast i64 p) 0)`.
 
 **Comparing pointers:** `= != < <= > >=` work on any `(ptr T)` and compare
 **addresses** — `(= p q)` is identity (same slot), never a comparison of pointees.
@@ -362,7 +371,7 @@ operators are how you compare them. Ordering makes range checks direct — e.g.
     (raw-alloc a size align)           ; -> (Option (ptr i8))
     (raw-resize a p oldsz newsz align) ; realloc
     (raw-free a p size align)
-    ; idiom: (let [p (unwrap-ptr [T] (create [T] a))] (store! p …) p)
+    ; idiom: (let [p (unwrap-ptr [T] (create [T] a))] (primitive/store! p …) p)
 
 ## Collections (bundled)
 
@@ -393,7 +402,7 @@ Type args `[T]` come right after the name; usually inferable, so often omittable
 `\(` `\)` `\{` `\}` `\"` `\;` `\.` `\,` `\*`. Named: `\space`=32 `\newline`=10
 `\tab`=9 `\return`=13 `\nul`=0 `\backspace`=8 `\formfeed`=12. Hex: `\u41`=65.
 They are plain `i64` literals — use with metal/clean ops after casting the byte:
-`(= (cast i64 (load p)) \a)`.
+`(= (primitive/cast i64 (primitive/load p)) \a)`.
 
 ## Functions & function pointers
 
@@ -403,8 +412,8 @@ They are plain `i64` literals — use with metal/clean ops after casting the byt
     (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64) …)   ; CLI entry
 
 **Function pointers** (native callbacks, dispatch tables):
-`(fnptr c [ArgTs…] Ret)` is the type (`c` = C convention); `(fnptr-of fn)` takes a
-function's address; `(call-ptr fp args…)` calls indirectly. A normal `defn` can be
+`(fnptr c [ArgTs…] Ret)` is the type (`c` = C convention); `(primitive/fnptr-of fn)` takes a
+function's address; `(primitive/call-ptr fp args…)` calls indirectly. A normal `defn` can be
 taken as a `(fnptr c …)` and called via `call-ptr`; aggregate (struct/sum) returns
 cross the call correctly. Forward references within a file resolve (mutual
 recursion is fine) — define in any order.
@@ -414,11 +423,11 @@ recursion is fine) — define in any order.
 There is **no top-level mutable variable**. Use `alloc-static` inside a zero-arg
 accessor — it returns the same global cell every call:
 
-    (defn counter [] (-> (ptr i64)) (alloc-static i64))
-    (store! (counter) (+ (load (counter)) 1))
+    (defn counter [] (-> (ptr i64)) (alloc/static i64))
+    (primitive/store! (counter) (+ (primitive/load (counter)) 1))
     ; for a global struct singleton (like a VM):
     (defstruct VM [(x i64) …])
-    (defn vm [] (-> (ptr VM)) (alloc-static VM))   ; (load (field (vm) x)) …
+    (defn vm [] (-> (ptr VM)) (alloc/static VM))   ; (primitive/load (primitive/field (vm) x)) …
 
 `(const NAME VALUE)` / `(const NAME TYPE VALUE)` — compile-time immutable bindings.
 The value is ANY expression, run at compile time: `(const OP_RETURN 0)`, `(const
@@ -452,7 +461,7 @@ compiler rather than erroring; write comptime loops with `loop`, which is unaffe
 
 **Macros are ordinary functions** `[Code…] (-> Code)` — detected by type, no
 `defmacro`. `Code` is a first-class value: quote a form with `` `FORM ``, splice a
-value in with `~E`, splice a list's elements with `~@E`. `(gensym)` gives a fresh
+value in with `~E`, splice a list's elements with `~@E`. `(primitive/gensym)` gives a fresh
 symbol so macro temporaries don't capture. `&` before the last param makes it
 variadic (soaks up the rest as one Code list). Calls expand inline, outside-in:
 
@@ -463,9 +472,9 @@ variadic (soaks up the rest as one Code list). Calls expand inline, outside-in:
 top-level forms; later code may depend on what it generates.
 
 **Reflection** — introspect a type by name at comptime (fold to literals):
-`(field-count T)`, `(variant-count T)`, `(struct? T)`/`(sum? T)`/`(int? T)`/`(float?
-T)`/`(ptr? T)`/`(array? T)`, `(field-name T i)`, `(field-type-kind T i)`,
-`(field-type-name T i)`, `(field-index T "name")`. Inside a macro (where a type
+`(primitive/field-count T)`, `(primitive/variant-count T)`, `(primitive/struct? T)`/`(primitive/sum? T)`/`(primitive/int? T)`/`(primitive/float?
+T)`/`(primitive/ptr? T)`/`(primitive/array? T)`, `(primitive/field-name T i)`, `(primitive/field-type-kind T i)`,
+`(primitive/field-type-name T i)`, `(primitive/field-index T "name")`. Inside a macro (where a type
 arrives as a Code symbol) use the `code-*` family: `code-field-count`/`-name`/`-kind`
 /`-type`, `code-variant-sum`/`-count`/`-name`/`-fields`, and trait reflection
 `code-trait-method-count`/`-name`/`-arity`/`-param-type`/`-ret-type` (for generating
@@ -493,15 +502,15 @@ Macros you *call*; checkers and transforms you **register** at top level:
 
 Both are handed the program as a list of modules — `((name form…) …)`, one record per
 module, head = module name — and see **everything**, including imported and bundled
-code. Scope yourself with `(code-from-user? NODE)` (false for bundled stdlib) or
-`(code-file NODE)`.
+code. Scope yourself with `(primitive/code-from-user? NODE)` (false for bundled stdlib) or
+`(primitive/code-file NODE)`.
 
-**Reporting.** `(warn NODE MSG)` is a located, non-fatal warning; `(report NODE MSG)`
+**Reporting.** `(primitive/warn NODE MSG)` is a located, non-fatal warning; `(primitive/report NODE MSG)`
 is a located error. Both **collect** — you get every diagnostic in one pass, with the
 source span underlined, and the build fails after printing them all if any was a
 `report`.
 
-**Fixing.** `(suggest NODE MSG REPLACEMENT)` is a `warn` that also proposes a rewrite:
+**Fixing.** `(primitive/suggest NODE MSG REPLACEMENT)` is a `warn` that also proposes a rewrite:
 `REPLACEMENT` is a `Code` value, normally built out of the author's own subnodes, and
 the diagnostic gains a `help: try: …` line. Nothing is written by an ordinary build —
 `coil lint --fix` is the only writer, and it renders any node that came from source as
@@ -517,22 +526,22 @@ three or more nested `if`s into a `cond`:
     coil lint app.coil --use condlint-on.coil --fix    # apply it
 
 ⚠ Checkers see the program **after macro expansion**, so every `cond`/`when`/`case` in
-the file has already become nested `if`s. `(code-macro? NODE)` is true for a node the
+the file has already become nested `if`s. `(primitive/code-macro? NODE)` is true for a node the
 expander produced, which is how a rule about `if` tells the author's ifs from the
 ones a macro wrote.
 
 **Checkers run after the program is resolved and typechecked**, so they read the
 compiler's authoritative output and layer *policy* on code that already typechecks:
 
-- `(code-decl NODE)` → `(decl MODULE fn [PARAM-TYPE…] RET)` for a function, or
+- `(primitive/code-decl NODE)` → `(decl MODULE fn [PARAM-TYPE…] RET)` for a function, or
   `(decl MODULE KIND)` for a struct/sum/trait/const/extern; `:unresolved`/`:ambiguous`
   otherwise. Pass the **reference node** (a call, `fnptr-of`, variant construction, or
   type reference) and it resolves to the exact entity the checker picked — correct even
   when the same simple name exists in several modules.
-- `(type-of NODE)` → the expression's **inferred** type as Code (`i64`, `(ptr i64)`), or
+- `(primitive/type-of NODE)` → the expression's **inferred** type as Code (`i64`, `(ptr i64)`), or
   `:unknown`. Inferred, not syntactic: `(getf)` reports `f64` because that's what `getf`
   returns.
-- `(binding-of NODE)` → the local-binding identity a reference resolves to (0 = a
+- `(primitive/binding-of NODE)` → the local-binding identity a reference resolves to (0 = a
   global). Two references with the same positive id name the same local, so a shadowed
   local is distinguishable from its outer namesake — what a borrow/move checker keys on.
 
@@ -540,7 +549,7 @@ compiler's authoritative output and layer *policy* on code that already typechec
 rewrites, and the program is re-resolved and re-typechecked. A transform also *tolerates*
 a program that doesn't typecheck yet (the model is empty, `code-decl` → `:unresolved`),
 so it can be the thing that makes the program valid — e.g. rewriting `(inc E)` to
-`(iadd E 1)` where `inc` is otherwise undefined. It may add or remove top-level forms.
+`(primitive/iadd E 1)` where `inc` is otherwise undefined. It may add or remove top-level forms.
 
 **A dialect is a single import.** A module containing `(checker …)`/`(transform …)`
 registrations *is* a dialect; importing it applies the whole stack, in import order,
@@ -562,7 +571,7 @@ allocation. (The old tree-walking interpreter and its `COIL_META` flag are gone.
 
 `(printf c"%d\n" 42)`. Floats cross the C ABI correctly; structs pass/return by
 value with the real C ABI. To call a Coil fn from C (e.g. `qsort` comparator) pass
-`(fnptr-of f)`. Ambient `print`/`println` (over stdout) need no import.
+`(primitive/fnptr-of f)`. Ambient `print`/`println` (over stdout) need no import.
 `io.coil`/`fmt.coil` give a `(ptr Writer)` API: `(stdout)`, `(stderr)`,
 `(print-str w s)`, `(fmt w "n={d} s={s} f={f}\n" a b c)`. ⚠ `{f}` is a fixed
 6-digit display, NOT C `%g`; for exact float formatting call libc `snprintf` with
@@ -587,7 +596,7 @@ something is opt-in and an incidental note never becomes API docs.
 documentable. The doc lives in the source and nowhere else — there is no separate
 doc field to drift.
 
-**`(code-doc NODE)`** returns a node's doc as a `(slice u8)` at comptime (`""` when
+**`(primitive/code-doc NODE)`** returns a node's doc as a `(slice u8)` at comptime (`""` when
 it has none, including any macro-generated node), so doc tooling is a library
 metaprogram rather than a compiler feature: a checker holding the program can read
 every definition's doc, e.g. to enforce that exported functions are documented.
@@ -621,7 +630,7 @@ A failure prints the offending expression and its `file:line`, recovered at expa
 time via `code-src`/`code-line`, then aborts.
 
 **`--debug-checks`** turns on the safety tier, all of it zero-cost when off (each
-check lives behind a macro branched on `(debug-checks?)` at expansion time, so the
+check lives behind a macro branched on `(primitive/debug-checks?)` at expansion time, so the
 off-path expansion is byte-identical to the unchecked form):
 
 - `slice-get`/`slice-set!`/`subslice` bounds-check (and `subslice` rejects `lo > hi`);
@@ -651,7 +660,8 @@ anywhere, no path or install step:
 `coil.mem`, `coil.io`, `coil.fmt`, `coil.print`, `coil.fs` (files), `coil.result`
 (Option/Result), `coil.control` (case/while/for/…), `coil.match`, `coil.try`,
 `coil.thread`, `coil.atomic`, `coil.simd`, `coil.closure`, `coil.derive`, `coil.mmio`,
-`coil.sexp`, `coil.json` (zero-copy token-tape parser), `coil.http` (zero-copy HTTP/1.x requests),
+`coil.sexp`, `coil.json` (zero-copy token-tape parser), `coil.http.server`
+(strict llhttp-backed HTTP/1.x requests), `coil.http.client` (blocking libcurl transport),
 `coil.assert` (assert/deftest), `coil.dbgalloc` and `coil.stacklint` (both used by
 `--debug-checks`). The common ones are summarized above; import a module and call
 its functions directly.

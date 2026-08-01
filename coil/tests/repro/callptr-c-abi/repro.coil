@@ -1,4 +1,5 @@
 (module repro)
+(import "primitive.coil" :as primitive)
 
 ;; Passes one struct of each size class to a C callback through `call-ptr`,
 ;; and the 4-byte one through a direct `extern` for comparison.
@@ -18,10 +19,10 @@
 
 (defn via-callptr [(t (ptr Table)) (s4 S4) (s8 S8) (s16 S16) (s32 S32)] (-> i64)
   (do
-    (call-ptr (load (field t f4))  s4)
-    (call-ptr (load (field t f8))  s8)
-    (call-ptr (load (field t f16)) s16)
-    (call-ptr (load (field t f32)) s32)
+    (primitive/call-ptr (primitive/load (primitive/field t f4))  s4)
+    (primitive/call-ptr (primitive/load (primitive/field t f8))  s8)
+    (primitive/call-ptr (primitive/load (primitive/field t f16)) s16)
+    (primitive/call-ptr (primitive/load (primitive/field t f32)) s32)
     0))
 
 (defn via-direct [(s4 S4)] (-> i64)

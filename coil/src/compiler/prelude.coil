@@ -1,4 +1,5 @@
 (module coil.core)
+(import "primitive.coil" :as primitive)
 ; THE CORE NAMESPACE — compiled into the compiler (src/compiler/prelude.coil) and auto-loaded
 ; (auto-referred) into every program, like Clojure's clojure.core. Its names — the
 ; traits `Eq`/`Hash`/`Add`/… and their operator methods `=`/`+`/`hash`/… — are in
@@ -37,15 +38,15 @@
 ; it here makes the form available in every program even if the rest of
 ; `control.coil` is eventually made opt-in.
 (defn cond-arms [(cs Code)] (-> Code)
-  (if (icmp-eq (code-count cs) 0)
+  (if (primitive/icmp-eq (primitive/code-count cs) 0)
       `0
-      (if (icmp-eq (code-count cs) 1)
-          (code-nth cs 0)
-          (if (code-eq (code-nth cs 0) `:else)
-              (code-nth cs 1)
-              `(if ~(code-nth cs 0)
-                   ~(code-nth cs 1)
-                   ~(cond-arms (code-rest (code-rest cs))))))))
+      (if (primitive/icmp-eq (primitive/code-count cs) 1)
+          (primitive/code-nth cs 0)
+          (if (primitive/code-eq (primitive/code-nth cs 0) `:else)
+              (primitive/code-nth cs 1)
+              `(if ~(primitive/code-nth cs 0)
+                   ~(primitive/code-nth cs 1)
+                   ~(cond-arms (primitive/code-rest (primitive/code-rest cs))))))))
 (defn cond [& (cs Code)] (-> Code)
   (cond-arms cs))
 
@@ -76,39 +77,39 @@
   (>= [(a Self) (b Self)] (-> bool)))
 
 ; standard equality impls for every integer primitive.
-(impl Eq i8 (= [(a i8) (b i8)] (-> bool) (icmp-eq a b)))
-(impl Eq i16 (= [(a i16) (b i16)] (-> bool) (icmp-eq a b)))
-(impl Eq i32 (= [(a i32) (b i32)] (-> bool) (icmp-eq a b)))
-(impl Eq i64 (= [(a i64) (b i64)] (-> bool) (icmp-eq a b)))
-(impl Eq u8 (= [(a u8) (b u8)] (-> bool) (icmp-eq a b)))
-(impl Eq u16 (= [(a u16) (b u16)] (-> bool) (icmp-eq a b)))
-(impl Eq u32 (= [(a u32) (b u32)] (-> bool) (icmp-eq a b)))
-(impl Eq u64 (= [(a u64) (b u64)] (-> bool) (icmp-eq a b)))
+(impl Eq i8 (= [(a i8) (b i8)] (-> bool) (primitive/icmp-eq a b)))
+(impl Eq i16 (= [(a i16) (b i16)] (-> bool) (primitive/icmp-eq a b)))
+(impl Eq i32 (= [(a i32) (b i32)] (-> bool) (primitive/icmp-eq a b)))
+(impl Eq i64 (= [(a i64) (b i64)] (-> bool) (primitive/icmp-eq a b)))
+(impl Eq u8 (= [(a u8) (b u8)] (-> bool) (primitive/icmp-eq a b)))
+(impl Eq u16 (= [(a u16) (b u16)] (-> bool) (primitive/icmp-eq a b)))
+(impl Eq u32 (= [(a u32) (b u32)] (-> bool) (primitive/icmp-eq a b)))
+(impl Eq u64 (= [(a u64) (b u64)] (-> bool) (primitive/icmp-eq a b)))
 ; bool is Eq (i1 compare). Note: f64 is deliberately NOT Eq, because NaN != NaN
 ; breaks reflexivity; use fcmp-eq / fcmp-ne for floats.
 (impl Eq bool (= [(a bool) (b bool)] (-> bool) (if a b (not b))))
 (impl Hash i64 (hash [(x i64)] (-> i64) x))
-(impl Add i64 (+ [(a i64) (b i64)] (-> i64) (iadd a b)))
-(impl Sub i64 (- [(a i64) (b i64)] (-> i64) (isub a b)))
-(impl Mul i64 (* [(a i64) (b i64)] (-> i64) (imul a b)))
-(impl Div i64 (/ [(a i64) (b i64)] (-> i64) (idiv a b)))
-(impl Rem i64 (% [(a i64) (b i64)] (-> i64) (irem a b)))
+(impl Add i64 (+ [(a i64) (b i64)] (-> i64) (primitive/iadd a b)))
+(impl Sub i64 (- [(a i64) (b i64)] (-> i64) (primitive/isub a b)))
+(impl Mul i64 (* [(a i64) (b i64)] (-> i64) (primitive/imul a b)))
+(impl Div i64 (/ [(a i64) (b i64)] (-> i64) (primitive/idiv a b)))
+(impl Rem i64 (% [(a i64) (b i64)] (-> i64) (primitive/irem a b)))
 (impl Ord i64
-  (< [(a i64) (b i64)] (-> bool) (icmp-lt a b))
-  (<= [(a i64) (b i64)] (-> bool) (icmp-le a b))
-  (> [(a i64) (b i64)] (-> bool) (icmp-gt a b))
-  (>= [(a i64) (b i64)] (-> bool) (icmp-ge a b)))
+  (< [(a i64) (b i64)] (-> bool) (primitive/icmp-lt a b))
+  (<= [(a i64) (b i64)] (-> bool) (primitive/icmp-le a b))
+  (> [(a i64) (b i64)] (-> bool) (primitive/icmp-gt a b))
+  (>= [(a i64) (b i64)] (-> bool) (primitive/icmp-ge a b)))
 
 ; f64 arithmetic + ordering
-(impl Add f64 (+ [(a f64) (b f64)] (-> f64) (fadd a b)))
-(impl Sub f64 (- [(a f64) (b f64)] (-> f64) (fsub a b)))
-(impl Mul f64 (* [(a f64) (b f64)] (-> f64) (fmul a b)))
-(impl Div f64 (/ [(a f64) (b f64)] (-> f64) (fdiv a b)))
+(impl Add f64 (+ [(a f64) (b f64)] (-> f64) (primitive/fadd a b)))
+(impl Sub f64 (- [(a f64) (b f64)] (-> f64) (primitive/fsub a b)))
+(impl Mul f64 (* [(a f64) (b f64)] (-> f64) (primitive/fmul a b)))
+(impl Div f64 (/ [(a f64) (b f64)] (-> f64) (primitive/fdiv a b)))
 (impl Ord f64
-  (< [(a f64) (b f64)] (-> bool) (fcmp-lt a b))
-  (<= [(a f64) (b f64)] (-> bool) (fcmp-le a b))
-  (> [(a f64) (b f64)] (-> bool) (fcmp-gt a b))
-  (>= [(a f64) (b f64)] (-> bool) (fcmp-ge a b)))
+  (< [(a f64) (b f64)] (-> bool) (primitive/fcmp-lt a b))
+  (<= [(a f64) (b f64)] (-> bool) (primitive/fcmp-le a b))
+  (> [(a f64) (b f64)] (-> bool) (primitive/fcmp-gt a b))
+  (>= [(a f64) (b f64)] (-> bool) (primitive/fcmp-ge a b)))
 
 ; ---- pointers are ordered and compared BY ADDRESS ---------------------------
 ; `T` is irrelevant to an address comparison, so these are
@@ -119,12 +120,12 @@
 ; Dispatch tries the receiver's own type before auto-dereferencing, so `(< p q)`
 ; reaches THESE impls and compares addresses; it never peels to the pointee's `Ord`.
 (impl [T] Eq (ptr T)
-  (= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-eq (cast u64 a) (cast u64 b))))
+  (= [(a (ptr T)) (b (ptr T))] (-> bool) (primitive/icmp-eq (primitive/cast u64 a) (primitive/cast u64 b))))
 (impl [T] Ord (ptr T)
-  (< [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-lt (cast u64 a) (cast u64 b)))
-  (<= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-le (cast u64 a) (cast u64 b)))
-  (> [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-gt (cast u64 a) (cast u64 b)))
-  (>= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-ge (cast u64 a) (cast u64 b))))
+  (< [(a (ptr T)) (b (ptr T))] (-> bool) (primitive/icmp-lt (primitive/cast u64 a) (primitive/cast u64 b)))
+  (<= [(a (ptr T)) (b (ptr T))] (-> bool) (primitive/icmp-le (primitive/cast u64 a) (primitive/cast u64 b)))
+  (> [(a (ptr T)) (b (ptr T))] (-> bool) (primitive/icmp-gt (primitive/cast u64 a) (primitive/cast u64 b)))
+  (>= [(a (ptr T)) (b (ptr T))] (-> bool) (primitive/icmp-ge (primitive/cast u64 a) (primitive/cast u64 b))))
 
 ; ---- bitwise, as traits ----------------------------------------------------
 ; Bit operators `& | ^ << >>`, dispatched by type and inlined to the
@@ -136,11 +137,11 @@
 (deftrait Shl [Self] (<< [(a Self) (b Self)] (-> Self)))
 (deftrait Shr [Self] (>> [(a Self) (b Self)] (-> Self)))
 
-(impl BitAnd i64 (& [(a i64) (b i64)] (-> i64) (iand a b)))
-(impl BitOr i64 (| [(a i64) (b i64)] (-> i64) (ior a b)))
-(impl BitXor i64 (^ [(a i64) (b i64)] (-> i64) (ixor a b)))
-(impl Shl i64 (<< [(a i64) (b i64)] (-> i64) (ishl a b)))
-(impl Shr i64 (>> [(a i64) (b i64)] (-> i64) (ishr a b)))
+(impl BitAnd i64 (& [(a i64) (b i64)] (-> i64) (primitive/iand a b)))
+(impl BitOr i64 (| [(a i64) (b i64)] (-> i64) (primitive/ior a b)))
+(impl BitXor i64 (^ [(a i64) (b i64)] (-> i64) (primitive/ixor a b)))
+(impl Shl i64 (<< [(a i64) (b i64)] (-> i64) (primitive/ishl a b)))
+(impl Shr i64 (>> [(a i64) (b i64)] (-> i64) (primitive/ishr a b)))
 
 ; ---- collections, as traits -------------------------------------------------
 ; The everyday collection vocabulary — `(len xs)`, `(get xs k)`, `(push! xs v)`
@@ -180,4 +181,4 @@
 ; Emptiness, generically: any type with a Len impl gets `empty?` for free (a
 ; bounded generic over a trait — the pattern user code can copy).
 (defn empty? [(C Len)] [(xs C)] (-> bool)
-  (icmp-eq (len xs) 0))
+  (primitive/icmp-eq (len xs) 0))

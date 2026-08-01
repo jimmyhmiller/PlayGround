@@ -7,7 +7,7 @@
 ; hardcoded to the darwin values — 512 is O_CREAT on macOS but O_TRUNC on Linux,
 ; so every create-or-truncate open failed. A compile check would have caught the
 ; first bug and not the second, so this runs the library for real. (The flags now
-; select on `(target-os)` at comptime, so they stay literals and are right under
+; select on `(primitive/target-os)` at comptime, so they stay literals and are right under
 ; cross-compilation too.)
 ;
 ; The paths below are unlinked FIRST, so every check exercises the create path.
@@ -18,8 +18,9 @@
 ;
 ; Exit 0 on success, else the number of the first failing check.
 (module fslib)
+(import "primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "alloc.coil" :as alloc :use *)
 (import "io.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -33,7 +34,7 @@
           (print-str (stderr) "fs: check ")
           (print-int (stderr) n)
           (print-str (stderr) " FAILED\n")
-          (when (icmp-eq (load fb) 0) (store! fb n) 0)
+          (when (primitive/icmp-eq (primitive/load fb) 0) (primitive/store! fb n) 0)
           0)
   0)
 
@@ -42,8 +43,8 @@
 (defn main [] (-> i64)
   (let [a (malloc-allocator)
         w (stdout)
-        fb (alloc-stack i64)]
-    (store! fb 0)
+        fb (alloc/stack i64)]
+    (primitive/store! fb 0)
     ; start from nothing, so every open below must really create.
     (unlink (str->cstr a "/tmp/coil_fs_gate_a.txt"))
     (unlink (str->cstr a "/tmp/coil_fs_gate_b.txt"))
@@ -55,7 +56,7 @@
 
     ; ---- 1-2. write-file / read-file round trip
     (match (write-file a "/tmp/coil_fs_gate_a.txt" "hello fs\n")
-      (Ok [n] (note! fb 1 (icmp-eq n 9)))
+      (Ok [n] (note! fb 1 (primitive/icmp-eq n 9)))
       (Err [e] (note! fb 1 false)))
     (match (read-file a "/tmp/coil_fs_gate_a.txt")
       (Ok [s] (note! fb 2 (str-eq s "hello fs\n")))
@@ -69,9 +70,9 @@
     ; ---- 4-5. the Reader/Writer bridge: stream through file-writer
     (match (file-open (str->cstr a "/tmp/coil_fs_gate_b.txt")
                       (| O_WRONLY (| O_CREAT O_TRUNC)) FILE_MODE_DEFAULT)
-      (Ok [f] (let [fp (alloc-stack File)]
-                (store! fp f)
-                (let [out (file-writer (alloc-stack Writer) fp)]
+      (Ok [f] (let [fp (alloc/stack File)]
+                (primitive/store! fp f)
+                (let [out (file-writer (alloc/stack Writer) fp)]
                   (print-str out "streamed\n")
                   (file-close fp)
                   (note! fb 4 true))))
@@ -90,12 +91,12 @@
       (Ok [f1] (match (file-open (str->cstr a "/tmp/coil_fs_gate_c2.txt")
                                  (| O_WRONLY (| O_CREAT O_TRUNC)) FILE_MODE_DEFAULT)
                  (Ok [f2]
-                     (let [p1 (alloc-stack File)
-                           p2 (alloc-stack File)]
-                       (store! p1 f1)
-                       (store! p2 f2)
-                       (let [w1 (file-writer (alloc-stack Writer) p1)
-                             w2 (file-writer (alloc-stack Writer) p2)]
+                     (let [p1 (alloc/stack File)
+                           p2 (alloc/stack File)]
+                       (primitive/store! p1 f1)
+                       (primitive/store! p2 f2)
+                       (let [w1 (file-writer (alloc/stack Writer) p1)
+                             w2 (file-writer (alloc/stack Writer) p2)]
                          (print-str w1 "one\n")
                          (print-str w2 "two\n")
                          (file-close p1)
@@ -122,22 +123,22 @@
     ; ---- 10. an empty file round-trips as an empty slice, not an error
     (write-file a "/tmp/coil_fs_gate_e.txt" "")
     (match (read-file a "/tmp/coil_fs_gate_e.txt")
-      (Ok [s] (note! fb 10 (icmp-eq (slice-len s) 0)))
+      (Ok [s] (note! fb 10 (primitive/icmp-eq (slice-len s) 0)))
       (Err [e] (note! fb 10 false)))
 
     ; ---- 11. a payload larger than read-file's 4 KiB chunk, so the streaming
     ; loop runs more than once and the ArrayList has to grow.
     (let [(mut sb) (sb-new a)
           (mut i) 0]
-      (loop (if (icmp-ge (load i) 5000)
+      (loop (if (primitive/icmp-ge (primitive/load i) 5000)
                 (break)
-                (do (sb-push-byte! (mut sb) (cast u8 120)) (store! i (iadd (load i) 1)))))
-      (let [big (sb-str (load sb))]
+                (do (sb-push-byte! (mut sb) (primitive/cast u8 120)) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+      (let [big (sb-str (primitive/load sb))]
         (write-file a "/tmp/coil_fs_gate_big.txt" big)
         (match (read-file a "/tmp/coil_fs_gate_big.txt")
-          (Ok [s] (note! fb 11 (and (icmp-eq (slice-len s) 5000) (str-eq s big))))
+          (Ok [s] (note! fb 11 (and (primitive/icmp-eq (slice-len s) 5000) (str-eq s big))))
           (Err [e] (note! fb 11 false)))))
 
-    (if (icmp-eq (load fb) 0)
+    (if (primitive/icmp-eq (primitive/load fb) 0)
         (do (print-str w "fs: all checks passed\n") 0)
-        (load fb))))
+        (primitive/load fb))))

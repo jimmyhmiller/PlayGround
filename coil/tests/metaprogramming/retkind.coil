@@ -1,4 +1,5 @@
 (module retkind)
+(import "primitive.coil" :as primitive)
 ; A SEMANTIC TRANSFORMER. `(retkind (f …))` is a marker whose wrapped call's callee
 ; is inspected: the transform reads f's REAL declared return type from the checked
 ; program (`code-decl`) and rewrites the marker to `1` if f returns a pointer, else
@@ -11,13 +12,13 @@
 ; makes it return a value derived from the callee's type — proof it read real work.
 
 (defn callee-returns-ptr? [(call Code)] (-> bool)
-  (if (and (code-list? call) (icmp-gt (code-count call) 0))
-      (let [head (code-nth call 0)]
-        (if (code-sym? head)
-            (let [d (code-decl head)]
-              (if (and (code-list? d) (and (icmp-ge (code-count d) 5) (code-eq (code-nth d 2) `fn)))
-                  (let [ret (code-nth d 4)]
-                    (and (code-list? ret) (and (icmp-gt (code-count ret) 0) (code-eq (code-nth ret 0) `ptr))))
+  (if (and (primitive/code-list? call) (primitive/icmp-gt (primitive/code-count call) 0))
+      (let [head (primitive/code-nth call 0)]
+        (if (primitive/code-sym? head)
+            (let [d (primitive/code-decl head)]
+              (if (and (primitive/code-list? d) (and (primitive/icmp-ge (primitive/code-count d) 5) (primitive/code-eq (primitive/code-nth d 2) `fn)))
+                  (let [ret (primitive/code-nth d 4)]
+                    (and (primitive/code-list? ret) (and (primitive/icmp-gt (primitive/code-count ret) 0) (primitive/code-eq (primitive/code-nth ret 0) `ptr))))
                 false))
           false))
     false))
@@ -25,27 +26,27 @@
 ; does form `f` contain a (retkind …) marker anywhere? (only rebuild subtrees that do,
 ; so untouched forms — and their vectors — are preserved exactly)
 (defn has-marker? [(f Code)] (-> bool)
-  (if (code-list? f)
-      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `retkind)) true
-        (has-marker-kids? f 0 (code-count f)))
+  (if (primitive/code-list? f)
+      (if (and (primitive/icmp-gt (primitive/code-count f) 0) (primitive/code-eq (primitive/code-nth f 0) `retkind)) true
+        (has-marker-kids? f 0 (primitive/code-count f)))
     false))
 (defn has-marker-kids? [(f Code) (i i64) (n i64)] (-> bool)
-  (if (icmp-ge i n) false (if (has-marker? (code-nth f i)) true (has-marker-kids? f (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) false (if (has-marker? (primitive/code-nth f i)) true (has-marker-kids? f (primitive/iadd i 1) n))))
 
 (defn rewrite [(f Code)] (-> Code)
-  (if (code-list? f)
-      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `retkind))
-          (if (callee-returns-ptr? (code-nth f 1)) `1 `2)
-        (if (has-marker? f) `(~@(rewrite-kids f 0 (code-count f))) f))
+  (if (primitive/code-list? f)
+      (if (and (primitive/icmp-gt (primitive/code-count f) 0) (primitive/code-eq (primitive/code-nth f 0) `retkind))
+          (if (callee-returns-ptr? (primitive/code-nth f 1)) `1 `2)
+        (if (has-marker? f) `(~@(rewrite-kids f 0 (primitive/code-count f))) f))
     f))
 (defn rewrite-kids [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `()
-    `(~(rewrite (code-nth f i)) ~@(rewrite-kids f (iadd i 1) n))))
-; MODULE-SHAPED: rewrite each module's forms (index 0 is the module name).
+  (if (primitive/icmp-ge i n) `()
+    `(~(rewrite (primitive/code-nth f i)) ~@(rewrite-kids f (primitive/iadd i 1) n))))
+; MODULE-SHAPED: rewrite each module's forms (primitive/index 0 is the module name).
 (defn retkind-mod [(m Code)] (-> Code)
-  `(~(code-nth m 0) ~@(rewrite-kids m 1 (code-count m))))
+  `(~(primitive/code-nth m 0) ~@(rewrite-kids m 1 (primitive/code-count m))))
 (defn retkind-mods [(mods Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `()
-    `(~(retkind-mod (code-nth mods i)) ~@(retkind-mods mods (iadd i 1) n))))
+  (if (primitive/icmp-ge i n) `()
+    `(~(retkind-mod (primitive/code-nth mods i)) ~@(retkind-mods mods (primitive/iadd i 1) n))))
 (defn retkind-dialect [(prog Code)] (-> Code)
-  `(do ~@(retkind-mods prog 0 (code-count prog))))
+  `(do ~@(retkind-mods prog 0 (primitive/code-count prog))))

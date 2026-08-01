@@ -1,17 +1,20 @@
+(module benchmark.structcall)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 ; Struct-by-value on the hot path: pass a 3-field struct BY VALUE to `dot` every
 ; iteration (exercises the AAPCS64/SysV by-value coercion, not just scalars).
 (extern printf :cc c [(ptr i8) ...] (-> i32))
 (defstruct V3 [(x :i64) (y :i64) (z :i64)])
 (defn dot [(a V3) (b V3)] (-> :i64)
-  (iadd (iadd (imul (load (field a x)) (load (field b x)))
-              (imul (load (field a y)) (load (field b y))))
-        (imul (load (field a z)) (load (field b z)))))
+  (primitive/iadd (primitive/iadd (primitive/imul (primitive/load (primitive/field a x)) (primitive/load (primitive/field b x)))
+              (primitive/imul (primitive/load (primitive/field a y)) (primitive/load (primitive/field b y))))
+        (primitive/imul (primitive/load (primitive/field a z)) (primitive/load (primitive/field b z)))))
 (defn run [(i :i64) (n :i64) (acc :i64) (v (ptr V3))] (-> :i64)
-  (if (icmp-ge i n) acc
-    (do (store! (field v x) i)
-        (run (iadd i 1) n (iadd acc (dot (load v) (load v))) v))))
+  (if (primitive/icmp-ge i n) acc
+    (do (primitive/store! (primitive/field v x) i)
+        (run (primitive/iadd i 1) n (primitive/iadd acc (dot (primitive/load v) (primitive/load v))) v))))
 (defn main [] (-> :i64)
-  (let [v (alloc-stack V3)]
-    (store! (field v y) 2)
-    (store! (field v z) 3)
+  (let [v (alloc/stack V3)]
+    (primitive/store! (primitive/field v y) 2)
+    (primitive/store! (primitive/field v z) 3)
     (do (printf c"%ld\n" (run 0 100000000 0 v)) 0)))

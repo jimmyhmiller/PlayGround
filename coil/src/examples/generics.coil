@@ -1,3 +1,6 @@
+(module example.generics)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 ; Generics via monomorphization. The compiler stamps out a concrete copy per
 ; instantiation (id__i64, Pair__i64__i64, ...) — see `coil emit-ir`.
 ; Type arguments are *inferred* from the value arguments: `(id 40)` and
@@ -11,10 +14,10 @@
 (defstruct Pair [A B] [(fst A) (snd B)])  ; generic struct
 
 (defn pair-sum [T] [(p (ptr (Pair T T)))] (-> T)   ; generic over a generic struct
-  (iadd (load (field p fst)) (load (field p snd))))
+  (primitive/iadd (primitive/load (primitive/field p fst)) (primitive/load (primitive/field p snd))))
 
 (defn main [] (-> :i64)
-  (let [p (alloc-stack (Pair i64 i64))]
-    (store! (field p fst) (id 40))    ; T inferred = i64 (from the literal)
-    (store! (field p snd) 2)
+  (let [p (alloc/stack (Pair i64 i64))]
+    (primitive/store! (primitive/field p fst) (id 40))    ; T inferred = i64 (from the literal)
+    (primitive/store! (primitive/field p snd) 2)
     (pair-sum p)))                     ; T inferred = i64 (from p : (ptr (Pair i64 i64)))

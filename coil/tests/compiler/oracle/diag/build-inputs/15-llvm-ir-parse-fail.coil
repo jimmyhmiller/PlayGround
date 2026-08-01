@@ -1,4 +1,6 @@
-; A `(llvm-ir …)` escape hatch whose body is not valid LLVM IR. Codegen builds an
+(module oracle.15-llvm-ir-parse-fail)
+(import "primitive.coil" :as primitive)
+; A `(primitive/llvm-ir …)` escape hatch whose body is not valid LLVM IR. Codegen builds an
 ; `alwaysinline` helper module from the raw text and hands it to LLVMParseIRInContext,
 ; which fails. Rust's src/codegen.rs `emit_llvm_ir` returns
 ;   Err("llvm-ir: could not parse IR: <{:?}-escaped LLVM error>\n
@@ -9,4 +11,4 @@
 ; it must now render this byte-for-byte, including the helper name `@__coil_llvm_ir_0`
 ; (the per-function helper counter — deterministic now that mono emits functions in
 ; insertion order on both sides, so the malformed concrete helper is always seq 0).
-(defn m [] (-> i64) (llvm-ir i64 [] "not valid ir"))
+(defn m [] (-> i64) (primitive/llvm-ir i64 [] "not valid ir"))

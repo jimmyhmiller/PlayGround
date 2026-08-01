@@ -1,4 +1,5 @@
 (module tower_fmt_test)
+(import "primitive.coil" :as primitive)
 (import "src/stdlib/io.coil" :use *)
 (import "src/stdlib/fmt.coil" :use *)
 (import "src/stdlib/control.coil" :use *)
@@ -6,7 +7,7 @@
 ; The tower expands it at definition time; RUNNING it needs the compiled engine
 ; (its expansion calls through Writer function pointers).
 (defn traced-const [(c Code)] (-> Code)
-  (let [v (code-int c)]
+  (let [v (primitive/code-int c)]
     (fmt (stderr) "[traced-const] expanding with {d}\n" v)
-    `~(imul v 10)))
+    `~(primitive/imul v 10)))
 (defn main [] (-> :i64) (traced-const 7))

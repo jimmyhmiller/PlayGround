@@ -1,3 +1,5 @@
+(module example.shim)
+(import "primitive.coil" :as primitive)
 ; A convention LLVM's calling-convention enum cannot express: integer args are
 ; pinned to registers the SysV/AAPCS64 C conventions would not use, and
 ; `:lower shim` makes Coil realize it with a naked trampoline + register-
@@ -12,7 +14,7 @@
 ;   aarch64: args in x9/x10  (not the AAPCS64 x0/x1), result in x9
 
 (defn def-reg2 [(name Code)] (-> Code)
-  (if (code-eq (target-arch) `x86_64)
+  (if (primitive/code-eq (primitive/target-arch) `x86_64)
       `(defcc ~name
          :params [rax rdx]
          :ret rax
@@ -27,8 +29,8 @@
 (def-reg2 reg2)
 
 (defn sub2 :cc reg2 [(a :i64) (b :i64)] (-> :i64)
-  (isub a b))
+  (primitive/isub a b))
 
 (defn main [] (-> :i64)
-  (let [x (iadd 40 10)]   ; 50, computed so register placement is real
+  (let [x (primitive/iadd 40 10)]   ; 50, computed so register placement is real
     (sub2 x 8)))          ; 50 - 8 = 42  (swap the arg registers and you'd get -42)

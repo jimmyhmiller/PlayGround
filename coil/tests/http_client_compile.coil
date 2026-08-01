@@ -1,0 +1,21 @@
+(module http-client-compile)
+(import "primitive.coil" :as primitive)
+(import "http_client.coil" :as http)
+(import "alloc.coil" :as alloc)
+(import "slice.coil" :as slice)
+
+(defn main [] (-> i64)
+  (let [r (alloc/stack http/Request)]
+    (primitive/store! (primitive/field r method) "GET")
+    (primitive/store! (primitive/field r url) "https://example.com/")
+    (primitive/store! (primitive/field r headers) (slice/slice-new [http/Header] (primitive/cast (ptr http/Header) 0) 0))
+    (primitive/store! (primitive/field r body) "")
+    (primitive/store! (primitive/field r connect-timeout-ms) 5000)
+    (primitive/store! (primitive/field r timeout-ms) 10000)
+    (primitive/store! (primitive/field r follow-redirects) true)
+    (match (http/request (alloc/malloc-allocator) r)
+      (Err [e] 1)
+      (Ok [response]
+        (do
+          (http/response-free (alloc/malloc-allocator) response)
+          0)))))

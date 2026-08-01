@@ -103,8 +103,14 @@ pub fn default_source_maps(
     }
     match target {
         Target::Client => production_browser_source_maps(next_config),
-        Target::Server | Target::IsolatedServer => true,
+        Target::Server | Target::IsolatedServer => server_source_maps(next_config),
     }
+}
+
+pub fn server_source_maps(eval: Option<&serde_json::Value>) -> bool {
+    eval.and_then(|value| value.get("serverSourceMaps"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub fn production_browser_source_maps(eval: Option<&serde_json::Value>) -> bool {
@@ -188,7 +194,13 @@ mod tests {
     fn target_defines_and_map_defaults_match_next() {
         assert_eq!(process_browser_define(Target::Client), "true");
         assert_eq!(next_runtime_define(Target::Server), "\"nodejs\"");
-        assert!(default_source_maps(Target::Server, false, None));
+        assert!(!default_source_maps(Target::Server, false, None));
         assert!(!default_source_maps(Target::Client, false, None));
+        let server_maps = serde_json::json!({ "serverSourceMaps": true });
+        assert!(default_source_maps(
+            Target::Server,
+            false,
+            Some(&server_maps)
+        ));
     }
 }

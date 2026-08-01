@@ -6,6 +6,8 @@
 ; plus the read-loop/EOF protocol, an allocator-backed StrBuf, and fmt over a Writer.
 ;   coil run src/examples/nl.coil   => prints "1  alpha / 2  beta / 3  gamma", exit 3
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "src/stdlib/alloc.coil"   :use *)
 (import "src/stdlib/result.coil"  :use *)
 (import "src/stdlib/slice.coil"   :use *)
@@ -19,77 +21,77 @@
 ; ctx pointer is the cursor, the read-fn is an ordinary function pointer.
 (defstruct SliceReader [(data (ptr u8)) (len i64) (pos i64)])
 (defn sr-read [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> (Result i64 IoError))
-  (let [sr    (cast (ptr SliceReader) ctx)
-        avail (isub (load (field sr len)) (load (field sr pos)))
-        k     (if (icmp-lt n avail) n avail)]
-    (if (icmp-le k 0)
+  (let [sr    (primitive/cast (ptr SliceReader) ctx)
+        avail (primitive/isub (primitive/load (primitive/field sr len)) (primitive/load (primitive/field sr pos)))
+        k     (if (primitive/icmp-lt n avail) n avail)]
+    (if (primitive/icmp-le k 0)
         (Ok 0)                                       ; EOF
-        (do (memcpy buf (cast (ptr i8) (index (load (field sr data)) (load (field sr pos)))) k)
-            (store! (field sr pos) (iadd (load (field sr pos)) k))
+        (do (memcpy buf (primitive/cast (ptr i8) (primitive/index (primitive/load (primitive/field sr data)) (primitive/load (primitive/field sr pos)))) k)
+            (primitive/store! (primitive/field sr pos) (primitive/iadd (primitive/load (primitive/field sr pos)) k))
             (Ok k)))))
 (defn slice-reader [(sr (ptr SliceReader))] (-> (ptr Reader))
-  (let [r (alloc-static Reader)]
-    (store! (field r read-fn) (fnptr-of sr-read))
-    (store! (field r ctx) (cast (ptr i8) sr))
+  (let [r (alloc/static Reader)]
+    (primitive/store! (primitive/field r read-fn) (primitive/fnptr-of sr-read))
+    (primitive/store! (primitive/field r ctx) (primitive/cast (ptr i8) sr))
     r))
 
 ; ---- a CUSTOM Writer backend: WRAP another Writer, tally bytes --------------
 ; Proves the Writer capability COMPOSES — a decorator over any inner Writer.
 (defstruct CountWriter [(inner (ptr Writer)) (count i64)])
 (defn cw-write [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> (Result i64 IoError))
-  (let [cw (cast (ptr CountWriter) ctx)]
-    (match (write-some (load (field cw inner)) buf n)
+  (let [cw (primitive/cast (ptr CountWriter) ctx)]
+    (match (write-some (primitive/load (primitive/field cw inner)) buf n)
       (Err [e] (Err e))
-      (Ok [k] (do (store! (field cw count) (iadd (load (field cw count)) k)) (Ok k))))))
+      (Ok [k] (do (primitive/store! (primitive/field cw count) (primitive/iadd (primitive/load (primitive/field cw count)) k)) (Ok k))))))
 (defn count-writer [(cw (ptr CountWriter))] (-> (ptr Writer))
-  (let [w (alloc-static Writer)]
-    (store! (field w write-fn) (fnptr-of cw-write))
-    (store! (field w ctx) (cast (ptr i8) cw))
+  (let [w (alloc/static Writer)]
+    (primitive/store! (primitive/field w write-fn) (primitive/fnptr-of cw-write))
+    (primitive/store! (primitive/field w ctx) (primitive/cast (ptr i8) cw))
     w))
 
 ; ---- read everything from a Reader into an allocator-backed StrBuf ----------
 (defn read-all [(a (ptr Allocator)) (r (ptr Reader))] (-> StrBuf)
-  (let [(mut sb) (sb-new a) chunk (alloc-stack (array u8 64))]
+  (let [(mut sb) (sb-new a) chunk (alloc/stack (array u8 64))]
     (loop
-      (match (read-some r (cast (ptr i8) (index chunk 0)) 64)
+      (match (read-some r (primitive/cast (ptr i8) (primitive/index chunk 0)) 64)
         (Err [e] (break))
-        (Ok [k] (if (icmp-le k 0)
+        (Ok [k] (if (primitive/icmp-le k 0)
                     (break)
-                    (sb-push-str! (mut sb) (slice-new (index chunk 0) k))))))
-    (load sb)))
+                    (sb-push-str! (mut sb) (slice-new (primitive/index chunk 0) k))))))
+    (primitive/load sb)))
 
 ; ---- number the lines of a (slice u8) onto a Writer; returns the line count -
 (defn emit-line [(w (ptr Writer)) (no i64) (line (slice u8))] (-> i64)
   (match (print-i w no)
     (Err [e] 0)
-    (Ok [_] (do (print-str w "  ") (print-str w line) (write-byte w (cast u8 10)) 0))))
+    (Ok [_] (do (print-str w "  ") (print-str w line) (write-byte w (primitive/cast u8 10)) 0))))
 
 (defn number-lines [(w (ptr Writer)) (text (slice u8))] (-> i64)
   (let [n (slice-len text) (mut i) 0 (mut start) 0 (mut lineno) 0]
     (loop
-      (if (icmp-ge (load i) n)
+      (if (primitive/icmp-ge (primitive/load i) n)
           (break)
           (do
-            (if (icmp-eq (cast i64 (slice-get text (load i))) 10)        ; '\n'
-                (do (store! lineno (iadd (load lineno) 1))
-                    (emit-line w (load lineno) (subslice text (load start) (load i)))
-                    (store! start (iadd (load i) 1)))
+            (if (primitive/icmp-eq (primitive/cast i64 (slice-get text (primitive/load i))) 10)        ; '\n'
+                (do (primitive/store! lineno (primitive/iadd (primitive/load lineno) 1))
+                    (emit-line w (primitive/load lineno) (subslice text (primitive/load start) (primitive/load i)))
+                    (primitive/store! start (primitive/iadd (primitive/load i) 1)))
                 0)
-            (store! i (iadd (load i) 1)))))
-    (if (icmp-gt n (load start))                                          ; trailing line
-        (do (store! lineno (iadd (load lineno) 1))
-            (emit-line w (load lineno) (subslice text (load start) n)))
+            (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (if (primitive/icmp-gt n (primitive/load start))                                          ; trailing line
+        (do (primitive/store! lineno (primitive/iadd (primitive/load lineno) 1))
+            (emit-line w (primitive/load lineno) (subslice text (primitive/load start) n)))
         0)
-    (load lineno)))
+    (primitive/load lineno)))
 
 (defn main [] (-> :i64)
   (let [a (malloc-allocator)
-        (mut src) (zeroed SliceReader)
-        (mut cw)  (zeroed CountWriter)]
+        (mut src) (primitive/zeroed SliceReader)
+        (mut cw)  (primitive/zeroed CountWriter)]
     (let [doc "alpha\nbeta\ngamma"]                  ; the in-memory "input"
-      (store! (field src data) (slice-data doc))
-      (store! (field src len) (slice-len doc)))
-    (store! (field cw inner) (stdout))               ; wrap stdout, counting bytes
+      (primitive/store! (primitive/field src data) (slice-data doc))
+      (primitive/store! (primitive/field src len) (slice-len doc)))
+    (primitive/store! (primitive/field cw inner) (stdout))               ; wrap stdout, counting bytes
     (let [r     (slice-reader (mut src))
           w     (count-writer (mut cw))
           text  (read-all a r)                        ; Reader -> allocator-backed buffer

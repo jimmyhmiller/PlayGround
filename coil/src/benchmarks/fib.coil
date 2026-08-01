@@ -1,5 +1,7 @@
+(module benchmark.fib)
+(import "primitive.coil" :as primitive)
 ; Naive recursive Fibonacci -- function-call + integer-add bound.
 (extern printf :cc c [(ptr i8) ...] (-> i32))
 (defn fib [(n :i64)] (-> :i64)
-  (if (icmp-lt n 2) n (iadd (fib (isub n 1)) (fib (isub n 2)))))
+  (if (primitive/icmp-lt n 2) n (primitive/iadd (fib (primitive/isub n 1)) (fib (primitive/isub n 2)))))
 (defn main [] (-> :i64) (do (printf c"%ld\n" (fib 40)) 0))

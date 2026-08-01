@@ -37,7 +37,7 @@ expect_out() {
 }
 
 printf '(defn main [] (-> i64) 7)\n'                     > "$T/seven.coil"
-printf '(extern abort :cc c [] (-> void))\n(defn main [] (-> i64) (abort) 0)\n' > "$T/abort.coil"
+printf '(extern abort :cc c [] (-> i64))\n(defn main [] (-> i64) (abort))\n' > "$T/abort.coil"
 printf '(defn a [] (-> i64)    1)\n'                     > "$T/messy1.coil"
 printf '(defn b [] (-> i64)    2)\n'                     > "$T/messy2.coil"
 
@@ -239,7 +239,7 @@ cat > "$T/runaway.coil" <<'EOF'
 (module rw)
 (defstruct Box [T] [(v T)])
 (defn grow [T] [(x T)] (-> i64)
-  (let [b (alloc-stack (Box T))] (store! (field b v) x) (grow (load b))))
+  (let [b (coil.alloc/stack (Box T))] (coil.primitive/store! (coil.primitive/field b v) x) (grow (coil.primitive/load b))))
 (defn main [] (-> i64) (grow 1))
 EOF
 out=$(timeout 30 "$COIL" build "$T/runaway.coil" -o "$T/rw" 2>&1); rc=$?
@@ -252,7 +252,7 @@ echo "$out" | grep -q "never reaches a fixpoint" && ok "…and explains the grow
 # ordinary bytecode dispatch table — is 800 levels deep, and used to segfault.
 {
   printf '(module dp)\n(import "control.coil" :use *)\n(defn f [(x i64)] (-> i64) (cond '
-  i=0; while [ $i -lt 800 ]; do printf '(icmp-eq x %d) %d ' $i $i; i=$((i+1)); done
+  i=0; while [ $i -lt 800 ]; do printf '(coil.primitive/icmp-eq x %d) %d ' $i $i; i=$((i+1)); done
   printf -- '-1))\n(defn main [] (-> i64) (f 5))\n'
 } > "$T/deep.coil"
 expect_rc 5 "an 800-clause cond builds and runs (was: SIGSEGV)" "$COIL" run "$T/deep.coil"
@@ -299,13 +299,13 @@ printf '(module m)\n(defn f [(T NoSuchTrait)] [(x T)] (-> i64) 0)\n(defn main []
 expect_rc 1 "unknown trait in a bound is rejected" "$COIL" build "$T/badtrait.coil" -o "$T/x"
 expect_out "unknown trait" "…and named" "$COIL" build "$T/badtrait.coil" -o "$T/x"
 # defstruct bound ENFORCED at instantiation (was: silently ignored)
-printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn u [] (-> i64) (let [b (alloc-stack (Box f64))] 0))\n(defn main [] (-> i64) (u))\n' > "$T/structbound.coil"
+printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn u [] (-> i64) (let [b (coil.alloc/stack (Box f64))] 0))\n(defn main [] (-> i64) (u))\n' > "$T/structbound.coil"
 expect_rc 1 "defstruct bound enforced ((Box f64), f64 has no Eq)" "$COIL" build "$T/structbound.coil" -o "$T/x"
 # defsum now PARSES a bound (was: 'expected symbol') and enforces it
-printf '(module m)\n(defsum Opt [(T Eq)] (Non) (Som [(v T)]))\n(defn u [] (-> i64) (let [o (alloc-stack (Opt f64))] 0))\n(defn main [] (-> i64) (u))\n' > "$T/sumbound.coil"
+printf '(module m)\n(defsum Opt [(T Eq)] (Non) (Som [(v T)]))\n(defn u [] (-> i64) (let [o (coil.alloc/stack (Opt f64))] 0))\n(defn main [] (-> i64) (u))\n' > "$T/sumbound.coil"
 expect_rc 1 "defsum bound parses + enforced" "$COIL" build "$T/sumbound.coil" -o "$T/x"
 # and the valid instantiations still compile
-printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn main [] (-> i64) (let [b (alloc-stack (Box i64))] (store! (field b v) 7) 0))\n' > "$T/okbound.coil"
+printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn main [] (-> i64) (let [b (coil.alloc/stack (Box i64))] (coil.primitive/store! (coil.primitive/field b v) 7) 0))\n' > "$T/okbound.coil"
 expect_rc 0 "a satisfied bound ((Box i64)) still compiles" "$COIL" build "$T/okbound.coil" -o "$T/x"
 # trait-names: EVERY bound position (defn/defstruct/defsum/impl) resolves the trait name
 # through ONE shared helper, so an unknown trait errors IDENTICALLY. The impl trait was the
@@ -319,19 +319,19 @@ printf '(module m)\n(defn Helper [] (-> i64) 0)\n(impl Helper i64 (go [(x i64)] 
 expect_out "unknown trait 'Helper' in bound" "impl over a non-trait name errors identically" "$COIL" build "$T/implnonfn.coil" -o "$T/x"
 
 echo "== store! yields unit (std-12): effect-only stores type-check without a wrapping do =="
-# was: `store!` took the STORED VALUE's type, so `(if c (store! p ptr) 0)` was a type error
-# (then=(ptr i64) vs else=i64) and every non-i64 effect-only store needed `(do (store! …) 0)`.
+# was: `store!` took the STORED VALUE's type, so `(if c (coil.primitive/store! p ptr) 0)` was a type error
+# (then=(ptr i64) vs else=i64) and every non-i64 effect-only store needed `(do (coil.primitive/store! …) 0)`.
 # Now store! is unit (canonical i64 0): the bare form checks, and the store still happens.
 # FAILS on the seed (branch-type error, build exits 1); PASSES here (runs, returns 7).
 cat > "$T/std12.coil" <<'EOF'
 (module m)
 (defn main [] (-> i64)
-  (let [n (alloc-stack i64) pp (alloc-stack (ptr i64))]
-    (store! n 7)
-    (if (icmp-eq 1 1) (store! pp n) 0)   ; stores a (ptr i64); store! yields unit i64 0
-    (load (load pp))))
+  (let [n (coil.alloc/stack i64) pp (coil.alloc/stack (ptr i64))]
+    (coil.primitive/store! n 7)
+    (if (coil.primitive/icmp-eq 1 1) (coil.primitive/store! pp n) 0)   ; stores a (ptr i64); store! yields unit i64 0
+    (coil.primitive/load (coil.primitive/load pp))))
 EOF
-expect_rc 7 "a bare effect-only (if c (store! p ptr) 0) builds+runs (was: branch-type error)" "$COIL" run "$T/std12.coil"
+expect_rc 7 "a bare effect-only (if c (coil.primitive/store! p ptr) 0) builds+runs (was: branch-type error)" "$COIL" run "$T/std12.coil"
 
 echo "== type ascription (: value type) supplies a stranded type arg + enforces it (gen-9) =="
 # was: a local could not be annotated, so a generic value whose type argument only the
@@ -408,8 +408,8 @@ expect_rc 223 "nominal/generic/structural extension methods dispatch and run" \
 cat > "$T/inherent_bare_assoc.coil" <<'EOF'
 (module app)
 (defstruct Box [(v i64)])
-(impl Box (new [(v i64)] (-> Box) (let [p (alloc-stack Box)] (store! (field p v) v) (load p))))
-(defn main [] (-> i64) (let [b (new 1)] (load (field b v))))
+(impl Box (new [(v i64)] (-> Box) (let [p (coil.alloc/stack Box)] (coil.primitive/store! (coil.primitive/field p v) v) (coil.primitive/load p))))
+(defn main [] (-> i64) (let [b (new 1)] (coil.primitive/load (coil.primitive/field b v))))
 EOF
 expect_out "undefined function 'new'" "a receiverless associated function requires Type::name" \
   "$COIL" build "$T/inherent_bare_assoc.coil" -o "$T/x"
@@ -432,7 +432,7 @@ cat > "$T/inherent_ambiguous.coil" <<'EOF'
 (defstruct Pair [A B] [(a A) (b B)])
 (impl [B] (Pair i64 B) (mark [(p (Pair i64 B))] (-> i64) 1))
 (impl [A] (Pair A bool) (mark [(p (Pair A bool))] (-> i64) 2))
-(defn main [] (-> i64) (mark (zeroed (Pair i64 bool))))
+(defn main [] (-> i64) (mark (coil.primitive/zeroed (Pair i64 bool))))
 EOF
 expect_out "ambiguous inherent method 'mark'" "unordered extension overlap is rejected at use" \
   "$COIL" build "$T/inherent_ambiguous.coil" -o "$T/x"
@@ -454,7 +454,7 @@ cat > "$T/super_ok.coil" <<'EOF'
 (defstruct Dog [(n i64)])
 (impl Animal Dog (legs [(x Dog)] (-> i64) 4))
 (impl Pet Dog (name [(x Dog)] (-> i64) 7))
-(defn main [] (-> i64) (let [d (alloc-stack Dog)] (iadd (Animal::legs (load d)) (Pet::name (load d)))))
+(defn main [] (-> i64) (let [d (coil.alloc/stack Dog)] (coil.primitive/iadd (Animal::legs (coil.primitive/load d)) (Pet::name (coil.primitive/load d)))))
 EOF
 expect_rc 11 "a :requires supertrait builds+runs when the base is impl'd (was: parse error)" "$COIL" run "$T/super_ok.coil"
 # the supertrait is ENFORCED: impl Pet without impl Animal is a located error naming the
@@ -501,8 +501,8 @@ cat > "$T/gen1pop.coil" <<'EOF'
 (import "result.coil" :use *)
 (defn drain-count [(C Pop)] [(xs (mut C))] (-> i64)
   (let [(mut n) 0]
-    (loop (match (pop! (mut xs)) (None [] (break)) (Some [v] (store! n (+ (load n) 1)))))
-    (load n)))
+    (loop (match (pop! (mut xs)) (None [] (break)) (Some [v] (coil.primitive/store! n (+ (coil.primitive/load n) 1)))))
+    (coil.primitive/load n)))
 (defn main [] (-> i64)
   (let [a (malloc-allocator) (mut xs) (al-new [i64] a)]
     (al-push! (mut xs) 10) (al-push! (mut xs) 20) (al-push! (mut xs) 30)
@@ -517,15 +517,15 @@ cat > "$T/gen1custom.coil" <<'EOF'
   (head [(c Self)] (-> (Option Elem)))
   (size [(c Self)] (-> i64)))
 (defstruct IntBox [(v i64)])
-(impl Container IntBox (head [(c IntBox)] (-> (Option i64)) (Some (load (field c v)))) (size [(c IntBox)] (-> i64) 1))
+(impl Container IntBox (head [(c IntBox)] (-> (Option i64)) (Some (coil.primitive/load (coil.primitive/field c v)))) (size [(c IntBox)] (-> i64) 1))
 (defstruct Empty [(x i64)])
 (impl Container Empty (head [(c Empty)] (-> (Option i64)) (None)) (size [(c Empty)] (-> i64) 0))
 (defn describe [(C Container)] [(c C)] (-> i64)
   (match (head c) (Some [v] (+ 100 (size c))) (None [] (size c))))
 (defn main [] (-> i64)
-  (let [b (alloc-stack IntBox) e (alloc-stack Empty)]
-    (store! (field b v) 7) (store! (field e x) 0)
-    (+ (describe (load b)) (describe (load e)))))
+  (let [b (coil.alloc/stack IntBox) e (coil.alloc/stack Empty)]
+    (coil.primitive/store! (coil.primitive/field b v) 7) (coil.primitive/store! (coil.primitive/field e x) 0)
+    (+ (describe (coil.primitive/load b)) (describe (coil.primitive/load e)))))
 EOF
 expect_rc 101 "a user parameterized trait as a bound dispatches per-impl (IntBox=101, Empty=0)" "$COIL" run "$T/gen1custom.coil"
 # calling a parameterized method on an UNBOUNDED type param is a located definition-time error
@@ -549,10 +549,10 @@ cat > "$T/it-slice.coil" <<'EOF'
 (import "slice.coil" :use *)
 (import "control.coil" :use *)
 (defn main [] (-> i64)
-  (let [arr (alloc-stack (array i64 4)) (mut s) 0]
-    (store! (index arr 0) 2) (store! (index arr 1) 4) (store! (index arr 2) 6) (store! (index arr 3) 8)
-    (for x (iter (slice-new (index arr 0) 4)) (store! s (iadd (load s) x)))
-    (load s)))
+  (let [arr (coil.alloc/stack (array i64 4)) (mut s) 0]
+    (coil.primitive/store! (coil.primitive/index arr 0) 2) (coil.primitive/store! (coil.primitive/index arr 1) 4) (coil.primitive/store! (coil.primitive/index arr 2) 6) (coil.primitive/store! (coil.primitive/index arr 3) 8)
+    (for x (iter (slice-new (coil.primitive/index arr 0) 4)) (coil.primitive/store! s (coil.primitive/iadd (coil.primitive/load s) x)))
+    (coil.primitive/load s)))
 EOF
 expect_rc 20 "(for x (iter slice)) drives the Iterator protocol (was: no such protocol)" "$COIL" run "$T/it-slice.coil"
 # std-4: (for-in [k (in map)]) now iterates the map's KEYS correctly (was: get-by-index
@@ -565,8 +565,8 @@ cat > "$T/it-map.coil" <<'EOF'
 (defn main [] (-> i64)
   (let [a (malloc-allocator) (mut hm) (hm-new-scalar [i64 i64] a) (mut ksum) 0]
     (hm-put! (mut hm) 40 1) (hm-put! (mut hm) 60 2)
-    (for-in [k (in hm)] (store! ksum (iadd (load ksum) k)))
-    (load ksum)))
+    (for-in [k (in hm)] (coil.primitive/store! ksum (coil.primitive/iadd (coil.primitive/load ksum) k)))
+    (coil.primitive/load ksum)))
 EOF
 expect_rc 100 "(in map) iterates the map's keys (std-4: was get-by-index garbage)" "$COIL" run "$T/it-map.coil"
 # a generic bounded on the Iterator trait consumes ANY iterator (Item abstract) — the
@@ -578,8 +578,8 @@ cat > "$T/it-generic.coil" <<'EOF'
 (import "control.coil" :use *)
 (defn count-iter [(I Iterator)] [(it (mut I))] (-> i64)
   (let [(mut n) 0]
-    (loop (match (next (mut it)) (None [] (break)) (Some [x] (store! n (iadd (load n) 1)))))
-    (load n)))
+    (loop (match (next (mut it)) (None [] (break)) (Some [x] (coil.primitive/store! n (coil.primitive/iadd (coil.primitive/load n) 1)))))
+    (coil.primitive/load n)))
 (defn main [] (-> i64)
   (let [a (malloc-allocator) (mut xs) (al-new [i64] a)]
     (al-push! (mut xs) 7) (al-push! (mut xs) 8) (al-push! (mut xs) 9)
@@ -596,18 +596,18 @@ cat > "$T/it-alfor.coil" <<'EOF'
 (defn main [] (-> i64)
   (let [a (malloc-allocator) (mut xs) (al-new [i64] a) (mut s) 0]
     (al-push! (mut xs) 10) (al-push! (mut xs) 11) (al-push! (mut xs) 12)
-    (al-for [v xs] (store! s (iadd (load s) v)))
-    (load s)))
+    (al-for [v xs] (coil.primitive/store! s (coil.primitive/iadd (coil.primitive/load s) v)))
+    (coil.primitive/load s)))
 EOF
 expect_rc 33 "al-for still iterates (now a thin alias over the Iterator protocol)" "$COIL" run "$T/it-alfor.coil"
 
-echo "== (target-arch) reflects --target, not a hardcoded host constant =="
+echo "== (coil.primitive/target-arch) reflects --target, not a hardcoded host constant =="
 # was: the constant "aarch64" — so a macro branching on it baked the host branch into a
 # cross-compiled wasm build, silently.
 cat > "$T/tgt.coil" <<'EOF'
 (module t)
 (defn arch [] (-> Code)
-  (if (code-eq (target-arch) `wasm32) `1 (if (code-eq (target-arch) `aarch64) `2 `3)))
+  (if (coil.primitive/code-eq (coil.primitive/target-arch) `wasm32) `1 (if (coil.primitive/code-eq (coil.primitive/target-arch) `aarch64) `2 `3)))
 (defn main [] (-> i64) (arch))
 EOF
 expect_out "i64\) 2" "target-arch = aarch64 on the host"          "$COIL" expand "$T/tgt.coil"
@@ -665,10 +665,10 @@ echo "== export-c on the arm64 backend (unblocks the LLVM-free compiled metaprog
 cat > "$T/expc.coil" <<'EOF'
 (module shapes)
 (defstruct Point [(x i64) (y i64)])
-(defn clamp0 [(n i64)] (-> i64) (if (icmp-lt n 0) 0 n))
+(defn clamp0 [(n i64)] (-> i64) (if (coil.primitive/icmp-lt n 0) 0 n))
 (defn make-point [(x i64) (y i64)] (-> Point)
-  (let [p (alloc-stack Point)] (store! (field p x) (clamp0 x)) (store! (field p y) (clamp0 y)) (load p)))
-(defn add3 [(x i64) (y i64) (z i64)] (-> i64) (iadd (iadd x y) z))
+  (let [p (coil.alloc/stack Point)] (coil.primitive/store! (coil.primitive/field p x) (clamp0 x)) (coil.primitive/store! (coil.primitive/field p y) (clamp0 y)) (coil.primitive/load p)))
+(defn add3 [(x i64) (y i64) (z i64)] (-> i64) (coil.primitive/iadd (coil.primitive/iadd x y) z))
 (export-c [make-point :as "shapes_make_point"] [add3 :as "shapes_add3"])
 EOF
 if "$COIL" emit-obj "$T/expc.coil" -o "$T/expc.o" --backend arm64 >/dev/null 2>&1; then
@@ -695,7 +695,7 @@ else
   bad "export-c --backend arm64: emit-obj rejected a thunk-free export" "seed hard-errors on all exports"
 fi
 # a by-value struct param is a clear located hard error (SIGABRT), naming the reason
-printf '(module s)\n(defstruct P [(x i64)(y i64)])\n(defn d [(p P)] (-> i64) (load (field p x)))\n(export-c [d :as "s_d"])\n' > "$T/expc_bad.coil"
+printf '(module s)\n(defstruct P [(x i64)(y i64)])\n(defn d [(p P)] (-> i64) (coil.primitive/load (coil.primitive/field p x)))\n(export-c [d :as "s_d"])\n' > "$T/expc_bad.coil"
 expect_out "by-value struct parameter isn't supported" \
   "export-c arm64: by-value struct param is a clear error, not a bad symbol" \
   "$COIL" emit-obj "$T/expc_bad.coil" -o "$T/expc_bad.o" --backend arm64
@@ -716,13 +716,13 @@ cat > "$T/std3.coil" <<'EOF'
 (import "src/stdlib/control.coil" :use *)
 (defn probe [(ops (ptr KeyOps))] (-> i64)
   (let [a (malloc-allocator) (mut m) (hm-new [(slice u8) i64] a ops)
-        buf (alloc-stack (array u8 8))]
-    (mem-copy [u8] (cast (ptr u8) buf) (slice-data "alpha") 5)
-    (hm-put! (mut m) (slice-new (cast (ptr u8) buf) 5) 1)       ; key "alpha" -> 1
-    (mem-copy [u8] (cast (ptr u8) buf) (slice-data "gamma") 5)  ; OVERWRITE the buffer
-    (hm-put! (mut m) (slice-new (cast (ptr u8) buf) 5) 2)       ; key "gamma" -> 2
-    (iadd (imul (match (hm-get [(slice u8) i64] m "alpha") (Some [v] v) (None [] 0)) 100)
-          (iadd (imul (match (hm-get [(slice u8) i64] m "gamma") (Some [v] v) (None [] 0)) 10)
+        buf (coil.alloc/stack (array u8 8))]
+    (mem-copy [u8] (coil.primitive/cast (ptr u8) buf) (slice-data "alpha") 5)
+    (hm-put! (mut m) (slice-new (coil.primitive/cast (ptr u8) buf) 5) 1)       ; key "alpha" -> 1
+    (mem-copy [u8] (coil.primitive/cast (ptr u8) buf) (slice-data "gamma") 5)  ; OVERWRITE the buffer
+    (hm-put! (mut m) (slice-new (coil.primitive/cast (ptr u8) buf) 5) 2)       ; key "gamma" -> 2
+    (coil.primitive/iadd (coil.primitive/imul (match (hm-get [(slice u8) i64] m "alpha") (Some [v] v) (None [] 0)) 100)
+          (coil.primitive/iadd (coil.primitive/imul (match (hm-get [(slice u8) i64] m "gamma") (Some [v] v) (None [] 0)) 10)
                 (hm-len m)))))
 (defn main [] (-> i64) (probe (str-keyops)))
 EOF
@@ -736,15 +736,15 @@ expect_rc 22 "str-keyops-borrowed is the opt-in borrow path (alpha aliased away 
   "$COIL" run "$T/std3b.coil"
 
 echo "== --debug-checks: library bounds checks (mem-6), zero-cost when off =="
-# The build-mode predicate (debug-checks?) gates slice bounds checks inside macros, so
+# The build-mode predicate (coil.primitive/debug-checks?) gates slice bounds checks inside macros, so
 # the check is emitted ONLY under --debug-checks and the off-path IR is byte-identical.
 cat > "$T/dbgget.coil" <<'EOF'
 (module m)
 (import "slice.coil" :use *)
 (defn main [] (-> i64)
-  (let [arr (alloc-stack (array i64 3))]
-    (store! (index arr 0) 10)
-    (let [s (slice-new (index arr 0) 3)] (slice-get s 7))))
+  (let [arr (coil.alloc/stack (array i64 3))]
+    (coil.primitive/store! (coil.primitive/index arr 0) 10)
+    (let [s (slice-new (coil.primitive/index arr 0) 3)] (slice-get s 7))))
 EOF
 # ON: a located OOB message before the crash. FAILS on the seed ('unknown flag --debug-checks').
 expect_out "slice-get index out of bounds" "--debug-checks catches a slice-get OOB" \
@@ -758,8 +758,8 @@ cat > "$T/dbgsub.coil" <<'EOF'
 (module m)
 (import "slice.coil" :use *)
 (defn main [] (-> i64)
-  (let [arr (alloc-stack (array i64 4))]
-    (let [s (slice-new (index arr 0) 4)] (slice-len (subslice s 3 1)))))
+  (let [arr (coil.alloc/stack (array i64 4))]
+    (let [s (slice-new (coil.primitive/index arr 0) 4)] (slice-len (subslice s 3 1)))))
 EOF
 # OFF: the invariant break is unchanged (length hi-lo = -2 -> exit 254).
 "$COIL" run "$T/dbgsub.coil" >/dev/null 2>&1
@@ -807,7 +807,7 @@ cat > "$T/df.coil" <<'EOF'
 (defn main [] (-> i64)
   (let [a (debug-allocator (malloc-allocator))
         p (unwrap-ptr [i64] (create [i64] a))]
-    (store! p 5)
+    (coil.primitive/store! p 5)
     (destroy [i64] a p)
     (destroy [i64] a p)
     0))
@@ -827,7 +827,7 @@ cat > "$T/uaf.coil" <<'EOF'
 (defn main [] (-> i64)
   (let [a (debug-allocator (malloc-allocator))
         p (unwrap-ptr [i64] (create [i64] a))]
-    (store! p 1234) (destroy [i64] a p) (iand (load p) 255)))
+    (coil.primitive/store! p 1234) (destroy [i64] a p) (coil.primitive/iand (coil.primitive/load p) 255)))
 EOF
 expect_rc 222 "--debug-checks poisons freed memory (use-after-free reads 0xDE)" \
   "$COIL" run "$T/uaf.coil" --debug-checks
@@ -839,8 +839,8 @@ echo "== stack-return lint under --debug-checks (mem-8) =="
 cat > "$T/dangle.coil" <<'EOF'
 (module m)
 (defn dangling [] (-> (ptr i64))
-  (let [x (alloc-stack i64)] (store! x 42) x))
-(defn main [] (-> i64) (load (dangling)))
+  (let [x (coil.alloc/stack i64)] (coil.primitive/store! x 42) x))
+(defn main [] (-> i64) (coil.primitive/load (dangling)))
 EOF
 expect_out "returns a pointer to a stack local" "--debug-checks warns on a stack-local pointer return (mem-8)" \
   "$COIL" build "$T/dangle.coil" -o "$T/dl1" --debug-checks
@@ -857,8 +857,8 @@ cat > "$T/heapret.coil" <<'EOF'
 (module m)
 (import "alloc.coil" :use *)
 (defn mk [(a (ptr Allocator))] (-> (ptr i64))
-  (let [p (unwrap-ptr [i64] (create [i64] a))] (store! p 9) p))
-(defn main [] (-> i64) (load (mk (malloc-allocator))))
+  (let [p (unwrap-ptr [i64] (create [i64] a))] (coil.primitive/store! p 9) p))
+(defn main [] (-> i64) (coil.primitive/load (mk (malloc-allocator))))
 EOF
 out=$("$COIL" build "$T/heapret.coil" -o "$T/hr" --debug-checks 2>&1)
 echo "$out" | grep -q "stack local" && bad "no false positive: heap return" "flagged a heap ptr" \
@@ -878,7 +878,7 @@ cat > "$T/assf.coil" <<'EOF'
   0)
 EOF
 expect_rc 134 "assert failure aborts (SIGABRT = 128+6)"                     "$COIL" run "$T/assf.coil"
-expect_out "assertion failed: \(< 9 3\)" "assert prints the offending expression (code-src)" "$COIL" run "$T/assf.coil"
+expect_out "assertion failed: \(< 9 3\)" "assert prints the offending expression (coil.primitive/code-src)" "$COIL" run "$T/assf.coil"
 expect_out "assf\.coil:5"  "assert prints file:line (code-file/code-line)"  "$COIL" run "$T/assf.coil"
 cat > "$T/asseq.coil" <<'EOF'
 (module m)
@@ -1002,7 +1002,7 @@ echo "== -g: dsymutil runs, the .o is kept, lldb maps source (tool-11) =="
 if [ "$HOST_OS" = Darwin ] && command -v dsymutil >/dev/null 2>&1; then
   cat > "$T/dbg.coil" <<'EOF'
 (module dbg)
-(defn addup [(x i64) (y i64)] (-> i64) (iadd x y))
+(defn addup [(x i64) (y i64)] (-> i64) (coil.primitive/iadd x y))
 (defn main [] (-> i64) (addup 3 4))
 EOF
   "$COIL" build "$T/dbg.coil" -g -o "$T/dbgx" >/dev/null 2>&1
@@ -1033,41 +1033,41 @@ echo "== comptime/const route through the compiled engine (mac-8; interp deletio
 # generic calls, no sizeof/alignof/offsetof, no strings. Those sites now fold through
 # the COMPILED metaprogram engine (real codegen) and the program runs. On the pre-mac-8
 # seed the interpreter errors and `run` never yields the folded exit code — a tripwire.
-printf '(defn main [] (-> i64) (comptime (sizeof i64)))\n'                                  > "$T/ct_sizeof.coil"
-expect_rc 8 "comptime (sizeof i64) folds to 8 (interp can't)"        "$COIL" run "$T/ct_sizeof.coil"
+printf '(defn main [] (-> i64) (comptime (coil.primitive/sizeof i64)))\n'                                  > "$T/ct_sizeof.coil"
+expect_rc 8 "comptime (coil.primitive/sizeof i64) folds to 8 (interp can't)"        "$COIL" run "$T/ct_sizeof.coil"
 printf '(defn id [T] [(x T)] (-> T) x)\n(defn main [] (-> i64) (comptime (id [i64] 7)))\n' > "$T/ct_generic.coil"
 expect_rc 7 "comptime of a generic call folds to 7 (interp can't)"   "$COIL" run "$T/ct_generic.coil"
-printf '(const SZ (sizeof i64))\n(defn main [] (-> i64) SZ)\n'                              > "$T/ct_const.coil"
-expect_rc 8 "(const NAME (sizeof …)) folds to 8 (interp can't)"      "$COIL" run "$T/ct_const.coil"
+printf '(const SZ (coil.primitive/sizeof i64))\n(defn main [] (-> i64) SZ)\n'                              > "$T/ct_const.coil"
+expect_rc 8 "(const NAME (coil.primitive/sizeof …)) folds to 8 (interp can't)"      "$COIL" run "$T/ct_const.coil"
 printf '(defn main [] (-> i64) (comptime (do c"hi" 5)))\n'                                  > "$T/ct_str.coil"
 expect_rc 5 "comptime using a c-string folds to 5 (interp can't)"    "$COIL" run "$T/ct_str.coil"
 # NO REGRESSION: an aggregate comptime a MONOMORPHIC function builds still folds on the
 # interpreter (no capability gap → the compiled hook never fires).
-printf '(defstruct P [(x i64) (y i64)])\n(defn mk [] (-> P) (let [(mut p) (zeroed P)] (do (store! (field p x) 3) (store! (field p y) 4) (load p))))\n(defn main [] (-> i64) (let [q (comptime (mk))] (iadd (load (field q x)) (load (field q y)))))\n' > "$T/ct_agg.coil"
+printf '(defstruct P [(x i64) (y i64)])\n(defn mk [] (-> P) (let [(mut p) (coil.primitive/zeroed P)] (do (coil.primitive/store! (coil.primitive/field p x) 3) (coil.primitive/store! (coil.primitive/field p y) 4) (coil.primitive/load p))))\n(defn main [] (-> i64) (let [q (comptime (mk))] (coil.primitive/iadd (coil.primitive/load (coil.primitive/field q x)) (coil.primitive/load (coil.primitive/field q y)))))\n' > "$T/ct_agg.coil"
 expect_rc 7 "aggregate comptime still folds (interp path, no regression)" "$COIL" run "$T/ct_agg.coil"
 # interp deletion step 3a: an aggregate/string comptime the INTERPRETER can't evaluate
 # (a capability gap — sizeof, a generic call) but which returns a struct/string now folds
 # on the COMPILED engine too, via a write-through (ptr T) thunk + a C-layout readback (the
 # same natural layout both backends emit). On the seed (no aggregate readback) the interp
 # error stands and `run` never yields the folded exit code.
-printf '(defstruct L [(sz i64) (al i64)])\n(defn main [] (-> i64) (let [s (comptime (let [p (alloc-stack L)] (store! (field p sz) (sizeof i64)) (store! (field p al) (sizeof (ptr i8))) (load p)))] (+ (field s sz) (field s al))))\n' > "$T/ct_agg_sizeof.coil"
+printf '(defstruct L [(sz i64) (al i64)])\n(defn main [] (-> i64) (let [s (comptime (let [p (coil.alloc/stack L)] (coil.primitive/store! (coil.primitive/field p sz) (coil.primitive/sizeof i64)) (coil.primitive/store! (coil.primitive/field p al) (coil.primitive/sizeof (ptr i8))) (coil.primitive/load p)))] (+ (coil.primitive/field s sz) (coil.primitive/field s al))))\n' > "$T/ct_agg_sizeof.coil"
 expect_rc 16 "aggregate (struct) comptime via sizeof reads back on the compiled engine (interp can't)" "$COIL" run "$T/ct_agg_sizeof.coil"
-printf '(module app)\n(import "slice.coil" :use *)\n(defn pick [T] [(s (slice u8))] (-> (slice u8)) s)\n(defn main [] (-> i64) (let [s (comptime (pick [i64] "hello"))] (+ (slice-len s) (cast i64 (load (index (slice-data s) 0))))))\n' > "$T/ct_agg_str.coil"
+printf '(module app)\n(import "slice.coil" :use *)\n(defn pick [T] [(s (slice u8))] (-> (slice u8)) s)\n(defn main [] (-> i64) (let [s (comptime (pick [i64] "hello"))] (+ (slice-len s) (coil.primitive/cast i64 (coil.primitive/load (coil.primitive/index (slice-data s) 0))))))\n' > "$T/ct_agg_str.coil"
 expect_rc 109 "string comptime via a generic call reads back on the compiled engine (interp can't)" "$COIL" run "$T/ct_agg_str.coil"
 # interp deletion step 2: a SUM-returning comptime with a capability gap now reads back.
 # The reader takes the 4-byte tag at offset 0 (bytes 4..7 are padding the arm64 backend
 # leaves UNINITIALISED, so reading 8 would select a variant from stack garbage) and the
 # selected variant's fields at natural offsets from offset 8.
-printf '(defsum Opt (Yes [(v i64)]) (No []))\n(defn main [] (-> i64) (let [o (comptime (Yes (sizeof i64)))] (match o (Yes [v] v) (No [] 0))))\n' > "$T/ct_agg_sum.coil"
+printf '(defsum Opt (Yes [(v i64)]) (No []))\n(defn main [] (-> i64) (let [o (comptime (Yes (coil.primitive/sizeof i64)))] (match o (Yes [v] v) (No [] 0))))\n' > "$T/ct_agg_sum.coil"
 expect_rc 8 "sum comptime via sizeof reads back on the compiled engine (interp can't)" "$COIL" run "$T/ct_agg_sum.coil"
 # ...and the NULLARY variant, whose payload is unread — this is the case that reading an
 # 8-byte tag would corrupt, since nothing writes over the padding.
-printf '(defsum Opt (Yes [(v i64)]) (No []))\n(defn main [] (-> i64) (let [o (comptime (if (icmp-gt (sizeof i64) 0) (No) (Yes 1)))] (match o (Yes [v] v) (No [] 3))))\n' > "$T/ct_agg_sum0.coil"
+printf '(defsum Opt (Yes [(v i64)]) (No []))\n(defn main [] (-> i64) (let [o (comptime (if (coil.primitive/icmp-gt (coil.primitive/sizeof i64) 0) (No) (Yes 1)))] (match o (Yes [v] v) (No [] 3))))\n' > "$T/ct_agg_sum0.coil"
 expect_rc 3 "nullary-variant sum comptime reads back (tag is 4 bytes, not 8)" "$COIL" run "$T/ct_agg_sum0.coil"
 # A shape the reader still refuses, and MUST: CtVal has no pointer variant, so a
 # compile-time address cannot become a literal. The interpreter cannot represent one
 # either, so nothing regresses — but it must fail loudly rather than fold something wrong.
-printf '(defstruct HasPtr [(p (ptr i8)) (n i64)])\n(defn main [] (-> i64) (let [h (comptime (let [q (alloc-stack HasPtr)] (store! (field q n) (sizeof i64)) (load q)))] (load (field h n))))\n' > "$T/ct_agg_ptr.coil"
+printf '(defstruct HasPtr [(p (ptr i8)) (n i64)])\n(defn main [] (-> i64) (let [h (comptime (let [q (coil.alloc/stack HasPtr)] (coil.primitive/store! (coil.primitive/field q n) (coil.primitive/sizeof i64)) (coil.primitive/load q)))] (coil.primitive/load (coil.primitive/field h n))))\n' > "$T/ct_agg_ptr.coil"
 expect_rc 1 "raw-pointer aggregate comptime declines cleanly (no silently-wrong fold)" "$COIL" run "$T/ct_agg_ptr.coil"
 
 echo "== C size types are target-width: the prelude's size_t/ssize_t are i32 on wasm32 =="
@@ -1091,7 +1091,7 @@ echo "== A1: a wasm32 module exports __stack_pointer so a host longjmp can resto
 # restore SP on unwind, and every panic strands the frames (measured ~111 B leaked/panic).
 # FAILS on the seed (it exports only main/memory/__heap_base); PASSES here. Needs wasm-tools.
 if command -v wasm-tools >/dev/null 2>&1; then
-  printf '(extern sink :cc c [(ptr i8)] (-> void))\n(defstruct Big [(a i64) (b i64) (c i64)])\n(defn use-stack [(n i64)] (-> i64) (let [p (alloc-stack Big)] (do (store! (field p a) n) (sink (cast (ptr i8) p)) (load (field p a)))))\n(defn main [] (-> i64) (use-stack 3))\n' > "$T/sp.coil"
+  printf '(extern sink :cc c [(ptr i8)] (-> void))\n(defstruct Big [(a i64) (b i64) (c i64)])\n(defn use-stack [(n i64)] (-> i64) (let [p (coil.alloc/stack Big)] (do (coil.primitive/store! (coil.primitive/field p a) n) (sink (coil.primitive/cast (ptr i8) p)) (coil.primitive/load (coil.primitive/field p a)))))\n(defn main [] (-> i64) (use-stack 3))\n' > "$T/sp.coil"
   if "$COIL" build "$T/sp.coil" --target wasm32-unknown-unknown -o "$T/sp.wasm" >/dev/null 2>&1; then
     sp_line=$(wasm-tools print "$T/sp.wasm" 2>/dev/null | grep '(export "__stack_pointer"')
     [ -n "$sp_line" ] && ok "wasm32 build exports __stack_pointer ($sp_line)" \
@@ -1131,7 +1131,7 @@ if [ -x /usr/bin/time ]; then
     {
       for j in $(seq 1 250); do printf '(defstruct S%s [T] [(v T)])\n' "$j"; done
       printf '(defn hub [T] [] (-> i64) (do'
-      for j in $(seq 1 250); do printf ' (zeroed (S%s T))' "$j"; done
+      for j in $(seq 1 250); do printf ' (coil.primitive/zeroed (S%s T))' "$j"; done
       printf ' 0))\n(defn main [] (-> i64)\n'
       for k in $(seq 1 "$1"); do printf '  (hub [(array i8 %s)])\n' "$k"; done
       printf '  0)\n'
@@ -1167,7 +1167,7 @@ fi
 echo "== doc comments (;;): coil doc + the code-doc comptime op =="
 # A `;;` block DIRECTLY above a definition is its documentation; a single `;` is an
 # ordinary comment and must NOT become docs. Both the `doc` subcommand and the
-# `(code-doc NODE)` code op read the same rule off the source text.
+# `(coil.primitive/code-doc NODE)` code op read the same rule off the source text.
 # FAILS on the seed (no `doc` subcommand, `code-doc` is an undefined function).
 mkdir -p "$T/docs"
 cat > "$T/docs/m.coil" <<'EOF'
@@ -1178,7 +1178,7 @@ cat > "$T/docs/m.coil" <<'EOF'
 
 ;; Add two numbers together.
 ;; Returns their sum.
-(defn add [(a i64) (b i64)] (-> i64) (iadd a b))
+(defn add [(a i64) (b i64)] (-> i64) (coil.primitive/iadd a b))
 
 ; internal helper, deliberately NOT documentation
 (defn helper [] (-> i64) 0)
@@ -1198,26 +1198,26 @@ if echo "$_dout" | grep -q '## add' && ! echo "$_dout" | grep -q 'helper'; then
 else
   bad "doc: a single-; comment is NOT a doc (add listed, helper not)" "got: $_dout"
 fi
-# (code-doc NODE) sees the same doc from a checker, and "" where there is none
+# (coil.primitive/code-doc NODE) sees the same doc from a checker, and "" where there is none
 cat > "$T/docs/op.coil" <<'EOF'
 (module app)
 
 ;; Documented on purpose.
-(defn add [(a i64) (b i64)] (-> i64) (iadd a b))
+(defn add [(a i64) (b i64)] (-> i64) (coil.primitive/iadd a b))
 
 ; not a doc
 (defn plain [] (-> i64) 0)
 
 (defn doc-report [(prog Code)] (-> Code)
-  (let [(mut m) 0 nm (code-count prog)]
-    (loop (if (icmp-ge (load m) nm) (break)
-      (do (let [mod (code-nth prog (load m)) nf (code-count mod) (mut i) 1]
-            (if (if (icmp-gt (code-count mod) 1) (code-from-user? (code-nth mod 1)) false)
-              (loop (if (icmp-ge (load i) nf) (break)
-                (do (let [form (code-nth mod (load i))] (warn form (code-doc form)))
-                    (store! i (iadd (load i) 1)))))
+  (let [(mut m) 0 nm (coil.primitive/code-count prog)]
+    (loop (if (coil.primitive/icmp-ge (coil.primitive/load m) nm) (break)
+      (do (let [mod (coil.primitive/code-nth prog (coil.primitive/load m)) nf (coil.primitive/code-count mod) (mut i) 1]
+            (if (if (coil.primitive/icmp-gt (coil.primitive/code-count mod) 1) (coil.primitive/code-from-user? (coil.primitive/code-nth mod 1)) false)
+              (loop (if (coil.primitive/icmp-ge (coil.primitive/load i) nf) (break)
+                (do (let [form (coil.primitive/code-nth mod (coil.primitive/load i))] (coil.primitive/warn form (coil.primitive/code-doc form)))
+                    (coil.primitive/store! i (coil.primitive/iadd (coil.primitive/load i) 1)))))
               0))
-          (store! m (iadd (load m) 1)))))
+          (coil.primitive/store! m (coil.primitive/iadd (coil.primitive/load m) 1)))))
     `0))
 (checker doc-report)
 
@@ -1227,7 +1227,7 @@ expect_out 'warning: Documented on purpose\.' "code-doc: a checker reads a defin
   "$COIL" run "$T/docs/op.coil"
 expect_rc 3 "code-doc: the program still builds and runs"  "$COIL" run "$T/docs/op.coil"
 
-# ── `cond` with `:else`, and `coil lint` (report / --diff / --fix) ────────────
+# ── `cond` with `:else`, and `coil lint` (coil.primitive/report / --diff / --fix) ────────────
 # The fix half of a linter writes to your source, so its contract is exactly the kind
 # of thing that has to be gated: a fix must preserve behaviour, be idempotent, never
 # delete a comment, and revert itself if it produces code that does not compile.
@@ -1380,25 +1380,25 @@ cmp -s "$T/lint/comments.coil" "$T/lint/comments.fixed" \
 cat > "$T/lint/badrule.coil" <<'EOF'
 (module badrule)
 (defn br-walk [(f Code)] (-> Code)
-  (if (code-list? f)
-      (if (icmp-gt (code-count f) 0)
-          (do (if (code-eq (code-nth f 0) `+)
-                  (do (suggest f "nonsense" `(no-such-function ~(code-nth f 1) ~(code-nth f 2))) 0)
+  (if (coil.primitive/code-list? f)
+      (if (coil.primitive/icmp-gt (coil.primitive/code-count f) 0)
+          (do (if (coil.primitive/code-eq (coil.primitive/code-nth f 0) `+)
+                  (do (coil.primitive/suggest f "nonsense" `(no-such-function ~(coil.primitive/code-nth f 1) ~(coil.primitive/code-nth f 2))) 0)
                   0)
-              (br-kids f 0 (code-count f)))
+              (br-kids f 0 (coil.primitive/code-count f)))
           `0)
       `0))
 (defn br-kids [(f Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0 (do (br-walk (code-nth f i)) (br-kids f (iadd i 1) n))))
+  (if (coil.primitive/icmp-ge i n) `0 (do (br-walk (coil.primitive/code-nth f i)) (br-kids f (coil.primitive/iadd i 1) n))))
 (defn br-forms [(m Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0 (do (br-walk (code-nth m i)) (br-forms m (iadd i 1) n))))
+  (if (coil.primitive/icmp-ge i n) `0 (do (br-walk (coil.primitive/code-nth m i)) (br-forms m (coil.primitive/iadd i 1) n))))
 (defn br-mods [(ms Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `0
-      (do (let [m (code-nth ms i)]
-            (if (icmp-gt (code-count m) 1)
-                (if (code-from-user? (code-nth m 1)) (br-forms m 1 (code-count m)) `0) `0))
-          (br-mods ms (iadd i 1) n))))
-(defn lint-bad [(modules Code)] (-> Code) (br-mods modules 0 (code-count modules)))
+  (if (coil.primitive/icmp-ge i n) `0
+      (do (let [m (coil.primitive/code-nth ms i)]
+            (if (coil.primitive/icmp-gt (coil.primitive/code-count m) 1)
+                (if (coil.primitive/code-from-user? (coil.primitive/code-nth m 1)) (br-forms m 1 (coil.primitive/code-count m)) `0) `0))
+          (br-mods ms (coil.primitive/iadd i 1) n))))
+(defn lint-bad [(modules Code)] (-> Code) (br-mods modules 0 (coil.primitive/code-count modules)))
 (checker lint-bad)
 EOF
 printf '(module app)\n(defn main [] (-> i64)\n  (+ 40 2))\n' > "$T/lint/victim.coil"

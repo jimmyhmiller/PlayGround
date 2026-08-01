@@ -8,6 +8,7 @@
 ;     --link-flag -L/opt/homebrew/opt/llvm/lib --link-flag -lLLVM
 ;   /tmp/llvm_probe   # should print a valid (empty) LLVM module
 (module selfhost.llvm_probe)
+(import "../stdlib/primitive.coil" :as primitive)
 
 ; --- LLVM-C externs (opaque handles as (ptr i8)) ---
 (extern LLVMContextCreate            :cc c [] (-> (ptr i8)))

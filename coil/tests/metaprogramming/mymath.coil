@@ -1,2 +1,3 @@
 (module mymath)
-(defn less [(a :i64) (b :i64)] (-> bool) (icmp-lt a b))
+(import "primitive.coil" :as primitive)
+(defn less [(a :i64) (b :i64)] (-> bool) (primitive/icmp-lt a b))

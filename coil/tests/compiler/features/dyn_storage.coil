@@ -1,4 +1,6 @@
 (module dyn_storage)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 
 (import "dyn_provider.coil" :use *)
 (import "../../../src/stdlib/alloc.coil" :use *)
@@ -16,7 +18,7 @@
   [(providers (ArrayList (dyn ModelProvider)))])
 
 (defn invoke [(job (ptr AgentRunJob))] (-> i64)
-  (run (load (field job provider))))
+  (run (primitive/load (primitive/field job provider))))
 
 (defn erase-provider [(provider (ptr Provider))] (-> (dyn ModelProvider))
   provider)
@@ -26,27 +28,27 @@
     (run local)))
 
 (defn main [] (-> i64)
-  (let [provider (alloc-stack Provider)
-        job (alloc-stack AgentRunJob)
-        providers (alloc-stack (array (dyn ModelProvider) 2))
+  (let [provider (alloc/stack Provider)
+        job (alloc/stack AgentRunJob)
+        providers (alloc/stack (array (dyn ModelProvider) 2))
         (mut list) (al-new [(dyn ModelProvider)] (malloc-allocator))]
-    (store! (field provider value) 42)
+    (primitive/store! (primitive/field provider value) 42)
     ; Expected-type coercion must work for fields and array elements.
-    (store! (field job provider) provider)
-    (store! (index providers 0) provider)
-    (store! (index providers 1) (erase-provider provider))
+    (primitive/store! (primitive/field job provider) provider)
+    (primitive/store! (primitive/index providers 0) provider)
+    (primitive/store! (primitive/index providers 1) (erase-provider provider))
     ; A dynamic trait is an ordinary fixed-size generic argument.
-    (al-push! (mut list) (make-dyn ModelProvider provider))
+    (al-push! (mut list) (primitive/make-dyn ModelProvider provider))
     (let [choice (HasProvider (erase-provider provider))
           optional (Some [(dyn ModelProvider)] (erase-provider provider))]
-      (if (and (icmp-eq (invoke job) 42)
-               (and (icmp-eq (run (load (index providers 0))) 42)
-                    (and (icmp-eq (run-local (al-get [(dyn ModelProvider)] (load list) 0)) 42)
+      (if (and (primitive/icmp-eq (invoke job) 42)
+               (and (primitive/icmp-eq (run (primitive/load (primitive/index providers 0))) 42)
+                    (and (primitive/icmp-eq (run-local (al-get [(dyn ModelProvider)] (primitive/load list) 0)) 42)
                          (and (match choice
-                                (HasProvider [p] (icmp-eq (run p) 42))
+                                (HasProvider [p] (primitive/icmp-eq (run p) 42))
                                 (NoProvider [] false))
                               (match optional
-                                (Some [p] (icmp-eq (run p) 42))
+                                (Some [p] (primitive/icmp-eq (run p) 42))
                                 (None [] false))))))
           0
           1))))

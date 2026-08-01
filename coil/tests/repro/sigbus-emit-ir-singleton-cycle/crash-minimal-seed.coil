@@ -17,8 +17,9 @@
 ;; loop induction variable could widen forever. The int axis therefore carries a small
 ;; widening counter; after a few widenings it falls straight to the axis bottom.
 (module v_only-t-kinds)
+(import "primitive.coil" :as primitive)
 
-(import "alloc.coil"     :use *)
+(import "alloc.coil" :as alloc     :use *)
 (import "arraylist.coil" :use *)
 (import "hashmap.coil"   :use *)
 (import "control.coil"   :use *)
@@ -100,28 +101,28 @@
 
 (defn val-make [(kinds i64) (ilo i64) (ihi i64) (iwide i64)
                 (fsz i64) (fbits i64) (fidxs i64) (shapes i64)] (-> Val)
-  (let [(mut v) (zeroed Val)]
-    (store! (field v kinds)  kinds)
-    (store! (field v ilo)    ilo)
-    (store! (field v ihi)    ihi)
-    (store! (field v iwide)  iwide)
-    (store! (field v fsz)    fsz)
+  (let [(mut v) (primitive/zeroed Val)]
+    (primitive/store! (primitive/field v kinds)  kinds)
+    (primitive/store! (primitive/field v ilo)    ilo)
+    (primitive/store! (primitive/field v ihi)    ihi)
+    (primitive/store! (primitive/field v iwide)  iwide)
+    (primitive/store! (primitive/field v fsz)    fsz)
     ; Canonical: a non-constant float carries no bits. Safe to normalise because `dual`
     ; only flips the sign of fsz and never turns a non-constant into a constant.
-    (store! (field v fbits)  (if (= fsz FSZ-CON) fbits 0))
-    (store! (field v fidxs)  fidxs)
-    (store! (field v shapes) shapes)
-    (load v)))
+    (primitive/store! (primitive/field v fbits)  (if (= fsz FSZ-CON) fbits 0))
+    (primitive/store! (primitive/field v fidxs)  fidxs)
+    (primitive/store! (primitive/field v shapes) shapes)
+    (primitive/load v)))
 
 (defn val-eq [(x Val) (y Val)] (-> bool)
-  (and (= (load (field x kinds))  (load (field y kinds)))
-   (and (= (load (field x ilo))   (load (field y ilo)))
-    (and (= (load (field x ihi))  (load (field y ihi)))
-     (and (= (load (field x iwide)) (load (field y iwide)))
-      (and (= (load (field x fsz))  (load (field y fsz)))
-       (and (= (load (field x fbits))  (load (field y fbits)))
-        (and (= (load (field x fidxs))  (load (field y fidxs)))
-             (= (load (field x shapes)) (load (field y shapes)))))))))))
+  (and (= (primitive/load (primitive/field x kinds))  (primitive/load (primitive/field y kinds)))
+   (and (= (primitive/load (primitive/field x ilo))   (primitive/load (primitive/field y ilo)))
+    (and (= (primitive/load (primitive/field x ihi))  (primitive/load (primitive/field y ihi)))
+     (and (= (primitive/load (primitive/field x iwide)) (primitive/load (primitive/field y iwide)))
+      (and (= (primitive/load (primitive/field x fsz))  (primitive/load (primitive/field y fsz)))
+       (and (= (primitive/load (primitive/field x fbits))  (primitive/load (primitive/field y fbits)))
+        (and (= (primitive/load (primitive/field x fidxs))  (primitive/load (primitive/field y fidxs)))
+             (= (primitive/load (primitive/field x shapes)) (primitive/load (primitive/field y shapes)))))))))))
 
 (defn hash-step [(h i64) (x i64)] (-> i64) (* (^ h x) 1099511628211))
 
@@ -133,14 +134,14 @@
       (hash-step
        (hash-step
         (hash-step
-         (hash-step -3750763034362895579 (load (field x kinds)))
-         (load (field x ilo)))
-        (load (field x ihi)))
-       (load (field x iwide)))
-      (load (field x fsz)))
-     (load (field x fbits)))
-    (load (field x fidxs)))
-   (load (field x shapes))))
+         (hash-step -3750763034362895579 (primitive/load (primitive/field x kinds)))
+         (primitive/load (primitive/field x ilo)))
+        (primitive/load (primitive/field x ihi)))
+       (primitive/load (primitive/field x iwide)))
+      (primitive/load (primitive/field x fsz)))
+     (primitive/load (primitive/field x fbits)))
+    (primitive/load (primitive/field x fidxs)))
+   (primitive/load (primitive/field x shapes))))
 
 (impl Eq Val (= [(x Val) (y Val)] (-> bool) (val-eq x y)))
 
@@ -178,56 +179,56 @@
 ; ---------------------------------------------------------------------------
 (defn val-meet [(x Val) (y Val)] (-> Val)
   (val-make
-   (bits-meet (load (field x kinds)) (load (field y kinds)))
-   (imin2 (load (field x ilo))   (load (field y ilo)))
-   (imax2 (load (field x ihi))   (load (field y ihi)))
-   (imax2 (load (field x iwide)) (load (field y iwide)))
-   (fsz-meet   (load (field x fsz)) (load (field x fbits))
-               (load (field y fsz)) (load (field y fbits)))
-   (fbits-meet (load (field x fsz)) (load (field x fbits))
-               (load (field y fsz)) (load (field y fbits)))
-   (bits-meet (load (field x fidxs))  (load (field y fidxs)))
-   (bits-meet (load (field x shapes)) (load (field y shapes)))))
+   (bits-meet (primitive/load (primitive/field x kinds)) (primitive/load (primitive/field y kinds)))
+   (imin2 (primitive/load (primitive/field x ilo))   (primitive/load (primitive/field y ilo)))
+   (imax2 (primitive/load (primitive/field x ihi))   (primitive/load (primitive/field y ihi)))
+   (imax2 (primitive/load (primitive/field x iwide)) (primitive/load (primitive/field y iwide)))
+   (fsz-meet   (primitive/load (primitive/field x fsz)) (primitive/load (primitive/field x fbits))
+               (primitive/load (primitive/field y fsz)) (primitive/load (primitive/field y fbits)))
+   (fbits-meet (primitive/load (primitive/field x fsz)) (primitive/load (primitive/field x fbits))
+               (primitive/load (primitive/field y fsz)) (primitive/load (primitive/field y fbits)))
+   (bits-meet (primitive/load (primitive/field x fidxs))  (primitive/load (primitive/field y fidxs)))
+   (bits-meet (primitive/load (primitive/field x shapes)) (primitive/load (primitive/field y shapes)))))
 
 (defn val-dual [(x Val)] (-> Val)
-  (let [lo  (load (field x ilo))
-        hi  (load (field x ihi))
+  (let [lo  (primitive/load (primitive/field x ilo))
+        hi  (primitive/load (primitive/field x ihi))
         con (= lo hi)]      ; an integer constant is self-dual, like a float constant
     (val-make
-     (bits-dual (load (field x kinds)) VK-MASK)
+     (bits-dual (primitive/load (primitive/field x kinds)) VK-MASK)
      (if con lo hi)
      (if con hi lo)
-     (if con (load (field x iwide)) (- 0 (load (field x iwide))))
-     (fsz-dual (load (field x fsz)))
-     (load (field x fbits))
-     (bits-dual (load (field x fidxs))  -1)
-     (bits-dual (load (field x shapes)) -1))))
+     (if con (primitive/load (primitive/field x iwide)) (- 0 (primitive/load (primitive/field x iwide))))
+     (fsz-dual (primitive/load (primitive/field x fsz)))
+     (primitive/load (primitive/field x fbits))
+     (bits-dual (primitive/load (primitive/field x fidxs))  -1)
+     (bits-dual (primitive/load (primitive/field x shapes)) -1))))
 
 ;; High means "no value can be here": the optimistic pass uses it to spot dead code, and
 ;; constant folding refuses to fire on it. Reporting `false` where `true` was possible
 ;; loses an optimisation and never breaks correctness, so this errs toward `false`.
-(defn val-high? [(x Val)] (-> bool) (= (load (field x kinds)) VK-NONE))
+(defn val-high? [(x Val)] (-> bool) (= (primitive/load (primitive/field x kinds)) VK-NONE))
 
 ;; Exactly one kind, pinned to one inhabitant. `undefined` and `null` are single-inhabitant
 ;; kinds, so naming the kind is naming the value. Booleans reuse the int axis (0 or 1).
 (defn val-const? [(x Val)] (-> bool)
-  (let [k (load (field x kinds))]
+  (let [k (primitive/load (primitive/field x kinds))]
     (if (= k VK-UNDEF) true
       (if (= k VK-NULL) true
-        (if (or (= k VK-INT) (= k VK-BOOL)) (= (load (field x ilo)) (load (field x ihi)))
-          (if (= k VK-FLT) (= (load (field x fsz)) FSZ-CON)
-            (if (= k VK-FUN) (= (popcount64 (load (field x fidxs))) 1)
+        (if (or (= k VK-INT) (= k VK-BOOL)) (= (primitive/load (primitive/field x ilo)) (primitive/load (primitive/field x ihi)))
+          (if (= k VK-FLT) (= (primitive/load (primitive/field x fsz)) FSZ-CON)
+            (if (= k VK-FUN) (= (popcount64 (primitive/load (primitive/field x fidxs))) 1)
               false)))))))
 
 ;; Bit population count. Used for "is this a single function" and for printing.
 (defn popcount64 [(x i64)] (-> i64)
   (let [(mut v) x (mut n) 0]
     (loop
-      (if (= (load v) 0) (break)
-        (do (store! v (& (load v) (- (load v) 1)))
-            (store! n (+ (load n) 1))
+      (if (= (primitive/load v) 0) (break)
+        (do (primitive/store! v (& (primitive/load v) (- (primitive/load v) 1)))
+            (primitive/store! n (+ (primitive/load n) 1))
             0)))
-    (load n)))
+    (primitive/load n)))
 
 ; ============================================================================
 ; Ty: the full type
@@ -259,19 +260,19 @@
 ;; The one global. Coil has no top-level mutable binding; `alloc-static` in a zero-arg
 ;; accessor returns the same cell every call, which is the idiom for a singleton.
 (defn types [] (-> (ptr Types))
-  (let [p (alloc-static Types)]
-    (if (load (field p inited)) 0
-      (do (store! (field p inited) true)   ; set FIRST: seeding re-enters through `types`
-          (store! (field p tab)    (al-new [Ty] (malloc-allocator)))
-          (store! (field p duals)  (al-new [i64] (malloc-allocator)))
-          (store! (field p kids)   (al-new [i64] (malloc-allocator)))
-          (store! (field p intern) (hm-new [Ty i64] (malloc-allocator) (ty-keyops)))
+  (let [p (alloc/static Types)]
+    (if (primitive/load (primitive/field p inited)) 0
+      (do (primitive/store! (primitive/field p inited) true)   ; set FIRST: seeding re-enters through `types`
+          (primitive/store! (primitive/field p tab)    (al-new [Ty] (malloc-allocator)))
+          (primitive/store! (primitive/field p duals)  (al-new [i64] (malloc-allocator)))
+          (primitive/store! (primitive/field p kids)   (al-new [i64] (malloc-allocator)))
+          (primitive/store! (primitive/field p intern) (hm-new [Ty i64] (malloc-allocator) (ty-keyops)))
           (ty-seed p)
           0))
     p))
 
 (defn ty-kid [(off i64) (i i64)] (-> i64)
-  (al-get (load (field (types) kids)) (+ off i)))
+  (al-get (primitive/load (primitive/field (types) kids)) (+ off i)))
 
 ;; Structural equality. Tuples compare by their MEMBERS, not by where those members happen
 ;; to sit in the kid array, or two structurally identical tuples would intern separately.
@@ -294,11 +295,11 @@
 (defn ty-kids-eq [(oa i64) (ob i64) (n i64)] (-> bool)
   (let [(mut i) 0 (mut same) true]
     (loop
-      (if (or (>= (load i) n) (not (load same))) (break)
-        (do (if (!= (ty-kid oa (load i)) (ty-kid ob (load i))) (store! same false) 0)
-            (store! i (+ (load i) 1))
+      (if (or (>= (primitive/load i) n) (not (primitive/load same))) (break)
+        (do (if (!= (ty-kid oa (primitive/load i)) (ty-kid ob (primitive/load i))) (primitive/store! same false) 0)
+            (primitive/store! i (+ (primitive/load i) 1))
             0)))
-    (load same)))
+    (primitive/load same)))
 
 (defn ty-hash [(p Ty)] (-> i64)
   (match p
@@ -318,31 +319,31 @@
 ;; wrappers load the slot and hand off to the value-level functions above, so the
 ;; structural definition of equality lives in exactly one place.
 (defn ty-keyhash [(slot (ptr i8)) (n i64)] (-> i64)
-  (ty-hash (load (cast (ptr Ty) slot))))
+  (ty-hash (primitive/load (primitive/cast (ptr Ty) slot))))
 (defn ty-keyeq [(ka (ptr i8)) (kb (ptr i8)) (n i64)] (-> bool)
-  (ty-eq (load (cast (ptr Ty) ka)) (load (cast (ptr Ty) kb))))
+  (ty-eq (primitive/load (primitive/cast (ptr Ty) ka)) (primitive/load (primitive/cast (ptr Ty) kb))))
 (defn ty-keyops [] (-> (ptr KeyOps))
-  (let [o (alloc-static KeyOps)]
-    (store! (field o hash) (fnptr-of ty-keyhash))
-    (store! (field o eq)   (fnptr-of ty-keyeq))
-    (store! (field o size) (sizeof Ty))
+  (let [o (alloc/static KeyOps)]
+    (primitive/store! (primitive/field o hash) (primitive/fnptr-of ty-keyhash))
+    (primitive/store! (primitive/field o eq)   (primitive/fnptr-of ty-keyeq))
+    (primitive/store! (primitive/field o size) (primitive/sizeof Ty))
     o))
 
 ; ---------------------------------------------------------------------------
 ; Interning, with duals installed in pairs
 ; ---------------------------------------------------------------------------
-(defn ty-get [(t i64)] (-> Ty) (al-get (load (field (types) tab)) t))
-(defn ty-count [] (-> i64) (al-len [Ty] (load (field (types) tab))))
+(defn ty-get [(t i64)] (-> Ty) (al-get (primitive/load (primitive/field (types) tab)) t))
+(defn ty-count [] (-> i64) (al-len [Ty] (primitive/load (primitive/field (types) tab))))
 
 (defn ty-push [(p (ptr Types)) (t Ty)] (-> i64)
-  (let [id (al-len [Ty] (load (field p tab)))]
-    (al-push! [Ty]  (field p tab)   t)
-    (al-push! [i64] (field p duals) TY-NO-ID)
-    (hm-put! [Ty i64] (field p intern) t id)
+  (let [id (al-len [Ty] (primitive/load (primitive/field p tab)))]
+    (al-push! [Ty]  (primitive/field p tab)   t)
+    (al-push! [i64] (primitive/field p duals) TY-NO-ID)
+    (hm-put! [Ty i64] (primitive/field p intern) t id)
     id))
 
 (defn ty-lookup [(p (ptr Types)) (t Ty)] (-> i64)
-  (match (hm-get (load (field p intern)) t) (Some [id] id) (None [] TY-NO-ID)))
+  (match (hm-get (primitive/load (primitive/field p intern)) t) (Some [id] id) (None [] TY-NO-ID)))
 
 ;; Intern a type and return its id. A type and its dual are installed together, so
 ;; `ty-dual` is a table read rather than a computation, and `dual(dual(x)) == x` holds by
@@ -353,15 +354,15 @@
       (let [id (ty-push p t)
             d  (ty-xdual t)]
         (if (ty-eq d t)
-            (al-set! [i64] (field p duals) id id)          ; self-dual: on the centreline
+            (al-set! [i64] (primitive/field p duals) id id)          ; self-dual: on the centreline
           (let [did0 (ty-lookup p d)
                 did  (if (= did0 TY-NO-ID) (ty-push p d) did0)]
-            (al-set! [i64] (field p duals) id did)
-            (al-set! [i64] (field p duals) did id)))
+            (al-set! [i64] (primitive/field p duals) id did)
+            (al-set! [i64] (primitive/field p duals) did id)))
         id))))
 
 (defn ty-dual [(t i64)] (-> i64)
-  (al-get (load (field (types) duals)) t))
+  (al-get (primitive/load (primitive/field (types) duals)) t))
 
 ;; The structural dual, used only while interning. Tuple members are already interned, so
 ;; their duals are a table read and this does not recurse indefinitely.
@@ -376,12 +377,12 @@
 
 (defn ty-tuple-of-duals [(off i64) (len i64)] (-> Ty)
   (let [p (types)
-        noff (al-len [i64] (load (field p kids)))
+        noff (al-len [i64] (primitive/load (primitive/field p kids)))
         (mut i) 0]
     (loop
-      (if (>= (load i) len) (break)
-        (do (al-push! [i64] (field p kids) (ty-dual (ty-kid off (load i))))
-            (store! i (+ (load i) 1))
+      (if (>= (primitive/load i) len) (break)
+        (do (al-push! [i64] (primitive/field p kids) (ty-dual (ty-kid off (primitive/load i))))
+            (primitive/store! i (+ (primitive/load i) 1))
             0)))
     (TTuple noff len)))
 
@@ -425,12 +426,12 @@
 
 (defn ty-meet-tuples [(oa i64) (ob i64) (n i64)] (-> i64)
   (let [p (types)
-        noff (al-len [i64] (load (field p kids)))
+        noff (al-len [i64] (primitive/load (primitive/field p kids)))
         (mut i) 0]
     (loop
-      (if (>= (load i) n) (break)
-        (do (al-push! [i64] (field p kids) (ty-meet (ty-kid oa (load i)) (ty-kid ob (load i))))
-            (store! i (+ (load i) 1))
+      (if (>= (primitive/load i) n) (break)
+        (do (al-push! [i64] (primitive/field p kids) (ty-meet (ty-kid oa (primitive/load i)) (ty-kid ob (primitive/load i))))
+            (primitive/store! i (+ (primitive/load i) 1))
             0)))
     (ty-intern (TTuple noff n))))
 
@@ -512,16 +513,16 @@
 (defn t-obj-shape [(shape i64)] (-> i64) (t-obj-shapes (<< 1 shape)))
 
 (defn t-tuple2 [(a i64) (b i64)] (-> i64)
-  (let [p (types) off (al-len [i64] (load (field p kids)))]
-    (al-push! [i64] (field p kids) a)
-    (al-push! [i64] (field p kids) b)
+  (let [p (types) off (al-len [i64] (primitive/load (primitive/field p kids)))]
+    (al-push! [i64] (primitive/field p kids) a)
+    (al-push! [i64] (primitive/field p kids) b)
     (ty-intern (TTuple off 2))))
 
 (defn t-tuple3 [(a i64) (b i64) (c i64)] (-> i64)
-  (let [p (types) off (al-len [i64] (load (field p kids)))]
-    (al-push! [i64] (field p kids) a)
-    (al-push! [i64] (field p kids) b)
-    (al-push! [i64] (field p kids) c)
+  (let [p (types) off (al-len [i64] (primitive/load (primitive/field p kids)))]
+    (al-push! [i64] (primitive/field p kids) a)
+    (al-push! [i64] (primitive/field p kids) b)
+    (al-push! [i64] (primitive/field p kids) c)
     (ty-intern (TTuple off 3))))
 
 ; ---------------------------------------------------------------------------
@@ -529,6 +530,6 @@
 ; ---------------------------------------------------------------------------
 ;; Bump the widening counter; once it is spent, fall to the bottom of the int axis. A loop
 ;; induction variable's range would otherwise creep upward forever and the optimistic pass
-(defn f64-bits [(x f64)] (-> i64) (let [p (alloc-stack f64)] (store! p x) (load (cast (ptr i64) p))))
-(defn bits-f64 [(b i64)] (-> f64) (let [p (alloc-stack i64)] (store! p b) (load (cast (ptr f64) p))))
+(defn f64-bits [(x f64)] (-> i64) (let [p (alloc/stack f64)] (primitive/store! p x) (primitive/load (primitive/cast (ptr i64) p))))
+(defn bits-f64 [(b i64)] (-> f64) (let [p (alloc/stack i64)] (primitive/store! p b) (primitive/load (primitive/cast (ptr f64) p))))
 (defn main [] (-> i64) 0)

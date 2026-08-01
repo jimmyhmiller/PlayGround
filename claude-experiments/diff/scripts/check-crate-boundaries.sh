@@ -15,16 +15,18 @@ workspace = {package["name"] for package in packages}
 allowed = {
     "diffpack-core": set(),
     "diffpack-default-loader": {"diffpack-core"},
-    "diffpack-vite-compat": {"diffpack-core", "diffpack-default-loader"},
+    "diffpack-vite-compat": {
+        "diffpack-core",
+        "diffpack-default-loader",
+        "diffpack-web",
+    },
     "diffpack-web": {
         "diffpack-core",
         "diffpack-default-loader",
-        "diffpack-vite-compat",
     },
     "diffpack-next": {
         "diffpack-core",
         "diffpack-default-loader",
-        "diffpack-vite-compat",
         "diffpack-web",
     },
     "diffpack-tanstack": {
@@ -33,6 +35,7 @@ allowed = {
         "diffpack-vite-compat",
         "diffpack-web",
     },
+    "diffpack-next-bindings": {"diffpack-next"},
 }
 
 violations = []

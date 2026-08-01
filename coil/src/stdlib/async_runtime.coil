@@ -1,0 +1,380 @@
+(module coil.async-runtime)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
+; Single-threaded hosted runtime for explicit tasks. It parks on kqueue (macOS) or epoll
+; (Linux), using monotonic deadlines. The platform ABI stays in this module; applications
+; work only with Runtime, Context, Parker, and Task.
+
+(import "async.coil" :use *)
+(import "time.coil" :use *)
+
+(extern close :cc c [i32] (-> i32))
+
+(defsum RuntimeError
+  (Backend [(errno i64)])
+  (Busy [(registrations i64)]))
+
+(defsum TimerError
+  (InvalidDuration)
+  (Clock [(error TimeError)]))
+
+(defsum FdInterest
+  (Readable)
+  (Writable))
+
+(defsum FdWaitError
+  (InvalidFd)
+  (Register [(errno i64)])
+  (Event [(errno i64)]))
+
+(defstruct Runtime
+  [(backend-fd i32)
+   (next-deadline-ms i64)
+   (deadline-armed bool)
+   (registrations i64)
+   (closed bool)])
+
+(defstruct TimerState
+  [(runtime (ptr Runtime))
+   (deadline-ms i64)])
+
+;; Caller-owned state used as the stable kernel event token. It may not move or be freed
+;; between fd-wait-init and task-close.
+(defstruct FdWaitState
+  [(runtime (ptr Runtime))
+   (fd i32)
+   (interest FdInterest)
+   (kernel-registered bool)
+   (armed bool)
+   (ready bool)
+   (event-error i64)])
+
+; Packed platform event helpers. Keeping byte offsets here prevents libc layout details
+; from leaking into the public API.
+(defstruct EpollEventLayout :layout packed [(events u32) (data u64)])
+
+(defn epoll-event-fill [(event (ptr i8)) (events i64) (token (ptr i8))] (-> i64)
+  (let [layout (primitive/cast (ptr EpollEventLayout) event)]
+    (primitive/store! (primitive/field layout events) (primitive/cast u32 events))
+    (primitive/store! (primitive/field layout data) (primitive/cast u64 token))
+    0))
+
+(defn epoll-event-flags [(event (ptr i8))] (-> i64)
+  (primitive/cast i64 (primitive/load (primitive/field (primitive/cast (ptr EpollEventLayout) event) events))))
+
+(defn epoll-event-token [(event (ptr i8))] (-> (ptr i8))
+  (primitive/cast (ptr i8) (primitive/load (primitive/field (primitive/cast (ptr EpollEventLayout) event) data))))
+
+(defn kevent-fill [(event (ptr i8)) (fd i32) (filter i64) (flags i64) (token (ptr i8))] (-> i64)
+  (do
+    (primitive/store! (primitive/cast (ptr u64) event) (primitive/cast u64 fd))
+    (primitive/store! (primitive/cast (ptr i16) (primitive/index event 8)) (primitive/cast i16 filter))
+    (primitive/store! (primitive/cast (ptr u16) (primitive/index event 10)) (primitive/cast u16 flags))
+    (primitive/store! (primitive/cast (ptr u32) (primitive/index event 12)) 0)
+    (primitive/store! (primitive/cast (ptr i64) (primitive/index event 16)) 0)
+    (primitive/store! (primitive/cast (ptr (ptr i8)) (primitive/index event 24)) token)
+    0))
+
+(defn kevent-flags [(event (ptr i8))] (-> i64)
+  (primitive/cast i64 (primitive/load (primitive/cast (ptr u16) (primitive/index event 10)))))
+
+(defn kevent-data [(event (ptr i8))] (-> i64)
+  (primitive/load (primitive/cast (ptr i64) (primitive/index event 16))))
+
+(defn kevent-token [(event (ptr i8))] (-> (ptr i8))
+  (primitive/load (primitive/cast (ptr (ptr i8)) (primitive/index event 24))))
+
+(defn runtime-event-ready [(token (ptr i8)) (kernel-retained bool) (primitive/error i64)] (-> i64)
+  (let [state (primitive/cast (ptr FdWaitState) token)
+        runtime (primitive/load (primitive/field state runtime))]
+    (if (primitive/load (primitive/field state armed))
+        (do
+          (primitive/store! (primitive/field runtime registrations)
+                  (- (primitive/load (primitive/field runtime registrations)) 1))
+          (primitive/store! (primitive/field state armed) false))
+        0)
+    (primitive/store! (primitive/field state kernel-registered) kernel-retained)
+    (primitive/store! (primitive/field state event-error) error)
+    (primitive/store! (primitive/field state ready) true)
+    0))
+
+(defn gen-runtime-platform [] (-> Code)
+  (if (primitive/code-eq (primitive/target-os) `linux)
+      `(do
+         (extern epoll_create1 :cc c [i32] (-> i32))
+         (extern epoll_ctl :cc c [i32 i32 i32 (ptr i8)] (-> i32))
+         (extern epoll_wait :cc c [i32 (ptr i8) i32 i32] (-> i32))
+         (defn runtime-backend-open [] (-> i32)
+           (epoll_create1 524288))
+         (defn runtime-backend-register [(runtime-fd i32) (target-fd i32) (interest i64) (token (ptr i8)) (known bool)] (-> i64)
+           (let [event (alloc/stack (array u8 16))
+                 events (| (if (= interest 0) 1 4) 1073741824)]
+             (coil.async-runtime.epoll-event-fill (primitive/cast (ptr i8) event) events token)
+             (let [rc (epoll_ctl runtime-fd (if known 3 1) target-fd (primitive/cast (ptr i8) event))]
+               (if (primitive/icmp-lt (primitive/cast i64 rc) 0) (time-errno) 0))))
+         (defn runtime-backend-unregister [(runtime-fd i32) (target-fd i32) (interest i64)] (-> i64)
+           (let [rc (epoll_ctl runtime-fd 2 target-fd (primitive/cast (ptr i8) 0))]
+             (if (primitive/icmp-lt (primitive/cast i64 rc) 0) (time-errno) 0)))
+         (defn runtime-backend-park [(fd i32) (timeout-ms i32)] (-> i64)
+           (let [event (alloc/stack (array u8 16))
+                 rc (epoll_wait fd (primitive/cast (ptr i8) event) 1 timeout-ms)]
+             (if (primitive/icmp-lt (primitive/cast i64 rc) 0)
+                 (let [errno (time-errno)] (if (= errno 4) 0 errno))
+                 (if (= rc 0)
+                     0
+                     (coil.async-runtime.runtime-event-ready (coil.async-runtime.epoll-event-token (primitive/cast (ptr i8) event))
+                                                             true
+                                                             0))))))
+      `(do
+         (extern kqueue :cc c [] (-> i32))
+         (extern kevent :cc c [i32 (ptr i8) i32 (ptr i8) i32 (ptr i8)] (-> i32))
+         (defn runtime-backend-open [] (-> i32)
+           (kqueue))
+         (defn runtime-backend-register [(runtime-fd i32) (target-fd i32) (interest i64) (token (ptr i8)) (known bool)] (-> i64)
+           (let [event (alloc/stack (array u8 32))]
+             (coil.async-runtime.kevent-fill (primitive/cast (ptr i8) event)
+                                             target-fd
+                                             (if (= interest 0) -1 -2)
+                                             17
+                                             token)
+             (let [rc
+                     (kevent runtime-fd
+                             (primitive/cast (ptr i8) event)
+                             1
+                             (primitive/cast (ptr i8) 0)
+                             0
+                             (primitive/cast (ptr i8) 0))]
+               (if (primitive/icmp-lt (primitive/cast i64 rc) 0) (time-errno) 0))))
+         (defn runtime-backend-unregister [(runtime-fd i32) (target-fd i32) (interest i64)] (-> i64)
+           (let [event (alloc/stack (array u8 32))]
+             (coil.async-runtime.kevent-fill (primitive/cast (ptr i8) event)
+                                             target-fd
+                                             (if (= interest 0) -1 -2)
+                                             2
+                                             (primitive/cast (ptr i8) 0))
+             (let [rc
+                     (kevent runtime-fd
+                             (primitive/cast (ptr i8) event)
+                             1
+                             (primitive/cast (ptr i8) 0)
+                             0
+                             (primitive/cast (ptr i8) 0))]
+               (if (primitive/icmp-lt (primitive/cast i64 rc) 0) (time-errno) 0))))
+         (defn runtime-backend-park [(fd i32) (timeout-ms i32)] (-> i64)
+           (let [timeout (alloc/stack (array i64 2))
+                 event (alloc/stack (array u8 32))]
+             (primitive/store! (primitive/index timeout 0) (/ (primitive/cast i64 timeout-ms) 1000))
+             (primitive/store! (primitive/index timeout 1) (* (% (primitive/cast i64 timeout-ms) 1000) 1000000))
+             (let [timeout-ptr
+                     (if (primitive/icmp-lt (primitive/cast i64 timeout-ms) 0)
+                         (primitive/cast (ptr i8) 0)
+                         (primitive/cast (ptr i8) timeout))
+                   rc
+                     (kevent fd
+                             (primitive/cast (ptr i8) 0)
+                             0
+                             (primitive/cast (ptr i8) event)
+                             1
+                             timeout-ptr)]
+               (if (primitive/icmp-lt (primitive/cast i64 rc) 0)
+                   (let [errno (time-errno)] (if (= errno 4) 0 errno))
+                   (if (= rc 0)
+                       0
+                       (let [flags (coil.async-runtime.kevent-flags (primitive/cast (ptr i8) event))
+                             error
+                               (if (!= (& flags 16384) 0)
+                                   (coil.async-runtime.kevent-data (primitive/cast (ptr i8) event))
+                                   0)]
+                         (coil.async-runtime.runtime-event-ready (coil.async-runtime.kevent-token (primitive/cast (ptr i8) event))
+                                                                 false
+                                                                 error))))))))))
+(meta (gen-runtime-platform))
+
+;; Initialize caller-owned runtime storage.
+(defn runtime-init [(runtime (ptr Runtime))] (-> (Result (ptr Runtime) RuntimeError))
+  (let [fd (runtime-backend-open)]
+    (if (primitive/icmp-lt (primitive/cast i64 fd) 0)
+        (Err (Backend (time-errno)))
+        (do
+          (primitive/store! (primitive/field runtime backend-fd) fd)
+          (primitive/store! (primitive/field runtime next-deadline-ms) 0)
+          (primitive/store! (primitive/field runtime deadline-armed) false)
+          (primitive/store! (primitive/field runtime registrations) 0)
+          (primitive/store! (primitive/field runtime closed) false)
+          (Ok runtime)))))
+
+;; Close the platform event handle. Idempotent.
+(defn runtime-close [(runtime (ptr Runtime))] (-> (Result i64 RuntimeError))
+  (if (primitive/load (primitive/field runtime closed))
+      (Ok 0)
+      (let [registrations (primitive/load (primitive/field runtime registrations))]
+        (if (> registrations 0)
+            (Err (Busy registrations))
+            (let [rc (close (primitive/load (primitive/field runtime backend-fd)))]
+              (if (primitive/icmp-lt (primitive/cast i64 rc) 0)
+                  (Err (Backend (time-errno)))
+                  (do (primitive/store! (primitive/field runtime closed) true) (Ok 0))))))))
+
+;; Register a deadline for the next park. Multiple tasks may register; the earliest wins.
+(defn runtime-arm-deadline [(runtime (ptr Runtime)) (deadline-ms i64)] (-> i64)
+  (if (or (not (primitive/load (primitive/field runtime deadline-armed)))
+          (< deadline-ms (primitive/load (primitive/field runtime next-deadline-ms))))
+      (do
+        (primitive/store! (primitive/field runtime next-deadline-ms) deadline-ms)
+        (primitive/store! (primitive/field runtime deadline-armed) true))
+      0))
+
+(defn runtime-timeout [(runtime (ptr Runtime))] (-> (Result :i32 TimeError))
+  (match (monotonic-now-ms)
+    (Err [error] (Err error))
+    (Ok [now]
+        (let [remaining (- (primitive/load (primitive/field runtime next-deadline-ms)) now)]
+          (if (<= remaining 0)
+              (Ok 0)
+              ; epoll and kevent take bounded millisecond timeout inputs here.
+              (if (> remaining 2147483647)
+                  (Ok 2147483647)
+                  (Ok (primitive/cast i32 remaining))))))))
+
+(defn runtime-park [(raw (ptr i8))] (-> i64)
+  (let [runtime (primitive/cast (ptr Runtime) raw)]
+    (if (primitive/load (primitive/field runtime closed))
+        9
+        (if (primitive/load (primitive/field runtime deadline-armed))
+            (match (runtime-timeout runtime)
+              (Err [error] (match error (Syscall [errno] errno)))
+              (Ok [timeout]
+                  (do
+                    ; Tasks re-arm themselves when next polled. This prevents an expired
+                    ; deadline from causing every later park to return immediately.
+                    (primitive/store! (primitive/field runtime deadline-armed) false)
+                    (runtime-backend-park (primitive/load (primitive/field runtime backend-fd)) timeout))))
+            (if (> (primitive/load (primitive/field runtime registrations)) 0)
+                (runtime-backend-park (primitive/load (primitive/field runtime backend-fd)) -1)
+                22)))))
+
+;; Fill caller-owned Context and Parker capabilities for this runtime.
+(defn runtime-context [(cx (ptr Context)) (runtime (ptr Runtime))] (-> (ptr Context))
+  (do (primitive/store! (primitive/field cx user) (primitive/cast (ptr i8) runtime)) cx))
+
+(defn runtime-parker [(parker (ptr Parker)) (runtime (ptr Runtime))] (-> (ptr Parker))
+  (do
+    (primitive/store! (primitive/field parker park-fn) (primitive/fnptr-of runtime-park))
+    (primitive/store! (primitive/field parker state) (primitive/cast (ptr i8) runtime))
+    parker))
+
+(defn fd-interest-code [(interest FdInterest)] (-> i64)
+  (match interest (Readable [] 0) (Writable [] 1)))
+
+(defn fd-wait-poll [(raw (ptr i8)) (cx (ptr Context))] (-> (Poll (Result i64 FdWaitError)))
+  (let [state (primitive/cast (ptr FdWaitState) raw)]
+    (if (primitive/load (primitive/field state ready))
+        (let [error (primitive/load (primitive/field state event-error))]
+          (if (= error 0) (Ready (Ok 0)) (Ready (Err (Event error)))))
+        (if (primitive/load (primitive/field state armed))
+            (Pending)
+            (let [runtime (primitive/load (primitive/field state runtime))
+                  error
+                    (runtime-backend-register (primitive/load (primitive/field runtime backend-fd))
+                                              (primitive/load (primitive/field state fd))
+                                              (fd-interest-code (primitive/load (primitive/field state interest)))
+                                              raw
+                                              (primitive/load (primitive/field state kernel-registered)))]
+              (if (!= error 0)
+                  (Ready (Err (Register error)))
+                  (do
+                    (primitive/store! (primitive/field state kernel-registered) true)
+                    (primitive/store! (primitive/field state armed) true)
+                    (primitive/store! (primitive/field runtime registrations)
+                            (+ (primitive/load (primitive/field runtime registrations)) 1))
+                    (Pending))))))))
+
+(defn fd-wait-close [(raw (ptr i8)) (cancelled bool)] (-> i64)
+  (let [state (primitive/cast (ptr FdWaitState) raw)
+        runtime (primitive/load (primitive/field state runtime))
+        (mut error) 0]
+    (if (primitive/load (primitive/field state kernel-registered))
+        (do
+          (primitive/store! error
+                  (runtime-backend-unregister (primitive/load (primitive/field runtime backend-fd))
+                                              (primitive/load (primitive/field state fd))
+                                              (fd-interest-code (primitive/load (primitive/field state interest)))))
+          (primitive/store! (primitive/field state kernel-registered) false))
+        0)
+    (if (primitive/load (primitive/field state armed))
+        (do
+          (primitive/store! (primitive/field runtime registrations)
+                  (- (primitive/load (primitive/field runtime registrations)) 1))
+          (primitive/store! (primitive/field state armed) false))
+        0)
+    (primitive/load error)))
+
+;; Initialize a one-shot readiness task over an existing fd. The descriptor remains owned
+;; by the caller. Closing the task deregisters it but never closes the descriptor.
+(defn fd-wait-init [(runtime (ptr Runtime))
+                    (task (ptr (Task (Result i64 FdWaitError))))
+                    (state (ptr FdWaitState))
+                    (fd i32)
+                    (interest FdInterest)] (-> (Result (ptr (Task (Result i64 FdWaitError))) FdWaitError))
+  (if (primitive/icmp-lt (primitive/cast i64 fd) 0)
+      (Err (InvalidFd))
+      (do
+        (primitive/store! (primitive/field state runtime) runtime)
+        (primitive/store! (primitive/field state fd) fd)
+        (primitive/store! (primitive/field state interest) interest)
+        (primitive/store! (primitive/field state kernel-registered) false)
+        (primitive/store! (primitive/field state armed) false)
+        (primitive/store! (primitive/field state ready) false)
+        (primitive/store! (primitive/field state event-error) 0)
+        (Ok (task-init task
+                       (primitive/cast (ptr i8) state)
+                       (primitive/fnptr-of fd-wait-poll)
+                       (primitive/fnptr-of fd-wait-close))))))
+
+(defn fd-readable [(runtime (ptr Runtime))
+                   (task (ptr (Task (Result i64 FdWaitError))))
+                   (state (ptr FdWaitState))
+                   (fd i32)] (-> (Result (ptr (Task (Result i64 FdWaitError))) FdWaitError))
+  (fd-wait-init runtime task state fd (Readable)))
+
+(defn fd-writable [(runtime (ptr Runtime))
+                   (task (ptr (Task (Result i64 FdWaitError))))
+                   (state (ptr FdWaitState))
+                   (fd i32)] (-> (Result (ptr (Task (Result i64 FdWaitError))) FdWaitError))
+  (fd-wait-init runtime task state fd (Writable)))
+
+(defn timer-poll [(raw (ptr i8)) (cx (ptr Context))] (-> (Poll (Result i64 TimerError)))
+  (let [state (primitive/cast (ptr TimerState) raw)]
+    (match (monotonic-now-ms)
+      (Err [error] (Ready (Err (Clock error))))
+      (Ok [now]
+          (if (>= now (primitive/load (primitive/field state deadline-ms)))
+              (Ready (Ok 0))
+              (do
+                (runtime-arm-deadline (primitive/load (primitive/field state runtime))
+                                      (primitive/load (primitive/field state deadline-ms)))
+                (Pending)))))))
+
+(defn timer-close [(raw (ptr i8)) (cancelled bool)] (-> i64)
+  0)
+
+;; Initialize a caller-owned monotonic timer task. TimerState and Task storage must both
+;; remain alive until task-close. Negative durations are rejected.
+(defn timer-after-ms [(runtime (ptr Runtime))
+                      (task (ptr (Task (Result i64 TimerError))))
+                      (state (ptr TimerState))
+                      (delay-ms i64)] (-> (Result (ptr (Task (Result i64 TimerError))) TimerError))
+  (if (< delay-ms 0)
+      (Err (InvalidDuration))
+      (match (monotonic-now-ms)
+        (Err [error] (Err (Clock error)))
+        (Ok [now]
+            (if (> delay-ms (- 9223372036854775807 now))
+                (Err (InvalidDuration))
+                (do
+                  (primitive/store! (primitive/field state runtime) runtime)
+                  (primitive/store! (primitive/field state deadline-ms) (+ now delay-ms))
+                  (Ok (task-init task
+                                 (primitive/cast (ptr i8) state)
+                                 (primitive/fnptr-of timer-poll)
+                                 (primitive/fnptr-of timer-close)))))))))

@@ -3,9 +3,10 @@
 ; the export-restriction path in resolve is exercised by app's qualified access to
 ; the exported names only). Core forms only (no macros — resolve consumes core).
 (module rmod.helper)
+(import "primitive.coil" :as primitive)
 
 (export inc twice)
 
-(defn inc   [(x i64)] (-> i64) (iadd x 1))
-(defn twice [(x i64)] (-> i64) (iadd x x))
-(defn secret [(x i64)] (-> i64) (isub x 1))
+(defn inc   [(x i64)] (-> i64) (primitive/iadd x 1))
+(defn twice [(x i64)] (-> i64) (primitive/iadd x x))
+(defn secret [(x i64)] (-> i64) (primitive/isub x 1))

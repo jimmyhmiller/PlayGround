@@ -14,6 +14,8 @@ members = [
     "crates/diffpack-vite-compat",
     "crates/diffpack-next",
     "crates/diffpack-tanstack",
+    "examples/external-provider",
+    "integrations/next-bindings/crate",
 ]
 resolver = "3"
 
@@ -25,7 +27,7 @@ memory-accounting = ["diffpack-web/memory-accounting"]
 
 [dependencies]
 diffpack-core = { path = "crates/diffpack-core" }
-diffpack-default-loader = { path = "crates/diffpack-default-loader" }
+diffpack-default-loader = { path = "crates/diffpack-default-loader", features = ["legacy-driver-tests"] }
 diffpack-vite-compat = { path = "crates/diffpack-vite-compat" }
 diffpack-web = { path = "crates/diffpack-web" }
 diffpack-next = { path = "crates/diffpack-next" }

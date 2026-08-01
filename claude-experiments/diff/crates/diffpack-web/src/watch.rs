@@ -231,10 +231,7 @@ pub fn is_config_file(path: &Path) -> bool {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    name.starts_with("vite.config.")
-        || name == "package.json"
-        || name.starts_with("tsconfig")
-        || name.starts_with("diffpack.config")
+    name == "package.json" || name.starts_with("tsconfig") || name.starts_with("diffpack.config")
 }
 
 pub fn source_dir(project_root: &Path) -> &'static str {
@@ -260,7 +257,7 @@ mod tests {
     fn classifies_source_config_and_generated_paths() {
         assert!(is_module_path(Path::new("/app/src/view.tsx")));
         assert!(!is_module_path(Path::new("/app/node_modules/pkg/view.js")));
-        assert!(is_config_file(Path::new("/app/vite.config.ts")));
+        assert!(is_config_file(Path::new("/app/tsconfig.json")));
         assert!(!is_config_file(Path::new("/app/src/data.json")));
         assert!(is_dependency_or_generated(
             Path::new("/app/.diffpack-output/client.js"),

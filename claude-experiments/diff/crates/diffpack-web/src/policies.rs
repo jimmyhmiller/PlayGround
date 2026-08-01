@@ -12,9 +12,13 @@ impl diffpack_core::runtime::RuntimeIntegrationPolicy for WebRuntimePolicy {
     fn configure(
         &self,
         request: diffpack_core::runtime::RuntimePolicyRequest<'_>,
-    ) -> diffpack_core::runtime::RuntimePolicyOutput {
+    ) -> Result<diffpack_core::runtime::RuntimePolicyOutput, String> {
         let mut output = diffpack_core::runtime::RuntimePolicyOutput {
-            browser_require_native: Some(crate::runtime::require_native()),
+            browser_require_native: Some(diffpack_core::runtime::RuntimeContribution::new(
+                "browser-require-native",
+                "diffpack-web",
+                crate::runtime::require_native(),
+            )),
             ..Default::default()
         };
         if request.is_main
@@ -23,7 +27,11 @@ impl diffpack_core::runtime::RuntimeIntegrationPolicy for WebRuntimePolicy {
         {
             output
                 .entry_preludes
-                .push(BROWSER_PROCESS_PRELUDE.to_string());
+                .push(diffpack_core::runtime::RuntimeContribution::new(
+                    "browser-process-compatibility",
+                    "diffpack-web",
+                    BROWSER_PROCESS_PRELUDE.to_string(),
+                ));
         }
         if request.hmr {
             let hot = crate::hmr::registry_render_policy(
@@ -31,16 +39,20 @@ impl diffpack_core::runtime::RuntimeIntegrationPolicy for WebRuntimePolicy {
                 request.any_async,
                 request.format == diffpack_core::ModuleFormat::Esm,
             );
-            output.hot = Some(diffpack_core::runtime::OwnedRuntimeHotPolicy {
-                require_dynamic: hot.require_dynamic.to_string(),
-                hot_install: hot.hot_install.to_string(),
-                methods: hot.methods,
-                runtime_return: hot.runtime_return,
-                reimport_guard: hot.reimport_guard.to_string(),
-                server_control: hot.server_control.to_string(),
-            });
+            output.hot = Some(diffpack_core::runtime::RuntimeContribution::new(
+                "hmr-runtime",
+                "diffpack-web",
+                diffpack_core::runtime::OwnedRuntimeHotPolicy {
+                    require_dynamic: hot.require_dynamic.to_string(),
+                    hot_install: hot.hot_install.to_string(),
+                    methods: hot.methods,
+                    runtime_return: hot.runtime_return,
+                    reimport_guard: hot.reimport_guard.to_string(),
+                    server_control: hot.server_control.to_string(),
+                },
+            ));
         }
-        output
+        Ok(output)
     }
 
     fn flat_entry_prelude(&self, browser_process_shim: bool) -> Option<String> {
@@ -71,7 +83,7 @@ impl diffpack_default_loader::module_policy::SpecialModulePolicy for WebSpecialM
 
 #[cfg(test)]
 mod tests {
-    use diffpack_core::runtime::RuntimeIntegrationPolicy;
+    use diffpack_core::runtime::{RuntimeIntegrationPolicy, RuntimePolicyRequest};
 
     use super::{BROWSER_PROCESS_PRELUDE, WebRuntimePolicy};
 
@@ -82,5 +94,30 @@ mod tests {
             Some(BROWSER_PROCESS_PRELUDE)
         );
         assert_eq!(WebRuntimePolicy.flat_entry_prelude(false), None);
+    }
+
+    #[test]
+    fn plain_web_runtime_profile_snapshot() {
+        let output = WebRuntimePolicy
+            .configure(RuntimePolicyRequest {
+                format: diffpack_core::ModuleFormat::BrowserEsm,
+                is_main: true,
+                hmr: false,
+                entry_id: "entry",
+                entry_runtime_id: 0,
+                any_async: false,
+                base: "/",
+                chunk_files: &[],
+                modules: &[],
+                browser_process_shim: true,
+            })
+            .unwrap();
+        assert_eq!(
+            output.describe(),
+            [
+                "browser-process-compatibility@diffpack-web",
+                "browser-require-native@diffpack-web",
+            ]
+        );
     }
 }

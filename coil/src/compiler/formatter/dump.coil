@@ -2,7 +2,8 @@
 ; each node's kind, nl-before, and raw text.
 ;   ./target/release/coil run src/compiler/formatter/dump.coil <file.coil>
 (module app)
-(import "alloc.coil"     :use *)
+(import "../../stdlib/primitive.coil" :as primitive)
+(import "../../stdlib/alloc.coil"     :use *)
 (import "slice.coil"     :use *)
 (import "str.coil"       :use *)
 (import "arraylist.coil" :use *)
@@ -16,17 +17,17 @@
   (let [fd (open path 0) buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
     (loop
       (let [n (read fd buf 65536)]
-        (if (icmp-le n 0) (break)
+        (if (primitive/icmp-le n 0) (break)
           (let [(mut i) 0]
-            (loop (if (icmp-ge (load i) n) (break)
-                (do (al-push! (mut bytes) (cast u8 (load (index buf (load i)))))
-                    (store! i (iadd (load i) 1)))))))))
+            (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+                (do (al-push! (mut bytes) (primitive/cast u8 (primitive/load (primitive/index buf (primitive/load i)))))
+                    (primitive/store! i (primitive/iadd (primitive/load i) 1)))))))))
     (close fd)
-    (al-slice [u8] (load bytes))))
+    (al-slice [u8] (primitive/load bytes))))
 
 (defn indent [(w (ptr Writer)) (d i64)] (-> i64)
-  (let [(mut i) 0] (loop (if (icmp-ge (load i) d) (break)
-    (do (print-str w "  ") (store! i (iadd (load i) 1)))))) 0)
+  (let [(mut i) 0] (loop (if (primitive/icmp-ge (primitive/load i) d) (break)
+    (do (print-str w "  ") (primitive/store! i (primitive/iadd (primitive/load i) 1)))))) 0)
 
 (defn dump-node [(w (ptr Writer)) (n (ptr Node)) (d i64)] (-> i64)
   (indent w d)
@@ -36,23 +37,23 @@
     (if (node-atom? n)
         (do (print-str w "ATOM ") (print-str w (node-raw n)) (print-str w "\n") 0)
       (if (node-list? n)
-          (do (print-str w (if (icmp-eq (node-open n) 40) "( LIST\n" "[ VEC\n"))
+          (do (print-str w (if (primitive/icmp-eq (node-open n) 40) "( LIST\n" "[ VEC\n"))
               (let [(mut i) 0 c (node-count n)]
-                (loop (if (icmp-ge (load i) c) (break)
-                  (do (dump-node w (node-nth n (load i)) (iadd d 1))
-                      (store! i (iadd (load i) 1)))))) 0)
+                (loop (if (primitive/icmp-ge (primitive/load i) c) (break)
+                  (do (dump-node w (node-nth n (primitive/load i)) (primitive/iadd d 1))
+                      (primitive/store! i (primitive/iadd (primitive/load i) 1)))))) 0)
         (do (print-str w "PREFIX\n") 0))))
   0)
 
 (defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
   (let [a (malloc-allocator) w (stdout)]
-    (if (icmp-lt (cast i64 argc) 2)
+    (if (primitive/icmp-lt (primitive/cast i64 argc) 2)
         (do (print-str w "usage: dump <file.coil>\n") 1)
-      (let [src (read-file a (load (index argv 1)))
+      (let [src (read-file a (primitive/load (primitive/index argv 1)))
             doc (read-doc a src)
-            n (al-len [(ptr Node)] (load doc)) (mut i) 0]
+            n (al-len [(ptr Node)] (primitive/load doc)) (mut i) 0]
         (print-str w "forms: ") (print-int w n) (print-str w "\n")
-        (loop (if (icmp-ge (load i) n) (break)
-          (do (dump-node w (al-get [(ptr Node)] (load doc) (load i)) 0)
-              (store! i (iadd (load i) 1)))))
+        (loop (if (primitive/icmp-ge (primitive/load i) n) (break)
+          (do (dump-node w (al-get [(ptr Node)] (primitive/load doc) (primitive/load i)) 0)
+              (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
         0))))

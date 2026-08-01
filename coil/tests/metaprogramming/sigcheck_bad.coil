@@ -1,4 +1,6 @@
 (module app)
+(import "primitive.coil" :as primitive)
+(import "alloc.coil" :as alloc)
 (import "sigcheck.coil" :use *)
 (checker check-sigs)
 
@@ -7,6 +9,6 @@
 (defn at [(p (ptr i64))] (-> (ptr i64)) p)
 
 (defn main [] (-> i64)
-  (let [p (alloc-stack i64)]
-    (store! p 0)
-    (load (at p))))
+  (let [p (alloc/stack i64)]
+    (primitive/store! p 0)
+    (primitive/load (at p))))

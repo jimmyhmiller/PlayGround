@@ -5134,13 +5134,11 @@ mod tests {
     /// The server `.mjs` output must not merely pass `node --check`; it must
     /// EXECUTE under Node's ESM goal. This builds a small multi-module app with a
     /// static cross-module import, an external Node built-in (forcing the shared
-    /// Top-level `await` cannot exist in CommonJS output or inside the factory
-    /// runtime; both must be hard, module-naming errors (previously the build
-    /// "succeeded" and emitted a bundle Node rejects at parse — the conformance
-    /// suite's worst honesty finding). In single-chunk ESM output it is
-    /// representable and must actually run.
+    /// Top-level `await` lowers to async factories in both module formats. The
+    /// CommonJS entry exports its evaluation promise; static importers wait on
+    /// their dependencies before executing.
     #[test]
-    fn top_level_await_is_a_hard_error_in_cjs_and_runs_in_flat_esm() {
+    fn top_level_await_runs_in_cjs_and_esm() {
         if node_command().arg("--version").output().is_err() {
             return;
         }
@@ -5160,16 +5158,15 @@ mod tests {
         assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
         let reachable = bundler.reachable_modules_direct();
 
-        let error = bundler
+        let cjs_out = directory.path().join("dist/out.js");
+        bundler
             .emit_with_options(
                 &reachable,
-                &directory.path().join("dist/out.js"),
+                &cjs_out,
                 EmitOptions::default(),
             )
-            .unwrap_err();
-        assert!(error.contains("top-level await"), "{error}");
-        assert!(error.contains("value.js"), "names the module: {error}");
-        assert!(error.contains("--format esm"), "names the way out: {error}");
+            .unwrap();
+        assert_eq!(run_node(&cjs_out), "got:tla-value\n");
 
         let esm_out = directory.path().join("dist/out.mjs");
         bundler
@@ -5960,11 +5957,10 @@ mod tests {
         assert!(error.contains("entry.js"), "names the importer: {error}");
     }
 
-    /// `import.meta` is a syntax error anywhere in a CommonJS file, so CJS
-    /// output must refuse; in ESM output it stays, resolving against the
-    /// emitted chunk (the standard bundler semantic).
+    /// CommonJS lowers `import.meta` to a per-module URL/environment record;
+    /// ESM preserves the host-native object.
     #[test]
-    fn import_meta_is_a_hard_error_in_cjs_and_survives_in_esm() {
+    fn import_meta_lowers_in_cjs_and_survives_in_esm() {
         if node_command().arg("--version").output().is_err() {
             return;
         }
@@ -5979,15 +5975,15 @@ mod tests {
         assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
         let reachable = bundler.reachable_modules_direct();
 
-        let error = bundler
+        let cjs_out = directory.path().join("dist/out.js");
+        bundler
             .emit_with_options(
                 &reachable,
-                &directory.path().join("dist/out.js"),
+                &cjs_out,
                 EmitOptions::default(),
             )
-            .unwrap_err();
-        assert!(error.contains("import.meta"), "{error}");
-        assert!(error.contains("entry.js"), "names the module: {error}");
+            .unwrap();
+        assert_eq!(run_node(&cjs_out), "url-kind:true\n");
 
         let esm_out = directory.path().join("dist/out.mjs");
         bundler
@@ -7381,7 +7377,7 @@ mod tests {
 
         // No `import_meta_glob` in the config: generic bundling. The call must
         // survive to the module (no expansion, no graph edges), so the existing
-        // import.meta-in-CommonJS honesty check refuses the CJS emit by name.
+        // generic CJS lowering leaves the unsupported `.glob` property alone.
         let entry = directory.path().join("entry.js");
         let (bundler, update) = discover_direct(&entry).unwrap();
         assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
@@ -7391,11 +7387,10 @@ mod tests {
             1,
             "no glob edges without the opt-in: {reachable:?}"
         );
-        let error = bundler
-            .emit(&reachable, &directory.path().join("dist/bundle.js"))
-            .unwrap_err();
-        assert!(error.contains("import.meta"), "{error}");
-        assert!(error.contains("entry.js"), "{error}");
+        let output = directory.path().join("dist/bundle.js");
+        bundler.emit(&reachable, &output).unwrap();
+        let code = fs::read_to_string(output).unwrap();
+        assert!(code.contains("__diffpackImportMeta.glob"), "{code}");
     }
 
     #[test]
@@ -7832,6 +7827,7 @@ mod tests {
                     language: diffpack_core::SourceLanguage::JavaScript,
                     source_map: None,
                     watch_files: Vec::new(),
+                    diagnostics: Vec::new(),
                 }))
             }
 
@@ -7866,6 +7862,7 @@ mod tests {
                         name: Some("provider-note.txt".into()),
                         source: b"from provider".to_vec(),
                     }],
+                    diagnostics: Vec::new(),
                 }))
             }
         }
@@ -7920,6 +7917,7 @@ mod tests {
                     source_map: None,
                     watch_files: Vec::new(),
                     emitted_assets: Vec::new(),
+                    diagnostics: Vec::new(),
                 }))
             }
         }
@@ -8047,11 +8045,15 @@ mod tests {
             fn configure(
                 &self,
                 _request: diffpack_core::runtime::RuntimePolicyRequest<'_>,
-            ) -> diffpack_core::runtime::RuntimePolicyOutput {
-                diffpack_core::runtime::RuntimePolicyOutput {
-                    entry_preludes: vec!["globalThis.__externalRuntimePolicy=1;".into()],
+            ) -> Result<diffpack_core::runtime::RuntimePolicyOutput, String> {
+                Ok(diffpack_core::runtime::RuntimePolicyOutput {
+                    entry_preludes: vec![diffpack_core::runtime::RuntimeContribution::new(
+                        "external-runtime-marker",
+                        "legacy-driver-test",
+                        "globalThis.__externalRuntimePolicy=1;".into(),
+                    )],
                     ..Default::default()
-                }
+                })
             }
         }
 

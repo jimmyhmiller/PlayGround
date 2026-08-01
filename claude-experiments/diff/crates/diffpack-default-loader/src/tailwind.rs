@@ -9,8 +9,8 @@
 //!
 //! This module is a native Rust implementation of that compile. It is a *general*
 //! utility engine driven by faithful Tailwind v4 reference data — the published
-//! default theme ([`THEME_CSS`], verbatim from the `tailwindcss` package) and the
-//! resolved preflight ([`PREFLIGHT_CSS`]) — never a lookup table of an app's
+//! default theme (`THEME_CSS`, verbatim from the `tailwindcss` package) and the
+//! resolved preflight (`PREFLIGHT_CSS`) — never a lookup table of an app's
 //! specific classes. A class the app uses that the engine does not yet handle is
 //! a hard, specific error naming the token; it is never silently dropped.
 //!
@@ -57,7 +57,7 @@ use rayon::prelude::*;
 /// ```
 ///
 /// plus re-extracting the compiled preflight from a real reference build (see
-/// [`PREFLIGHT_CSS`]) and bumping this constant.
+/// `PREFLIGHT_CSS`) and bumping this constant.
 pub const VERSION: &str = "4.3.3";
 
 /// The published Tailwind default theme, verbatim from
@@ -88,12 +88,12 @@ pub fn vendored_theme_css() -> &'static str {
 const PREFLIGHT_CSS: &str = include_str!("../../../src/tailwind_preflight.css");
 
 /// Upstream's `preflight.css` SOURCE, verbatim at [`VERSION`]. Not used by the
-/// compile (see [`PREFLIGHT_CSS`]) — it is the provenance record that lets the
+/// compile (see `PREFLIGHT_CSS`) — it is the provenance record that lets the
 /// drift guard notice an upstream preflight change without needing a rebuilt
 /// reference.
 const PREFLIGHT_SOURCE_CSS: &str = include_str!("tailwind/preflight.source.css");
 
-/// The upstream Tailwind **v3** release [`PREFLIGHT_V3_SOURCE_CSS`] was vendored
+/// The upstream Tailwind **v3** release `PREFLIGHT_V3_SOURCE_CSS` was vendored
 /// from. Re-vendoring is `cp <tailwindcss@3>/src/css/preflight.css
 /// src/tailwind_preflight_v3.source.css` plus bumping this.
 pub const V3_VERSION: &str = "3.4.19";
@@ -352,7 +352,7 @@ impl std::fmt::Display for NativeGap {
 /// Reads a Tailwind entry and reports the first thing in it the native engine
 /// cannot serve, or `None` when the native engine owns the whole sheet.
 ///
-/// This is the delegation gate for [`crate::tailwind_delegate`]. It is a
+/// This is the delegation gate for the private Tailwind delegate. It is a
 /// *capability* question answered from the CSS: the three gaps in [`NativeGap`]
 /// are enumerated and looked for directly. Anything else — malformed CSS, an
 /// unresolvable theme reference, a scanned class that is simply not a utility —
@@ -551,7 +551,7 @@ pub fn compile_with_theme_lenient(
 /// `node_modules/tailwindcss/theme.css` when present, so the compile matches
 /// the exact Tailwind version the reference build used (default tokens like
 /// `--font-sans` changed between v4 releases). Falls back to the vendored
-/// [`THEME_CSS`].
+/// `THEME_CSS`.
 pub fn compile_with_theme(
     css: &str,
     candidate_classes: &BTreeSet<String>,

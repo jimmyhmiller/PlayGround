@@ -1,4 +1,5 @@
 (module samecode_test)
+(import "primitive.coil" :as primitive)
 ; ============================================================================
 ; THE SAME-CODE PROOF, part 2: run every shared function in BOTH phases.
 ;
@@ -21,7 +22,7 @@
 
 ; the metaprogram: eight computations at EXPANSION TIME, spliced as literals
 (defn ct-all [] (-> Code)
-  (fmt (stderr) "[samecode] computing all eight at COMPILE TIME (in the metaprogram dylib)\n")
+  (fmt (stderr) "[samecode] computing all eight at COMPILE TIME (int the metaprogram dylib)\n")
   `(rt-compare ~(sc-fnv SC-TEXT)
                ~(sc-sort-sum 200)
                ~(sc-map-stats 100)
@@ -32,8 +33,8 @@
                ~(sc-thread-sum 1000000)))
 
 (defn rt-check-i [(name (slice u8)) (ct i64) (rt i64)] (-> i64)
-  (fmt (stdout) "  {s}: compile-time={d} run-time={d}  {s}\n" name ct rt (if (icmp-eq ct rt) "OK" "MISMATCH"))
-  (if (icmp-eq ct rt) 0 1))
+  (fmt (stdout) "  {s}: compile-time={d} run-time={d}  {s}\n" name ct rt (if (primitive/icmp-eq ct rt) "OK" "MISMATCH"))
+  (if (primitive/icmp-eq ct rt) 0 1))
 (defn rt-check-s [(name (slice u8)) (ct (slice u8)) (rt (slice u8))] (-> i64)
   (fmt (stdout) "  {s}: compile-time={s} run-time={s}  {s}\n" name ct rt (if (str-eq ct rt) "OK" "MISMATCH"))
   (if (str-eq ct rt) 0 1))
@@ -43,18 +44,18 @@
                   (readerfold i64) (fbits i64) (ffmt (slice u8)) (tsum i64)] (-> i64)
   (fmt (stdout) "same-code proof: eight computations, one definition each, two phases\n")
   (let [(mut bad) 0]
-    (store! bad (iadd (load bad) (rt-check-i "fnv-1a hash            " fnv (sc-fnv SC-TEXT))))
-    (store! bad (iadd (load bad) (rt-check-i "fnptr insertion sort   " sortsum (sc-sort-sum 200))))
-    (store! bad (iadd (load bad) (rt-check-i "string-keyed hashmap   " mapstats (sc-map-stats 100))))
-    (store! bad (iadd (load bad) (rt-check-i "recursive-descent parse" arith (sc-arith SC-ARITH))))
-    (store! bad (iadd (load bad) (rt-check-i "THE COMPILER'S READER  " readerfold (sc-reader-fold SC-COIL-SRC))))
-    (store! bad (iadd (load bad) (rt-check-i "f64 iteration (BITS)   " fbits (sc-f64-bits (sc-f64-iter -0.7436 0.1318 64)))))
-    (store! bad (iadd (load bad) (rt-check-s "libc snprintf %.17g    " ffmt (sc-libc-fmt (sc-f64-iter -0.7436 0.1318 64)))))
-    (store! bad (iadd (load bad) (rt-check-i "two POSIX threads      " tsum (sc-thread-sum 1000000))))
-    (if (icmp-eq (load bad) 0)
+    (primitive/store! bad (primitive/iadd (primitive/load bad) (rt-check-i "fnv-1a hash            " fnv (sc-fnv SC-TEXT))))
+    (primitive/store! bad (primitive/iadd (primitive/load bad) (rt-check-i "fnptr insertion sort   " sortsum (sc-sort-sum 200))))
+    (primitive/store! bad (primitive/iadd (primitive/load bad) (rt-check-i "string-keyed hashmap   " mapstats (sc-map-stats 100))))
+    (primitive/store! bad (primitive/iadd (primitive/load bad) (rt-check-i "recursive-descent parse" arith (sc-arith SC-ARITH))))
+    (primitive/store! bad (primitive/iadd (primitive/load bad) (rt-check-i "THE COMPILER'S READER  " readerfold (sc-reader-fold SC-COIL-SRC))))
+    (primitive/store! bad (primitive/iadd (primitive/load bad) (rt-check-i "f64 iteration (BITS)   " fbits (sc-f64-bits (sc-f64-iter -0.7436 0.1318 64)))))
+    (primitive/store! bad (primitive/iadd (primitive/load bad) (rt-check-s "libc snprintf %.17g    " ffmt (sc-libc-fmt (sc-f64-iter -0.7436 0.1318 64)))))
+    (primitive/store! bad (primitive/iadd (primitive/load bad) (rt-check-i "two POSIX threads      " tsum (sc-thread-sum 1000000))))
+    (if (primitive/icmp-eq (primitive/load bad) 0)
         (fmt (stdout) "ALL IDENTICAL: metaprograms and programs run the same code.\n")
-      (fmt (stdout) "{d} MISMATCHES\n" (load bad)))
-    (load bad)))
+      (fmt (stdout) "{d} MISMATCHES\n" (primitive/load bad)))
+    (primitive/load bad)))
 
 (defn main [] (-> :i64)
   (ct-all))

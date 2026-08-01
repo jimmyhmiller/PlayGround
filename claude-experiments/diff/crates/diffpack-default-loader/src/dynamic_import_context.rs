@@ -12,7 +12,7 @@
 //! module*); Rollup's `dynamic-import-vars` (which is what Vite ships) does the
 //! same thing. Both are load-bearing in real apps — i18n bundles, app-store
 //! loaders, plugin registries — so this rewrite is ALWAYS ON rather than being an
-//! opt-in convention like [`crate::import_meta_glob`].
+//! opt-in glob-import convention.
 //!
 //! The rewrite is source-to-source and runs before the module is parsed for
 //! dependencies, so every match becomes a real dynamic-import edge through the
@@ -55,7 +55,7 @@ use oxc_span::Span;
 /// Rewrites every variable `import()` in `source` (a still-TypeScript/JSX module
 /// at `path`), returning the rewritten source or `None` when the module has none.
 /// Runs before the main transform, source-to-source, like
-/// [`crate::import_meta_glob::transform`].
+/// the glob-import transform.
 pub fn transform(path: &Path, source: &str) -> Option<String> {
     // Cheap string gate before any parse: only a module that literally writes
     // `import(` followed by a backtick can contain one, and the vast majority of

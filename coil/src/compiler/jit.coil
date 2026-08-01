@@ -35,8 +35,9 @@
 ; PAGEOFF12 is emitted at exactly one site (codegen_a64.coil emit-sym-addr!, always
 ; adrp+add with a zero immediate), so there is no load/store scaling case to handle.
 (module jit)
+(import "../stdlib/primitive.coil" :as primitive)
 
-(import "alloc.coil" :use *)
+(import "../stdlib/alloc.coil" :as alloc :use *)
 (import "result.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
@@ -67,13 +68,13 @@
 
 ; br x16 — same encoding family as blr/ret, with op=0 and rn=16.
 (defn jit-br-x16 [] (-> i64)
-  (ior (ishl 107 25) (ior (ishl 31 16) (ishl 16 5))))
+  (primitive/ior (primitive/ishl 107 25) (primitive/ior (primitive/ishl 31 16) (primitive/ishl 16 5))))
 
 ; dlsym(RTLD_DEFAULT, …) — search every image already loaded in this process, which
 ; is how a comptime thunk reaches libc and how a metaprogram reaches the host hooks
 ; the compiler exports. RTLD_DEFAULT is (void*)-2 on macOS.
 (defn jit-rtld-default [] (-> (ptr i8))
-  (cast (ptr i8) -2))
+  (primitive/cast (ptr i8) -2))
 
 ; Darwin's explicit i-cache flush after writing JIT pages, resolved dynamically:
 ; the symbol does not exist on ELF hosts (this JIT emits arm64 and never runs
@@ -81,7 +82,7 @@
 ; leave the Linux link with an undefined reference.
 (defn jit-icache-invalidate [(base (ptr i8)) (n i64)] (-> i64)
   (let [f (dlsym (jit-rtld-default) c"sys_icache_invalidate")]
-    (unless (icmp-eq (cast i64 f) 0) (call-ptr (cast (fnptr c [(ptr i8) i64] i64) f) base n))))
+    (unless (primitive/icmp-eq (primitive/cast i64 f) 0) (primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) i64] i64) f) base n))))
 
 (defstruct JitSym [(name (slice u8)) (addr (ptr i8))])
 (defstruct JitImage
@@ -90,7 +91,7 @@
    (syms (ArrayList JitSym))])
 
 (defn jit-align-up [(v i64) (al i64)] (-> i64)
-  (imul (idiv (iadd v (isub al 1)) al) al))
+  (primitive/imul (primitive/idiv (primitive/iadd v (primitive/isub al 1)) al) al))
 
 ; str.coil's str-concat, minus the Option — this module deliberately depends only on
 ; the small libraries (sconcat lives in parser.coil, which has no business here).
@@ -98,332 +99,332 @@
   (match (str-concat a x y) (Some [s] s) (None [] x)))
 
 (defn jit-not [(m i64)] (-> i64)
-  (ixor m -1))
+  (primitive/ixor m -1))
 
 ; ---- little-endian byte access ------------------------------------------------
 ; Done a byte at a time, in i64 throughout, so there is no width or alignment
 ; question at the patch sites.
 (defn jit-ld32 [(p (ptr u8))] (-> i64)
-  (ior (ior (cast i64 (load (index p 0)))
-            (ishl (cast i64 (load (index p 1))) 8))
-       (ior (ishl (cast i64 (load (index p 2))) 16)
-            (ishl (cast i64 (load (index p 3))) 24))))
+  (primitive/ior (primitive/ior (primitive/cast i64 (primitive/load (primitive/index p 0)))
+            (primitive/ishl (primitive/cast i64 (primitive/load (primitive/index p 1))) 8))
+       (primitive/ior (primitive/ishl (primitive/cast i64 (primitive/load (primitive/index p 2))) 16)
+            (primitive/ishl (primitive/cast i64 (primitive/load (primitive/index p 3))) 24))))
 
 (defn jit-st32! [(p (ptr u8)) (v i64)] (-> i64)
   (do
-    (store! (index p 0) (cast u8 (iand v 255)))
-    (store! (index p 1) (cast u8 (iand (ishr v 8) 255)))
-    (store! (index p 2) (cast u8 (iand (ishr v 16) 255)))
-    (store! (index p 3) (cast u8 (iand (ishr v 24) 255)))
+    (primitive/store! (primitive/index p 0) (primitive/cast u8 (primitive/iand v 255)))
+    (primitive/store! (primitive/index p 1) (primitive/cast u8 (primitive/iand (primitive/ishr v 8) 255)))
+    (primitive/store! (primitive/index p 2) (primitive/cast u8 (primitive/iand (primitive/ishr v 16) 255)))
+    (primitive/store! (primitive/index p 3) (primitive/cast u8 (primitive/iand (primitive/ishr v 24) 255)))
     0))
 
 (defn jit-ld64 [(p (ptr u8))] (-> i64)
-  (ior (jit-ld32 p) (ishl (jit-ld32 (index p 4)) 32)))
+  (primitive/ior (jit-ld32 p) (primitive/ishl (jit-ld32 (primitive/index p 4)) 32)))
 
 (defn jit-st64! [(p (ptr u8)) (v i64)] (-> i64)
   (do
-    (jit-st32! p (iand v 4294967295))
-    (jit-st32! (index p 4) (ishr v 32))
+    (jit-st32! p (primitive/iand v 4294967295))
+    (jit-st32! (primitive/index p 4) (primitive/ishr v 32))
     0))
 
 ; a section is loaded unless it is debug info
 (defn jit-loadable? [(s (ptr MSect))] (-> bool)
-  (not (str-eq (load (field s segname)) "__DWARF")))
+  (not (str-eq (primitive/load (primitive/field s segname)) "__DWARF")))
 
 (defn jit-is-text? [(s (ptr MSect))] (-> bool)
-  (str-eq (load (field s segname)) "__TEXT"))
+  (str-eq (primitive/load (primitive/field s segname)) "__TEXT"))
 
 ; NUL-terminate a name for dlsym, dropping the leading '_' the Mach-O symbol
 ; carries (codegen_a64.coil:434 adds it; the C symbol libc knows has no underscore).
 (defn jit-sym-cstr [(a (ptr Allocator)) (name (slice u8))] (-> (ptr i8))
   (let [raw
-          (if (and (icmp-gt (slice-len name) 0)
-                   (icmp-eq (cast i64 (slice-get name 0)) \_))
+          (if (and (primitive/icmp-gt (slice-len name) 0)
+                   (primitive/icmp-eq (primitive/cast i64 (slice-get name 0)) \_))
               (subslice name 1 (slice-len name))
               name)
         n (slice-len raw)
-        buf (unwrap-ptr [u8] (alloc-slice [u8] a (iadd n 1)))
+        buf (unwrap-ptr [u8] (alloc-slice [u8] a (primitive/iadd n 1)))
         (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (store! (index buf (load i)) (load (index (slice-data raw) (load i))))
-                (store! i (iadd (load i) 1)))))
-    (store! (index buf n) (cast u8 0))
-    (cast (ptr i8) buf)))
+                (primitive/store! (primitive/index buf (primitive/load i)) (primitive/load (primitive/index (slice-data raw) (primitive/load i))))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/store! (primitive/index buf n) (primitive/cast u8 0))
+    (primitive/cast (ptr i8) buf)))
 
 ; write an absolute-jump veneer to `tgt` at `vp`
 (defn jit-emit-veneer! [(vp (ptr u8)) (tgt i64)] (-> i64)
   (do
-    (jit-st32! (index vp 0) (a64-movz 16 (iand tgt 65535) 0))
-    (jit-st32! (index vp 4) (a64-movk 16 (iand (ishr tgt 16) 65535) 1))
-    (jit-st32! (index vp 8) (a64-movk 16 (iand (ishr tgt 32) 65535) 2))
-    (jit-st32! (index vp 12) (a64-movk 16 (iand (ishr tgt 48) 65535) 3))
-    (jit-st32! (index vp 16) (jit-br-x16))
+    (jit-st32! (primitive/index vp 0) (a64-movz 16 (primitive/iand tgt 65535) 0))
+    (jit-st32! (primitive/index vp 4) (a64-movk 16 (primitive/iand (primitive/ishr tgt 16) 65535) 1))
+    (jit-st32! (primitive/index vp 8) (a64-movk 16 (primitive/iand (primitive/ishr tgt 32) 65535) 2))
+    (jit-st32! (primitive/index vp 12) (a64-movk 16 (primitive/iand (primitive/ishr tgt 48) 65535) 3))
+    (jit-st32! (primitive/index vp 16) (jit-br-x16))
     0))
 
 ; ---- apply one relocation ------------------------------------------------------
 ; loc = the fixup address, tgt = the resolved target address (already redirected to
 ; a veneer where one was needed).
 (defn jit-patch! [(loc (ptr u8)) (tgt (ptr i8)) (rtype i64)] (-> (Result i64 (slice u8)))
-  (let [p (cast i64 loc)
-        (mut s) (cast i64 tgt)]
-    (cond (icmp-eq rtype (reloc-branch26))
+  (let [p (primitive/cast i64 loc)
+        (mut s) (primitive/cast i64 tgt)]
+    (cond (primitive/icmp-eq rtype (reloc-branch26))
             (let [w (jit-ld32 loc)
-                  delta (isub (load s) p)]
-              (if (or (icmp-ge delta (branch26-max))
-                      (icmp-lt delta (isub 0 (branch26-max))))
+                  delta (primitive/isub (primitive/load s) p)]
+              (if (or (primitive/icmp-ge delta (branch26-max))
+                      (primitive/icmp-lt delta (primitive/isub 0 (branch26-max))))
                   (Err [i64 (slice u8)] "jit: branch target out of range even after veneering (compiler bug)")
-                  (let [imm (iand (ishr delta 2) 67108863)]  ; 0x3ffffff
-                    (jit-st32! loc (ior (iand w (jit-not 67108863)) imm))
+                  (let [imm (primitive/iand (primitive/ishr delta 2) 67108863)]  ; 0x3ffffff
+                    (jit-st32! loc (primitive/ior (primitive/iand w (jit-not 67108863)) imm))
                     (Ok [i64 (slice u8)] 0))))
-          (icmp-eq rtype (reloc-page21))
+          (primitive/icmp-eq rtype (reloc-page21))
             (let [w (jit-ld32 loc)
-                  delta (isub (iand (load s) (jit-not 4095)) (iand p (jit-not 4095)))
-                  imm (ishr delta 12)]
+                  delta (primitive/isub (primitive/iand (primitive/load s) (jit-not 4095)) (primitive/iand p (jit-not 4095)))
+                  imm (primitive/ishr delta 12)]
               ; adrp carries a signed 21-bit PAGE count: +/-4GB. Taking the ADDRESS of
               ; an undefined symbol (rather than calling it) could land outside that,
               ; and the veneer trick does not apply — a veneer redirects a branch, not
               ; an address computation. Fail loudly; reaching this means the fix is a
               ; GOT-style indirection, not a wider mask.
-              (if (or (icmp-gt imm 1048575) (icmp-lt imm -1048576))
+              (if (or (primitive/icmp-gt imm 1048575) (primitive/icmp-lt imm -1048576))
                   (Err [i64 (slice u8)] "jit: adrp page offset out of +/-4GB range for an in-memory symbol")
-                  (let [immlo (iand imm 3)
-                        immhi (iand (ishr imm 2) 524287)  ; 0x7ffff
-                        keep (iand w (jit-not (ior (ishl 3 29) (ishl 524287 5))))]
-                    (jit-st32! loc (ior keep (ior (ishl immlo 29) (ishl immhi 5))))
+                  (let [immlo (primitive/iand imm 3)
+                        immhi (primitive/iand (primitive/ishr imm 2) 524287)  ; 0x7ffff
+                        keep (primitive/iand w (jit-not (primitive/ior (primitive/ishl 3 29) (primitive/ishl 524287 5))))]
+                    (jit-st32! loc (primitive/ior keep (primitive/ior (primitive/ishl immlo 29) (primitive/ishl immhi 5))))
                     (Ok [i64 (slice u8)] 0))))
-          (icmp-eq rtype (reloc-pageoff12))
+          (primitive/icmp-eq rtype (reloc-pageoff12))
             (let [w (jit-ld32 loc)
-                  imm (iand (load s) 4095)]
-              (jit-st32! loc (ior (iand w (jit-not (ishl 4095 10))) (ishl imm 10)))
+                  imm (primitive/iand (primitive/load s) 4095)]
+              (jit-st32! loc (primitive/ior (primitive/iand w (jit-not (primitive/ishl 4095 10))) (primitive/ishl imm 10)))
               (Ok [i64 (slice u8)] 0))
-          (icmp-eq rtype (reloc-unsigned))
+          (primitive/icmp-eq rtype (reloc-unsigned))
             (do
-              (jit-st64! loc (iadd (load s) (jit-ld64 loc)))
+              (jit-st64! loc (primitive/iadd (primitive/load s) (jit-ld64 loc)))
               (Ok [i64 (slice u8)] 0))
           :else (Err [i64 (slice u8)] "jit: unhandled arm64 relocation type in the in-memory loader"))))
 
 ; ---- the loader ----------------------------------------------------------------
 (defn jit-load [(a (ptr Allocator)) (o (mut MObj))] (-> (Result JitImage (slice u8)))
   (block :jit
-         (let [nsect (al-len [MSect] (load (field o sects)))
-               nsym (al-len [MSym] (load (field o syms)))
-               nrel (al-len [MReloc] (load (field o relocs)))
-               offs (unwrap-ptr [i64] (alloc-slice [i64] a (if (icmp-gt nsect 0) nsect 1)))
-               vidx (unwrap-ptr [i64] (alloc-slice [i64] a (if (icmp-gt nsym 0) nsym 1)))
-               addrs (unwrap-ptr [(ptr i8)] (alloc-slice [(ptr i8)] a (if (icmp-gt nsym 0) nsym 1)))
+         (let [nsect (al-len [MSect] (primitive/load (primitive/field o sects)))
+               nsym (al-len [MSym] (primitive/load (primitive/field o syms)))
+               nrel (al-len [MReloc] (primitive/load (primitive/field o relocs)))
+               offs (unwrap-ptr [i64] (alloc-slice [i64] a (if (primitive/icmp-gt nsect 0) nsect 1)))
+               vidx (unwrap-ptr [i64] (alloc-slice [i64] a (if (primitive/icmp-gt nsym 0) nsym 1)))
+               addrs (unwrap-ptr [(ptr i8)] (alloc-slice [(ptr i8)] a (if (primitive/icmp-gt nsym 0) nsym 1)))
                (mut cur) 0
                (mut nven) 0
                (mut i) 0]
            
            ; nothing placed, nothing veneered yet
-           (loop (if (icmp-ge (load i) nsect)
+           (loop (if (primitive/icmp-ge (primitive/load i) nsect)
                      (break)
-                     (do (store! (index offs (load i)) -1) (store! i (iadd (load i) 1)))))
-           (store! i 0)
-           (loop (if (icmp-ge (load i) nsym)
+                     (do (primitive/store! (primitive/index offs (primitive/load i)) -1) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+           (primitive/store! i 0)
+           (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                      (break)
-                     (do (store! (index vidx (load i)) -1) (store! i (iadd (load i) 1)))))
+                     (do (primitive/store! (primitive/index vidx (primitive/load i)) -1) (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
            
            ; plan a veneer for every undefined symbol that something branches to
-           (store! i 0)
-           (loop (if (icmp-ge (load i) nrel)
+           (primitive/store! i 0)
+           (loop (if (primitive/icmp-ge (primitive/load i) nrel)
                      (break)
                      (do
-                       (let [r (al-at [MReloc] (field o relocs) (load i))
-                             sym (load (field r sym))]
-                         (when (and (icmp-eq (load (field r rtype)) (reloc-branch26))
-                                    (and (icmp-ge sym 0) (icmp-lt sym nsym)))
-                               (let [sy (al-at [MSym] (field o syms) sym)]
-                                 (when (and (icmp-eq (load (field sy sect)) 0)
-                                            (icmp-lt (load (index vidx sym)) 0))
-                                       (store! (index vidx sym) (load nven))
-                                       (store! nven (iadd (load nven) 1))))))
-                       (store! i (iadd (load i) 1)))))
+                       (let [r (al-at [MReloc] (primitive/field o relocs) (primitive/load i))
+                             sym (primitive/load (primitive/field r sym))]
+                         (when (and (primitive/icmp-eq (primitive/load (primitive/field r rtype)) (reloc-branch26))
+                                    (and (primitive/icmp-ge sym 0) (primitive/icmp-lt sym nsym)))
+                               (let [sy (al-at [MSym] (primitive/field o syms) sym)]
+                                 (when (and (primitive/icmp-eq (primitive/load (primitive/field sy sect)) 0)
+                                            (primitive/icmp-lt (primitive/load (primitive/index vidx sym)) 0))
+                                       (primitive/store! (primitive/index vidx sym) (primitive/load nven))
+                                       (primitive/store! nven (primitive/iadd (primitive/load nven) 1))))))
+                       (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
            
            ; pass 1 — __TEXT sections, in order
-           (store! i 0)
-           (loop (if (icmp-ge (load i) nsect)
+           (primitive/store! i 0)
+           (loop (if (primitive/icmp-ge (primitive/load i) nsect)
                      (break)
                      (do
-                       (let [s (al-at [MSect] (field o sects) (load i))]
+                       (let [s (al-at [MSect] (primitive/field o sects) (primitive/load i))]
                          (when (and (jit-loadable? s) (jit-is-text? s))
-                               (store! cur (jit-align-up (load cur) (ishl 1 (load (field s align)))))
-                               (store! (index offs (load i)) (load cur))
-                               (store! cur (iadd (load cur) (al-len [u8] (load (field s buf)))))))
-                       (store! i (iadd (load i) 1)))))
+                               (primitive/store! cur (jit-align-up (primitive/load cur) (primitive/ishl 1 (primitive/load (primitive/field s align)))))
+                               (primitive/store! (primitive/index offs (primitive/load i)) (primitive/load cur))
+                               (primitive/store! cur (primitive/iadd (primitive/load cur) (al-len [u8] (primitive/load (primitive/field s buf)))))))
+                       (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
            
            ; the veneer area sits at the end of text, so it is covered by the same R+X flip
-           (store! cur (jit-align-up (load cur) 4))
-           (let [venbase (load cur)]
-             (store! cur (iadd (load cur) (imul (load nven) (veneer-bytes))))
+           (primitive/store! cur (jit-align-up (primitive/load cur) 4))
+           (let [venbase (primitive/load cur)]
+             (primitive/store! cur (primitive/iadd (primitive/load cur) (primitive/imul (primitive/load nven) (veneer-bytes))))
              
              ; the text/data boundary is a page boundary: mprotect works in whole pages,
              ; and making a data page executable (or a text page writable) defeats W^X.
-             (let [textsz (jit-align-up (load cur) (page-size))]
-               (store! cur textsz)
+             (let [textsz (jit-align-up (primitive/load cur) (page-size))]
+               (primitive/store! cur textsz)
                
                ; pass 2 — everything else that is loadable
-               (store! i 0)
-               (loop (if (icmp-ge (load i) nsect)
+               (primitive/store! i 0)
+               (loop (if (primitive/icmp-ge (primitive/load i) nsect)
                          (break)
                          (do
-                           (let [s (al-at [MSect] (field o sects) (load i))]
+                           (let [s (al-at [MSect] (primitive/field o sects) (primitive/load i))]
                              (when (and (jit-loadable? s) (not (jit-is-text? s)))
-                                   (store! cur (jit-align-up (load cur) (ishl 1 (load (field s align)))))
-                                   (store! (index offs (load i)) (load cur))
-                                   (store! cur (iadd (load cur) (al-len [u8] (load (field s buf)))))))
-                           (store! i (iadd (load i) 1)))))
+                                   (primitive/store! cur (jit-align-up (primitive/load cur) (primitive/ishl 1 (primitive/load (primitive/field s align)))))
+                                   (primitive/store! (primitive/index offs (primitive/load i)) (primitive/load cur))
+                                   (primitive/store! cur (primitive/iadd (primitive/load cur) (al-len [u8] (primitive/load (primitive/field s buf)))))))
+                           (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
                
-               (let [total (jit-align-up (if (icmp-gt (load cur) 0) (load cur) 1) (page-size))
+               (let [total (jit-align-up (if (primitive/icmp-gt (primitive/load cur) 0) (primitive/load cur) 1) (page-size))
                      base
-                       (mmap (cast (ptr i8) 0)
+                       (mmap (primitive/cast (ptr i8) 0)
                              total
-                             (cast i32 (prot-rw))
-                             (cast i32 (map-priv))
-                             (cast i32 -1)
+                             (primitive/cast i32 (prot-rw))
+                             (primitive/cast i32 (map-priv))
+                             (primitive/cast i32 -1)
                              0)]
-                 (when (or (icmp-eq (cast i64 base) 0) (icmp-eq (cast i64 base) -1))
+                 (when (or (primitive/icmp-eq (primitive/cast i64 base) 0) (primitive/icmp-eq (primitive/cast i64 base) -1))
                        (break :jit (Err [JitImage (slice u8)] "jit: mmap of the comptime image failed")))
                  
                  ; copy each placed section in
-                 (store! i 0)
-                 (loop (if (icmp-ge (load i) nsect)
+                 (primitive/store! i 0)
+                 (loop (if (primitive/icmp-ge (primitive/load i) nsect)
                            (break)
                            (do
-                             (let [off (load (index offs (load i)))]
-                               (when (icmp-ge off 0)
-                                     (let [s (al-at [MSect] (field o sects) (load i))
-                                           src (slice-data (al-slice [u8] (load (field s buf))))
-                                           n (al-len [u8] (load (field s buf)))
-                                           dst (cast (ptr u8) (index base off))
+                             (let [off (primitive/load (primitive/index offs (primitive/load i)))]
+                               (when (primitive/icmp-ge off 0)
+                                     (let [s (al-at [MSect] (primitive/field o sects) (primitive/load i))
+                                           src (slice-data (al-slice [u8] (primitive/load (primitive/field s buf))))
+                                           n (al-len [u8] (primitive/load (primitive/field s buf)))
+                                           dst (primitive/cast (ptr u8) (primitive/index base off))
                                            (mut k) 0]
-                                       (loop (if (icmp-ge (load k) n)
+                                       (loop (if (primitive/icmp-ge (primitive/load k) n)
                                                  (break)
                                                  (do
-                                                   (store! (index dst (load k)) (load (index src (load k))))
-                                                   (store! k (iadd (load k) 1))))))))
-                             (store! i (iadd (load i) 1)))))
+                                                   (primitive/store! (primitive/index dst (primitive/load k)) (primitive/load (primitive/index src (primitive/load k))))
+                                                   (primitive/store! k (primitive/iadd (primitive/load k) 1))))))))
+                             (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
                  
                  ; resolve every symbol to a final address
                  (let [(mut syms) (al-new [JitSym] a)]
-                   (store! i 0)
-                   (loop (if (icmp-ge (load i) nsym)
+                   (primitive/store! i 0)
+                   (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                              (break)
                              (do
-                               (let [sy (al-at [MSym] (field o syms) (load i))
-                                     sect (load (field sy sect))]
-                                 (if (icmp-eq sect 0)
+                               (let [sy (al-at [MSym] (primitive/field o syms) (primitive/load i))
+                                     sect (primitive/load (primitive/field sy sect))]
+                                 (if (primitive/icmp-eq sect 0)
                                      ; undefined: it must already be somewhere in this process
-                                     (let [fp (dlsym (jit-rtld-default) (jit-sym-cstr a (load (field sy name))))]
-                                       (when (icmp-eq (cast i64 fp) 0)
+                                     (let [fp (dlsym (jit-rtld-default) (jit-sym-cstr a (primitive/load (primitive/field sy name))))]
+                                       (when (primitive/icmp-eq (primitive/cast i64 fp) 0)
                                              (munmap base total)
                                              (break :jit
                                                     (Err [JitImage (slice u8)]
                                                          (jit-cat a
                                                                   (jit-cat a
                                                                            "jit: undefined symbol '"
-                                                                           (load (field sy name)))
+                                                                           (primitive/load (primitive/field sy name)))
                                                                   "' is not present in the compiler process"))))
-                                       (store! (index addrs (load i)) fp))
-                                     (let [off (load (index offs (isub sect 1)))]
-                                       (when (icmp-lt off 0)
+                                       (primitive/store! (primitive/index addrs (primitive/load i)) fp))
+                                     (let [off (primitive/load (primitive/index offs (primitive/isub sect 1)))]
+                                       (when (primitive/icmp-lt off 0)
                                              (munmap base total)
                                              (break :jit
                                                     (Err [JitImage (slice u8)]
                                                          (jit-cat a
                                                                   (jit-cat a
                                                                            "jit: symbol '"
-                                                                           (load (field sy name)))
+                                                                           (primitive/load (primitive/field sy name)))
                                                                   "' lives in a section that was not loaded"))))
-                                       (let [ad (index base (iadd off (load (field sy off))))]
-                                         (store! (index addrs (load i)) ad)
-                                         (let [js (alloc-stack JitSym)]
-                                           (store! (field js name) (load (field sy name)))
-                                           (store! (field js addr) ad)
-                                           (al-push! [JitSym] (mut syms) (load js)))))))
-                               (store! i (iadd (load i) 1)))))
+                                       (let [ad (primitive/index base (primitive/iadd off (primitive/load (primitive/field sy off))))]
+                                         (primitive/store! (primitive/index addrs (primitive/load i)) ad)
+                                         (let [js (alloc/stack JitSym)]
+                                           (primitive/store! (primitive/field js name) (primitive/load (primitive/field sy name)))
+                                           (primitive/store! (primitive/field js addr) ad)
+                                           (al-push! [JitSym] (mut syms) (primitive/load js)))))))
+                               (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
                    
                    ; emit the veneers now that the far addresses are known
-                   (store! i 0)
-                   (loop (if (icmp-ge (load i) nsym)
+                   (primitive/store! i 0)
+                   (loop (if (primitive/icmp-ge (primitive/load i) nsym)
                              (break)
                              (do
-                               (let [v (load (index vidx (load i)))]
-                                 (when (icmp-ge v 0)
-                                       (jit-emit-veneer! (cast (ptr u8)
-                                                               (index base (iadd venbase (imul v (veneer-bytes)))))
-                                                         (cast i64 (load (index addrs (load i)))))))
-                               (store! i (iadd (load i) 1)))))
+                               (let [v (primitive/load (primitive/index vidx (primitive/load i)))]
+                                 (when (primitive/icmp-ge v 0)
+                                       (jit-emit-veneer! (primitive/cast (ptr u8)
+                                                               (primitive/index base (primitive/iadd venbase (primitive/imul v (veneer-bytes)))))
+                                                         (primitive/cast i64 (primitive/load (primitive/index addrs (primitive/load i)))))))
+                               (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
                    
                    ; apply relocations
-                   (store! i 0)
-                   (loop (if (icmp-ge (load i) nrel)
+                   (primitive/store! i 0)
+                   (loop (if (primitive/icmp-ge (primitive/load i) nrel)
                              (break)
                              (do
-                               (let [r (al-at [MReloc] (field o relocs) (load i))
-                                     rsect (load (field r sect))
-                                     sym (load (field r sym))]
+                               (let [r (al-at [MReloc] (primitive/field o relocs) (primitive/load i))
+                                     rsect (primitive/load (primitive/field r sect))
+                                     sym (primitive/load (primitive/field r sym))]
                                  ; DWARF fixups encode a negative section ordinal in `sym`; those
                                  ; sections are never loaded, so there is nothing to patch.
-                                 (unless (or (icmp-lt sym 0) (icmp-ge sym nsym))
-                                         (let [soff (load (index offs (isub rsect 1)))]
-                                           (unless (icmp-lt soff 0)
-                                                   (let [loc (cast (ptr u8) (index base (iadd soff (load (field r off)))))
-                                                         v (load (index vidx sym))
+                                 (unless (or (primitive/icmp-lt sym 0) (primitive/icmp-ge sym nsym))
+                                         (let [soff (primitive/load (primitive/index offs (primitive/isub rsect 1)))]
+                                           (unless (primitive/icmp-lt soff 0)
+                                                   (let [loc (primitive/cast (ptr u8) (primitive/index base (primitive/iadd soff (primitive/load (primitive/field r off)))))
+                                                         v (primitive/load (primitive/index vidx sym))
                                                          tgt
-                                                           (if (and (icmp-ge v 0)
-                                                                    (icmp-eq (load (field r rtype)) (reloc-branch26)))
-                                                               (index base (iadd venbase (imul v (veneer-bytes))))
-                                                               (load (index addrs sym)))]
-                                                     (match (jit-patch! loc tgt (load (field r rtype)))
+                                                           (if (and (primitive/icmp-ge v 0)
+                                                                    (primitive/icmp-eq (primitive/load (primitive/field r rtype)) (reloc-branch26)))
+                                                               (primitive/index base (primitive/iadd venbase (primitive/imul v (veneer-bytes))))
+                                                               (primitive/load (primitive/index addrs sym)))]
+                                                     (match (jit-patch! loc tgt (primitive/load (primitive/field r rtype)))
                                                        (Err [m]
                                                             (do
                                                               (munmap base total)
                                                               (return-from :jit (Err [JitImage (slice u8)] m))))
                                                        (Ok [_] 0)))))))
-                               (store! i (iadd (load i) 1)))))
+                               (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
                    
                    ; text becomes read-execute; data stays writable
-                   (when (icmp-gt textsz 0)
-                         (when (icmp-ne (cast i64 (mprotect base textsz (cast i32 (prot-rx)))) 0)
+                   (when (primitive/icmp-gt textsz 0)
+                         (when (primitive/icmp-ne (primitive/cast i64 (mprotect base textsz (primitive/cast i32 (prot-rx)))) 0)
                                (munmap base total)
                                (break :jit
                                       (Err [JitImage (slice u8)]
                                            "jit: mprotect of the comptime text pages failed")))
                          (jit-icache-invalidate base textsz))
                    
-                   (let [img (alloc-stack JitImage)]
-                     (store! (field img base) base)
-                     (store! (field img size) total)
-                     (store! (field img syms) (load syms))
-                     (Ok [JitImage (slice u8)] (load img))))))))))
+                   (let [img (alloc/stack JitImage)]
+                     (primitive/store! (primitive/field img base) base)
+                     (primitive/store! (primitive/field img size) total)
+                     (primitive/store! (primitive/field img syms) (primitive/load syms))
+                     (Ok [JitImage (slice u8)] (primitive/load img))))))))))
 
 ; look a symbol up in a loaded image; null when absent. Accepts the C name either
 ; with or without the Mach-O leading underscore.
 (defn jit-lookup [(img (ptr JitImage)) (name (slice u8))] (-> (ptr i8))
-  (let [n (al-len [JitSym] (load (field img syms)))
+  (let [n (al-len [JitSym] (primitive/load (primitive/field img syms)))
         (mut i) 0
-        (mut r) (cast (ptr i8) 0)]
-    (loop (if (icmp-ge (load i) n)
+        (mut r) (primitive/cast (ptr i8) 0)]
+    (loop (if (primitive/icmp-ge (primitive/load i) n)
               (break)
               (do
-                (let [sy (al-at [JitSym] (field img syms) (load i))
-                      nm (load (field sy name))]
+                (let [sy (al-at [JitSym] (primitive/field img syms) (primitive/load i))
+                      nm (primitive/load (primitive/field sy name))]
                   (when (or (str-eq nm name)
-                            (and (and (icmp-gt (slice-len nm) 0)
-                                      (icmp-eq (cast i64 (slice-get nm 0)) \_))
+                            (and (and (primitive/icmp-gt (slice-len nm) 0)
+                                      (primitive/icmp-eq (primitive/cast i64 (slice-get nm 0)) \_))
                                  (str-eq (subslice nm 1 (slice-len nm)) name)))
-                        (store! r (load (field sy addr)))
+                        (primitive/store! r (primitive/load (primitive/field sy addr)))
                         (break)))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+                (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
+    (primitive/load r)))
 
 ; release an image. Only safe once nothing can call into it again.
 (defn jit-free! [(img (ptr JitImage))] (-> i64)
   (do
-    (when (icmp-ne (cast i64 (load (field img base))) 0)
-          (cast i64 (munmap (load (field img base)) (load (field img size)))))
-    (store! (field img base) (cast (ptr i8) 0))
+    (when (primitive/icmp-ne (primitive/cast i64 (primitive/load (primitive/field img base))) 0)
+          (primitive/cast i64 (munmap (primitive/load (primitive/field img base)) (primitive/load (primitive/field img size)))))
+    (primitive/store! (primitive/field img base) (primitive/cast (ptr i8) 0))
     0))

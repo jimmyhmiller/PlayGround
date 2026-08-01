@@ -8,8 +8,18 @@ use crate::bundler::{Bundler, ModuleId};
 pub use diffpack_default_loader::driver_config::EnvironmentConfig as AppConfig;
 pub use diffpack_tanstack::config::ENVIRONMENTS;
 pub use diffpack_web::config::{
-    WebConfig, copy_static_public, derive_web_config, set_web_development_mode, vite_config_string,
+    WebConfig, copy_static_public, derive_web_config, set_web_development_mode,
 };
+
+pub fn derive_vite_web_config(
+    root: &Path,
+) -> Result<diffpack_vite_compat::web_config::ViteWebProfile, String> {
+    diffpack_vite_compat::web_config::derive(root)
+}
+
+pub fn vite_config_string(root: &Path, key: &str) -> Option<String> {
+    diffpack_vite_compat::vite_config::config_string(root, key)
+}
 
 pub fn configure_next_app(root: &Path, environment: &str) -> Result<Option<AppConfig>, String> {
     diffpack_next::next_adapter::configure_app_router(root, environment)

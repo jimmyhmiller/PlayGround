@@ -277,7 +277,7 @@ impl diffpack_web::node_proxy::RouteGate for LazyRoutes {
     }
 }
 
-/// Decrements [`LazyState::in_flight`] when a request handler returns, however it returns.
+/// Decrements the lazy state's in-flight count when a request handler returns.
 pub struct InFlightGuard<'a> {
     lazy: &'a LazyRoutes,
 }

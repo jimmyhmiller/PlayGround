@@ -1,11 +1,13 @@
+(module example.fib)
+(import "primitive.coil" :as primitive)
 ; Recursive fibonacci on the default `c` convention.
 ; `coil src/examples/fib.coil`  =>  55
 
 (defn fib :cc c [(n :i64)] (-> :i64)
-  (if (icmp-le n 1)
+  (if (primitive/icmp-le n 1)
       n
-      (iadd (fib (isub n 1))
-            (fib (isub n 2)))))
+      (primitive/iadd (fib (primitive/isub n 1))
+            (fib (primitive/isub n 2)))))
 
 (defn main [] (-> :i64)
   (fib 10))

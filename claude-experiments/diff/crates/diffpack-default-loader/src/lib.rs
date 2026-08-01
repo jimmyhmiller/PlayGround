@@ -14,35 +14,80 @@ use diffpack_core::{
 };
 
 pub mod asset;
+#[cfg_attr(feature = "legacy-driver-tests", doc(hidden))]
+#[cfg_attr(feature = "legacy-driver-tests", allow(missing_docs))]
+#[cfg(feature = "legacy-driver-tests")]
 pub mod browser_field;
-pub mod css;
-pub mod css_preprocess;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod browser_field;
+mod css;
+mod css_preprocess;
+pub mod define;
 pub mod driver;
 pub mod driver_config;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod dynamic_import_context;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod dynamic_import_context;
+mod engine;
+pub mod env_file;
 pub mod font_file;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod jsx_project_config;
-pub mod less_stylus;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod jsx_project_config;
+mod less_stylus;
 pub mod loader;
 pub mod module;
 pub mod module_policy;
 pub mod output;
 pub mod postcss;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod resolution_diagnostic;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod resolution_diagnostic;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod resolver;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod resolver;
 pub mod resolver_policy;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod runtime;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod runtime;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod runtime_helpers;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod runtime_helpers;
 pub mod sass;
-pub mod sfc;
+mod sfc;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod side_effects;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod side_effects;
 pub mod source_policy;
 pub mod tailwind;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod tailwind_delegate;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod tailwind_delegate;
+#[cfg(feature = "legacy-driver-tests")]
+#[doc(hidden)]
 pub mod tailwind_project;
+#[cfg(not(feature = "legacy-driver-tests"))]
+mod tailwind_project;
 
 pub use asset::ImageImportShape;
 pub use css_preprocess::CssPreprocess;
+pub use engine::{BuildEngine, BuildEngineBuilder};
 
 #[derive(Debug, Clone)]
 pub struct FilesystemProvider {
@@ -90,6 +135,7 @@ impl ModuleProvider for FilesystemProvider {
             language,
             source_map: None,
             watch_files: vec![path],
+            diagnostics: Vec::new(),
         }))
     }
 }

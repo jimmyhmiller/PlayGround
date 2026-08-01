@@ -23,31 +23,50 @@ COMMAND = {
     "full": "emit-ir", "x86": "emit-ir",
 }
 
-IR_SEEDS = """
-src/examples/allocation.coil src/examples/allocators.coil src/examples/args.coil
-src/examples/bitfields.coil src/examples/closure.coil src/examples/explicit-layout.coil
-src/examples/extern.coil src/examples/fib.coil src/examples/generics.coil
-src/examples/inference.coil src/examples/io.coil src/examples/layout.coil
-src/examples/lockfree.coil src/examples/mem.coil src/examples/references.coil
-src/examples/structs.coil src/examples/sums.coil src/examples/threads.coil
-src/examples/vector.coil src/examples/widths.coil src/apps/chip8/objc.coil
-src/stdlib/alloc.coil src/stdlib/arraylist.coil src/stdlib/atomic.coil
-src/stdlib/closure.coil src/stdlib/control.coil src/stdlib/derive.coil
-src/stdlib/dyn.coil src/stdlib/fmt.coil src/stdlib/hashmap.coil src/stdlib/match.coil
-src/stdlib/mem.coil src/stdlib/mmio.coil src/stdlib/print.coil src/stdlib/result.coil
-src/stdlib/slice.coil src/stdlib/thread.coil src/stdlib/try.coil
-""".split()
-
-FULL_EXTRA = """
-src/examples/calc.coil src/examples/json.coil src/examples/hashmap.coil
-src/examples/dyn_write.coil src/examples/simd.coil
-tests/compiler/oracle/features/meta_stage3.coil
-tests/compiler/oracle/features/export_c.coil
-tests/compiler/oracle/features/x86_sysv_abi.coil
-tests/compiler/oracle/features/fs_lib.coil
-src/examples/conventions.coil src/examples/per-arch.coil
-src/examples/shim.coil src/examples/everything.coil
-""".split()
+# Intermediate representations are high-signal only when each snapshot has a reason
+# to exist. Broad examples/apps/stdlib coverage belongs to the runtime and CLI gates;
+# duplicating every program through every compiler stage produced 100+ MB of golden
+# files and made harmless cross-cutting changes obscure real regressions.
+STAGE_INPUTS = {
+    "read": ["tests/compiler/oracle/stages/surface.coil"],
+    "ast": ["tests/compiler/oracle/stages/surface.coil"],
+    "load": [
+        "tests/compiler/oracle/load/fixtures/edge.coil",
+        "tests/compiler/features/scoped_namespace.coil",
+    ],
+    "resolved": [
+        "tests/compiler/oracle/resolved/fixtures/app.coil",
+        "tests/compiler/oracle/resolved/fixtures/helper2.coil",
+        "tests/compiler/features/scoped_namespace.coil",
+    ],
+    "checked": ["tests/compiler/oracle/stages/surface.coil"],
+    "expand": [
+        "tests/compiler/oracle/features/meta_stage3.coil",
+        "src/examples/metaprogramming/condlint.coil",
+    ],
+    "mono": [
+        "src/examples/generics.coil",
+        "src/examples/sums.coil",
+        "src/examples/dyn_write.coil",
+    ],
+    "ir": [
+        "tests/compiler/oracle/ir/fixtures/call.coil",
+        "tests/compiler/oracle/ir/fixtures/iadd.coil",
+        "tests/compiler/oracle/ir/fixtures/ret0.coil",
+        "tests/compiler/oracle/features/export_c.coil",
+    ],
+    # Shared macOS/Linux IR baselines: one program per materially different path.
+    "full": [
+        "src/examples/conventions.coil",
+        "src/examples/generics.coil",
+        "src/examples/dyn_write.coil",
+        "src/examples/per-arch.coil",
+        "tests/compiler/oracle/features/export_c.coil",
+        "tests/compiler/oracle/features/meta_stage3.coil",
+        "tests/compiler/oracle/features/fs_lib.coil",
+        "tests/compiler/oracle/ir/fixtures/call.coil",
+    ],
+}
 
 
 def rel(path: Path) -> str:
@@ -104,72 +123,6 @@ def snapshot_simple(compiler: Path, stage: str, inputs: list[str], *, command: s
     return accepted
 
 
-def snapshot_expanded(compiler: Path, stage: str) -> list[str]:
-    base = ORACLE / stage
-    corpus_dir = base / "corpus"
-    reference = base / "reference"
-    exclusions = base / "EXCLUDED.txt"
-    reset(corpus_dir)
-    reset(reference)
-    accepted: list[str] = []
-    excluded: list[str] = []
-    for source in real_sources():
-        expanded_name = mangle(source)
-        expanded = corpus_dir / expanded_name
-        result = run(compiler, "expand", source)
-        if result.returncode:
-            first = result.stderr.decode(errors="replace").splitlines()[:1]
-            excluded.append(f"{source} : {first[0] if first else 'expand failed'}")
-            continue
-        expanded.write_bytes(result.stdout)
-        expanded_rel = rel(expanded)
-        dumped = run(compiler, COMMAND[stage], expanded_rel)
-        if dumped.returncode:
-            sys.stderr.buffer.write(dumped.stderr)
-            raise SystemExit(f"snapshot {stage} failed: {expanded_rel}")
-        (reference / f"{mangle(expanded_rel)}.dump").write_bytes(dumped.stdout)
-        accepted.append(expanded_rel)
-    fixture_dir = base / ("negative" if stage == "ast" else "fixtures")
-    for fixture in sorted(fixture_dir.glob("*.coil")):
-        source = rel(fixture)
-        dumped = run(compiler, COMMAND[stage], source)
-        if dumped.returncode:
-            sys.stderr.buffer.write(dumped.stderr)
-            raise SystemExit(f"snapshot {stage} failed: {source}")
-        (reference / f"{mangle(source)}.dump").write_bytes(dumped.stdout)
-        accepted.append(source)
-    write_list(base / "corpus.txt", accepted)
-    exclusions.write_text("".join(f"{item}\n" for item in excluded))
-    return accepted
-
-
-def snapshot_filtering(compiler: Path, stage: str) -> list[str]:
-    base = ORACLE / stage
-    reference = base / "reference"
-    reset(reference)
-    accepted: list[str] = []
-    excluded: list[str] = []
-    inputs = real_sources() + [rel(path) for path in sorted((base / "fixtures").glob("*.coil"))]
-    for source in inputs:
-        result = run(compiler, COMMAND[stage], source)
-        if result.returncode:
-            first = result.stderr.decode(errors="replace").splitlines()[:1]
-            excluded.append(f"{source} : {first[0] if first else 'compiler failed'}")
-            continue
-        (reference / f"{mangle(source)}.dump").write_bytes(result.stdout)
-        accepted.append(source)
-    write_list(base / "corpus.txt", accepted)
-    (base / "EXCLUDED.txt").write_text("".join(f"{item}\n" for item in excluded))
-    return accepted
-
-
-def snapshot_reusing(compiler: Path, stage: str, prior: str) -> list[str]:
-    base = ORACLE / stage
-    inputs = read_list(ORACLE / prior / "corpus.txt")
-    inputs += [rel(path) for path in sorted((base / "fixtures").glob("*.coil"))]
-    return snapshot_simple(compiler, stage, inputs)
-
-
 def snapshot_diag(compiler: Path) -> int:
     base = ORACLE / "diag"
     reference = base / "reference"
@@ -206,24 +159,19 @@ def snapshot(compiler: Path, stage: str) -> int:
     if stage == "diag":
         return snapshot_diag(compiler)
     if stage == "read":
-        inputs = real_sources() + [rel(path) for path in sorted((ORACLE / "negative").glob("*.coil"))]
+        inputs = STAGE_INPUTS[stage] + [rel(path) for path in sorted((ORACLE / "negative").glob("*.coil"))]
         accepted = snapshot_simple(compiler, stage, inputs)
-    elif stage in ("ast", "resolved"):
-        accepted = snapshot_expanded(compiler, stage)
-    elif stage in ("load", "expand"):
-        accepted = snapshot_filtering(compiler, stage)
-    elif stage == "checked":
-        accepted = snapshot_reusing(compiler, stage, "resolved")
-    elif stage == "mono":
-        accepted = snapshot_reusing(compiler, stage, "checked")
-    elif stage == "ir":
-        inputs = [rel(path) for path in sorted((ORACLE / "ir/fixtures").glob("*.coil"))] + IR_SEEDS
-        accepted = snapshot_simple(compiler, stage, inputs, allow_fail=True)
+    elif stage == "ast":
+        inputs = STAGE_INPUTS[stage] + [rel(path) for path in sorted((ORACLE / "ast/negative").glob("*.coil"))]
+        accepted = snapshot_simple(compiler, stage, inputs)
+    elif stage in ("load", "resolved", "checked", "expand", "mono", "ir"):
+        inputs = list(STAGE_INPUTS[stage])
+        if stage == "checked":
+            inputs += [rel(path) for path in sorted((ORACLE / "checked/fixtures").glob("*.coil"))]
+        accepted = snapshot_simple(compiler, stage, inputs)
     elif stage == "full":
-        inputs = [rel(path) for path in sorted((ORACLE / "ir/fixtures").glob("*.coil"))]
-        inputs += [rel(path) for path in sorted((ROOT / "src/stdlib").glob("*.coil"))]
-        inputs += IR_SEEDS[:21] + FULL_EXTRA
-        accepted = snapshot_simple(compiler, stage, inputs, command=os.environ.get("COIL_IR_CMD", "emit-ir"), allow_fail=True)
+        accepted = snapshot_simple(compiler, stage, STAGE_INPUTS[stage],
+                                   command=os.environ.get("COIL_IR_CMD", "emit-ir"))
     elif stage == "x86":
         inputs = [rel(path) for path in sorted((ORACLE / "features").glob("*x86*.coil"))]
         accepted = snapshot_simple(compiler, stage, inputs, extra=("--target", TARGET_X86))

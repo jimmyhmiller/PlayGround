@@ -6,6 +6,7 @@ pub mod dev_server;
 pub mod env_transform;
 pub mod manifest;
 pub mod policies;
+pub mod profile;
 pub mod route_split;
 pub mod route_tree;
 pub mod runtime;

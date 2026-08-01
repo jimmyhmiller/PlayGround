@@ -910,10 +910,10 @@ fn resolve_in_node_modules(start: &Path, relative: &str) -> Option<PathBuf> {
 ///   and the plugin's boundary helpers — handled by [`refresh_runtime_source`].
 /// * **@vitejs/plugin-react, split** (plugin-react >= 4.3): the core `react-refresh`
 ///   CJS runtime plus the plugin's `dist/refreshUtils.js` — composed by
-///   [`composed_cjs_runtime`].
+///   `composed_cjs_runtime`.
 /// * **Next's own**: `next/dist/compiled/react-refresh` plus
 ///   `next/dist/compiled/@next/react-refresh-utils` — composed and adapted by
-///   [`composed_next_runtime`]. A Next app has Fast Refresh natively and does not
+///   `composed_next_runtime`. A Next app has Fast Refresh natively and does not
 ///   depend on @vitejs/plugin-react (not one app in the pinned Next corpus does), so
 ///   without this `diffpack dev` could not run a Next project at all.
 ///

@@ -1,4 +1,5 @@
 (module app)
+(import "primitive.coil" :as primitive)
 ; Demo for memgui.coil. Build with the inspector and run:
 ;   LIBRARY_PATH=/opt/homebrew/lib \
 ;     ../.build/bin/coil build memgui_demo.coil -o /tmp/memgui_demo --use memgui.coil -lraylib
@@ -13,9 +14,9 @@
         (mut xs) (al-new [i64] a)
         (mut hm) (hm-new-scalar [i64 i64] a)
         (mut i) 0]
-    (loop (if (icmp-ge (load i) 2000) (break)
-      (do (al-push! [i64] (mut xs) (load i))
-          (hm-put! [i64 i64] (mut hm) (load i) (imul (load i) 2))
-          (store! i (iadd (load i) 1)))))
+    (loop (if (primitive/icmp-ge (primitive/load i) 2000) (break)
+      (do (al-push! [i64] (mut xs) (primitive/load i))
+          (hm-put! [i64 i64] (mut hm) (primitive/load i) (primitive/imul (primitive/load i) 2))
+          (primitive/store! i (primitive/iadd (primitive/load i) 1)))))
     (al-free! [i64] (mut xs))            ; freed
     (al-len [i64] xs)))                  ; hm left live -> shows as outstanding

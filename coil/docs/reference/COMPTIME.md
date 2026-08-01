@@ -7,7 +7,7 @@ This is "the whole language available at compile time": runtime code becomes usa
 at compile time by *running* it.
 
 ```lisp
-(defn fact [(n i64)] (-> i64) (if (icmp-le n 0) 1 (imul n (fact (isub n 1)))))
+(defn fact [(n i64)] (-> i64) (if (primitive/icmp-le n 0) 1 (primitive/imul n (fact (primitive/isub n 1)))))
 (defn main [] (-> i64) (comptime (fact 5)))     ; main compiles to `ret i64 120`
 ```
 
@@ -52,7 +52,7 @@ is the same impl the runtime uses — literally the same `=`.
 **Aggregate results:** a `comptime` form may return any aggregate — a
 **struct** (incl. nested), a **sum**, or an **array**. The value-builder
 synthesizes the elaborated expression that reconstructs it: a struct/array becomes
-`(let [t (alloc-stack T)] (store! (field/index t …) v)… (load t))` (an immutable
+`(let [t (alloc/stack T)] (primitive/store! (field/index t …) v)… (primitive/load t))` (an immutable
 `t` holding a real `(ptr T)`); a sum becomes a variant call. The classic use — a
 **compile-time lookup table** — works: build an array with a loop in `comptime`,
 index it at runtime.
@@ -81,7 +81,7 @@ pointer to it. So a compile-time lookup table is real static data:
 
 ```lisp
 (const SQUARES (squares))         ; => @const.SQUARES = private constant [8 x i64] [0,1,4,9,…]
-(load (index SQUARES 5))          ; reads 25 straight from the global, at runtime
+(primitive/load (primitive/index SQUARES 5))          ; reads 25 straight from the global, at runtime
 ```
 
 ⚠ A **sum-typed `const`** is not supported: it does not fall back to rebuilding at use
@@ -94,31 +94,31 @@ Compile-time code can introspect a type's structure — so reflection isn't
 macro-only. These forms take a *type* and fold to a literal (like `sizeof`), usable
 in `comptime`/`const`/`static-assert`/ordinary code:
 
-- `(field-count T)` → `i64` (struct fields)
-- `(variant-count T)` → `i64` (sum variants)
-- `(struct? T)` / `(sum? T)` / `(int? T)` / `(float? T)` / `(ptr? T)` / `(array? T)` → `bool`
+- `(primitive/field-count T)` → `i64` (struct fields)
+- `(primitive/variant-count T)` → `i64` (sum variants)
+- `(primitive/struct? T)` / `(primitive/sum? T)` / `(primitive/int? T)` / `(primitive/float? T)` / `(primitive/ptr? T)` / `(primitive/array? T)` → `bool`
 
 Per-field reflection (the index is a compile-time value — a literal or a
 `comptime`/loop variable):
 
-- `(field-name T i)` → the i-th field's name, as a comptime **string** (`(slice u8)`)
-- `(field-type-kind T i)` → its type's kind tag (`i64`: 0 int, 1 float, 2 bool,
+- `(primitive/field-name T i)` → the i-th field's name, as a comptime **string** (`(slice u8)`)
+- `(primitive/field-type-kind T i)` → its type's kind tag (`i64`: 0 int, 1 float, 2 bool,
   3 struct, 4 sum, 5 ptr, 6 array, 7 slice, 8 other)
 
 ```lisp
-(const NF (field-count Point))                 ; a compile-time constant
-(static-assert (struct? Point) "must be a struct")
-(comptime (* (field-count Point) (variant-count Shape)))
+(const NF (primitive/field-count Point))                 ; a compile-time constant
+(static-assert (primitive/struct? Point) "must be a struct")
+(comptime (* (primitive/field-count Point) (primitive/variant-count Shape)))
 
 ; THE PAYOFF — a runtime field-metadata table, generated at compile time:
 (defstruct FieldDesc [(name (slice u8)) (kind i64)])
 (const FIELDS
-  (comptime (let [(mut t) (zeroed (array FieldDesc 3)) (mut i) 0]
-    (loop (if (>= (load i) (field-count Mix)) (break)
-      (do (store! (field (index (mut t) (load i)) name) (field-name Mix (load i)))
-          (store! (field (index (mut t) (load i)) kind) (field-type-kind Mix (load i)))
-          (store! i (+ (load i) 1)))))
-    (load t))))
+  (comptime (let [(mut t) (primitive/zeroed (array FieldDesc 3)) (mut i) 0]
+    (loop (if (>= (primitive/load i) (primitive/field-count Mix)) (break)
+      (do (primitive/store! (primitive/field (primitive/index (mut t) (primitive/load i)) name) (primitive/field-name Mix (primitive/load i)))
+          (primitive/store! (primitive/field (primitive/index (mut t) (primitive/load i)) kind) (primitive/field-type-kind Mix (primitive/load i)))
+          (primitive/store! i (+ (primitive/load i) 1)))))
+    (primitive/load t))))
 ; => @const.FIELDS = constant [3 x %FieldDesc] [ {{"a",1},0}, {{"b",1},1}, … ]
 ```
 

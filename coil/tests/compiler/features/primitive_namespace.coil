@@ -1,0 +1,8 @@
+(module primitive-namespace)
+(import "../../../src/stdlib/primitive.coil" :as primitive)
+(import "../../../src/stdlib/alloc.coil" :as alloc)
+
+(defn main [] (-> i64)
+  (let [p (alloc/stack i64)]
+    (primitive/store! p 42)
+    (primitive/load p)))

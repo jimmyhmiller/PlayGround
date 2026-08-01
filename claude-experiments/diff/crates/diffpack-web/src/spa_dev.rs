@@ -26,23 +26,10 @@ pub mod spa {
         options: &DevOptions,
         project_root: &Path,
         index_html: &Path,
+        mut config: crate::config::WebConfig,
+        profile_name: &str,
     ) -> Result<(), String> {
         let output_root = project_root.join(".diffpack-output");
-        // Vite conventions (aliases, base, import.meta.env, sass additionalData)
-        // apply when the project has a Vite config; otherwise it is a bare web
-        // build. Either way dev mode selects the development dependency builds and
-        // turns on HMR instrumentation.
-        let vite = [
-            "vite.config.ts",
-            "vite.config.js",
-            "vite.config.mjs",
-            "vite.config.mts",
-            "vite.config.cjs",
-            "vite.config.cts",
-        ]
-        .iter()
-        .any(|name| project_root.join(name).is_file());
-        let mut config = crate::config::derive_web_config(project_root, vite)?;
         crate::config::set_web_development_mode(&mut config);
         let base = config.base.clone();
 
@@ -88,10 +75,7 @@ pub mod spa {
             ..EmitOptions::default()
         };
 
-        println!(
-            "[dev] building SPA client{}...",
-            if vite { " (vite mode)" } else { "" }
-        );
+        println!("[dev] building SPA client{}...", profile_name);
         let mut client = discover_spa_client(&entry, &config, emit_options)?;
 
         let (served, _) = emit_spa(
@@ -105,7 +89,7 @@ pub mod spa {
         let served_html = Arc::new(Mutex::new(served));
 
         let refresh_runtime = Arc::new(crate::hmr::find_refresh_runtime(project_root)?);
-        // `server.proxy` rules (from the Vite config), shared with each connection.
+        // Resolved proxy rules, shared with each connection.
         let proxy = Arc::new(config.proxy.clone());
         if !proxy.is_empty() {
             println!(
@@ -149,7 +133,7 @@ pub mod spa {
         );
 
         // Watch `src` recursively for module edits, and the project root
-        // non-recursively so `index.html` and `vite.config.*` edits are seen
+        // non-recursively so `index.html` and resolved configuration edits are seen
         // (without recursing into node_modules). When there is no `src` dir the
         // recursive root already covers the project root.
         let src_watch = project_root.join(src_dir(project_root));
@@ -306,15 +290,19 @@ pub mod spa {
             // re-derivation is not implemented, so warn LOUDLY (never silently) and
             // keep serving the startup config rather than mis-treating the config as
             // a source module or killing the server.
-            if paths.iter().any(|path| is_config_file(path)) {
+            let profile_config_changed = |path: &Path| {
+                let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                is_config_file(&path) || config.configuration_files.contains(&path)
+            };
+            if paths.iter().any(|path| profile_config_changed(path)) {
                 println!(
-                    "[dev] WARNING: a config file changed (vite.config.* / package.json / tsconfig). Live config re-derivation (aliases/defines/base) is not implemented — the dev server is STILL USING THE CONFIG FROM STARTUP. Restart `diffpack dev` to apply it."
+                    "[dev] WARNING: a build configuration file changed. Live profile re-derivation is not implemented — the dev server is STILL USING THE CONFIG FROM STARTUP. Restart `diffpack dev` to apply it."
                 );
             }
 
             let changed = paths
                 .into_iter()
-                .filter(|path| is_module_path(path) && !is_config_file(path))
+                .filter(|path| is_module_path(path) && !profile_config_changed(path))
                 .collect::<BTreeSet<_>>();
             if changed.is_empty() {
                 continue;
