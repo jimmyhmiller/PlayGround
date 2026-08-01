@@ -3624,6 +3624,22 @@ fn configure_inner(
     if target == Target::Client {
         aliases.extend(next_browser_polyfill_aliases(&root));
     }
+    if dev {
+        // Next's development websocket module names Turbopack's private HMR
+        // client. Non-Turbopack compilers intentionally map that import to
+        // Next's own no-op adapter in every compiler layer (see
+        // `create-compiler-aliases.ts`). Diffpack carries its update transport
+        // separately, so reproduce that contract instead of trying to host
+        // Turbopack's runtime.
+        if let Ok(next_root) = crate::rsc_runtime_resolve::installed_package_root(&root, "next") {
+            let noop_hmr = next_root.join("dist/client/dev/noop-turbopack-hmr.js");
+            aliases.push((
+                "@vercel/turbopack-ecmascript-runtime/browser/dev/hmr-client/hmr-client.ts"
+                    .to_string(),
+                noop_hmr.to_string_lossy().into_owned(),
+            ));
+        }
+    }
 
     // React's dev/prod dispatch define. Production bundles the production React
     // (small, no dev warnings); DEV bundles the development React whose renderer

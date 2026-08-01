@@ -55,3 +55,16 @@ test('development project exposes a disposable entrypoint subscription', async (
   assert.equal(typeof binding.projectEntrypointsSubscribe, 'function')
   assert.equal(typeof binding.rootTaskDispose, 'function')
 })
+
+test('development republishes stable endpoint handles', async () => {
+  const project = await binding.__diffpack.projectNew(
+    { rootPath: '/workspace', projectPath: 'app', distDir: '.next/dev', dev: true },
+    {},
+    {}
+  )
+  const route = { pathname: '/', original_name: '/page', kind: 'app-page' }
+  const first = binding.__diffpack.entrypointsFor([route], '/workspace/app/.next/dev', project)
+  const second = binding.__diffpack.entrypointsFor([{ ...route }], '/workspace/app/.next/dev', project)
+  assert.equal(first.routes[0].pages[0].htmlEndpoint, second.routes[0].pages[0].htmlEndpoint)
+  assert.equal(first.routes[0].pages[0].rscHmrEndpoint, second.routes[0].pages[0].rscHmrEndpoint)
+})

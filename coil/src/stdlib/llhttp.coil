@@ -7,7 +7,7 @@
 
 (export Parser Settings
         HTTP_BOTH HTTP_REQUEST HTTP_RESPONSE
-        HPE_OK HPE_INVALID_EOF_STATE HPE_PAUSED HPE_PAUSED_UPGRADE
+        HPE_OK HPE_INVALID_EOF_STATE HPE_PAUSED HPE_PAUSED_UPGRADE HPE_USER
         init reset settings-init execute finish
         pause resume resume-after-upgrade
         get-type get-http-major get-http-minor get-method get-status-code get-upgrade
@@ -29,6 +29,7 @@
 (const HPE_INVALID_EOF_STATE 14)
 (const HPE_PAUSED 21)
 (const HPE_PAUSED_UPGRADE 22)
+(const HPE_USER 24)
 
 (const FINISH_SAFE 0)
 (const FINISH_SAFE_WITH_CB 1)
@@ -77,13 +78,12 @@
   (generated/internal-execute parser (slice/slice-data input) (slice/slice-len input)))
 
 (defn finish [(parser (ptr Parser))] (-> i64)
-  (if (primitive/icmp-ne (types/field-load parser 0) 0)
-      0
+  ; Match llhttp_finish(): an existing parser error makes EOF a no-op.
+  (if (primitive/icmp-ne (primitive/load (primitive/field parser error)) HPE_OK)
+      HPE_OK
       (case (types/field-load parser 8)
         FINISH_SAFE_WITH_CB
-          (let [settings (primitive/cast (ptr Settings)
-                           (primitive/load (primitive/field parser settings)))
-                err (types/invoke-external parser 12
+          (let [err (types/invoke-external parser 12
                       (primitive/cast (ptr u8) 0) (primitive/cast (ptr u8) 0) 0)]
             (if (primitive/icmp-ne err HPE_OK) err HPE_OK))
         FINISH_SAFE HPE_OK

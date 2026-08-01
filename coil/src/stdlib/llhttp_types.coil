@@ -3,7 +3,7 @@
 (import "primitive.coil" :as primitive)
 
 (export Parser Settings STEP_INPUT STEP_ERROR
-        parser-zero! ascii-lower fail!
+        parser-zero! ascii-lower fail! fail-code!
         field-load field-store! field-and! field-or! field-mul-add!
         invoke-external invoke-external-span
         message-needs-eof? should-keep-alive?)
@@ -101,6 +101,13 @@
   (primitive/store! (primitive/field s current) resume)
   code)
 
+; Record an error without replacing a reason supplied by a callback.
+(defn fail-code! [(s (ptr Parser)) (code i64) (pos (ptr u8)) (resume i64)] (-> i64)
+  (primitive/store! (primitive/field s error) code)
+  (primitive/store! (primitive/field s error-pos) pos)
+  (primitive/store! (primitive/field s current) resume)
+  code)
+
 ; Field ids are the property order emitted by llparse's frontend.
 (defn field-load [(s (ptr Parser)) (id i64)] (-> i64)
   (case id
@@ -156,21 +163,39 @@
 (defn field-mul-add! [(s (ptr Parser)) (id i64) (base i64) (max i64)
                       (signed bool) (addend i64)] (-> i64)
   (let [old (field-load s id)]
-    (if (or (primitive/icmp-lt old 0)
-            (primitive/icmp-gt old (primitive/idiv 0x7fffffffffffffff base)))
-        1
-        (let [multiplied (primitive/imul old base)]
-          (if (or (and (primitive/icmp-ge addend 0)
-                       (primitive/icmp-gt multiplied
-                         (primitive/isub 0x7fffffffffffffff addend)))
-                  (and (primitive/icmp-lt addend 0)
-                       (primitive/icmp-lt multiplied
-                         (primitive/isub -0x7fffffffffffffff addend))))
+    (if signed
+        (if (or (primitive/icmp-gt old (primitive/idiv 0x7fffffffffffffff base))
+                (primitive/icmp-lt old (primitive/idiv -0x8000000000000000 base)))
+            1
+            (let [multiplied (primitive/imul old base)]
+              (if (or (and (primitive/icmp-ge addend 0)
+                           (primitive/icmp-gt multiplied
+                             (primitive/isub 0x7fffffffffffffff addend)))
+                      (and (primitive/icmp-lt addend 0)
+                           (primitive/icmp-lt multiplied
+                             (primitive/isub -0x8000000000000000 addend))))
+                  1
+                  (let [result (primitive/iadd multiplied addend)]
+                    (if (and (primitive/icmp-ge max 0) (primitive/icmp-gt result max))
+                        1
+                        (do (field-store! s id result) 0))))))
+        ; llparse properties are unsigned. Preserve all 64 content-length bits;
+        ; narrower properties use their declared storage width.
+        (let [limit (case id 10 65535 -1)
+              old-u (primitive/cast u64 old)
+              limit-u (primitive/cast u64 limit)
+              base-u (primitive/cast u64 base)
+              add-u (primitive/cast u64 addend)]
+          (if (primitive/icmp-gt old-u (primitive/udiv limit-u base-u))
               1
-              (let [result (primitive/iadd multiplied addend)]
-                (if (and (primitive/icmp-ge max 0) (primitive/icmp-gt result max))
+              (let [multiplied (primitive/imul old-u base-u)]
+                (if (primitive/icmp-gt multiplied (primitive/isub limit-u add-u))
                     1
-                    (do (field-store! s id result) 0))))))))
+                    (let [result (primitive/iadd multiplied add-u)]
+                      (if (and (primitive/icmp-ge max 0)
+                               (primitive/icmp-gt result (primitive/cast u64 max)))
+                          1
+                          (do (field-store! s id (primitive/cast i64 result)) 0))))))))))
 
 (defn settings-of [(s (ptr Parser))] (-> (ptr Settings))
   (primitive/cast (ptr Settings) (primitive/load (primitive/field s settings))))
@@ -188,9 +213,26 @@
       (let [fp (primitive/cast (fnptr c [(ptr Parser) (ptr u8) i64] i64) raw)
             err (primitive/call-ptr fp s start (primitive/isub (primitive/cast i64 endp)
                                                                (primitive/cast i64 start)))]
-        (if (primitive/icmp-eq err -1)
-            (do (primitive/store! (primitive/field s reason) "Span callback error") TY_HPE_USER)
-            err))))
+        err)))
+
+(defn span-result [(s (ptr Parser)) (id i64) (err i64)] (-> i64)
+  (if (primitive/icmp-ne err -1)
+      err
+      (do
+        (primitive/store! (primitive/field s reason)
+          (case id
+            1 "Span callback error in on_method"
+            3 "Span callback error in on_url"
+            5 "Span callback error in on_header_field"
+            7 "Span callback error in on_header_value"
+            15 "Span callback error in on_body"
+            17 "Span callback error in on_chunk_extension_name"
+            19 "Span callback error in on_chunk_extension_value"
+            21 "Span callback error in on_protocol"
+            23 "Span callback error in on_version"
+            26 "Span callback error in on_status"
+            "Span callback error"))
+        TY_HPE_USER)))
 
 (defn has-flag? [(s (ptr Parser)) (flag i64)] (-> bool)
   (primitive/icmp-ne (primitive/iand (primitive/load (primitive/field s flags)) flag) 0))
@@ -258,38 +300,45 @@
                        (matched i64)] (-> i64)
   (let [settings (settings-of s)]
     (case id
-      0 (call-simple s (primitive/load (primitive/field settings on-message-begin)))
-      2 (call-simple s (primitive/load (primitive/field settings on-method-complete)))
-      4 (call-simple s (primitive/load (primitive/field settings on-url-complete)))
-      6 (call-simple s (primitive/load (primitive/field settings on-header-field-complete)))
-      8 (call-simple s (primitive/load (primitive/field settings on-header-value-complete)))
+      ; Handwritten protocol hooks do not consult the callback table.
       9 (before-headers-complete! s)
-      10 (call-simple s (primitive/load (primitive/field settings on-headers-complete)))
       11 (after-headers-complete s)
-      12 (call-simple s (primitive/load (primitive/field settings on-message-complete)))
       13 (after-message-complete! s)
-      14 (call-simple s (primitive/load (primitive/field settings on-chunk-header)))
-      16 (call-simple s (primitive/load (primitive/field settings on-chunk-complete)))
-      18 (call-simple s (primitive/load (primitive/field settings on-chunk-extension-name-complete)))
-      20 (call-simple s (primitive/load (primitive/field settings on-chunk-extension-value-complete)))
-      22 (call-simple s (primitive/load (primitive/field settings on-protocol-complete)))
-      24 (call-simple s (primitive/load (primitive/field settings on-version-complete)))
-      25 (call-simple s (primitive/load (primitive/field settings on-status-complete)))
-      27 (call-simple s (primitive/load (primitive/field settings on-reset)))
-      0)))
+      ; Upstream permits llhttp_init(..., NULL) and skips every callback.
+      (if (primitive/icmp-eq (primitive/cast i64 settings) 0)
+          0
+          (case id
+            0 (call-simple s (primitive/load (primitive/field settings on-message-begin)))
+            2 (call-simple s (primitive/load (primitive/field settings on-method-complete)))
+            4 (call-simple s (primitive/load (primitive/field settings on-url-complete)))
+            6 (call-simple s (primitive/load (primitive/field settings on-header-field-complete)))
+            8 (call-simple s (primitive/load (primitive/field settings on-header-value-complete)))
+            10 (call-simple s (primitive/load (primitive/field settings on-headers-complete)))
+            12 (call-simple s (primitive/load (primitive/field settings on-message-complete)))
+            14 (call-simple s (primitive/load (primitive/field settings on-chunk-header)))
+            16 (call-simple s (primitive/load (primitive/field settings on-chunk-complete)))
+            18 (call-simple s (primitive/load (primitive/field settings on-chunk-extension-name-complete)))
+            20 (call-simple s (primitive/load (primitive/field settings on-chunk-extension-value-complete)))
+            22 (call-simple s (primitive/load (primitive/field settings on-protocol-complete)))
+            24 (call-simple s (primitive/load (primitive/field settings on-version-complete)))
+            25 (call-simple s (primitive/load (primitive/field settings on-status-complete)))
+            27 (call-simple s (primitive/load (primitive/field settings on-reset)))
+            0)))))
 
 (defn invoke-external-span [(s (ptr Parser)) (id i64)
                             (start (ptr u8)) (endp (ptr u8))] (-> i64)
   (let [settings (settings-of s)]
-    (case id
-      1 (call-span s (primitive/load (primitive/field settings on-method)) start endp)
-      3 (call-span s (primitive/load (primitive/field settings on-url)) start endp)
-      5 (call-span s (primitive/load (primitive/field settings on-header-field)) start endp)
-      7 (call-span s (primitive/load (primitive/field settings on-header-value)) start endp)
-      15 (call-span s (primitive/load (primitive/field settings on-body)) start endp)
-      17 (call-span s (primitive/load (primitive/field settings on-chunk-extension-name)) start endp)
-      19 (call-span s (primitive/load (primitive/field settings on-chunk-extension-value)) start endp)
-      21 (call-span s (primitive/load (primitive/field settings on-protocol)) start endp)
-      23 (call-span s (primitive/load (primitive/field settings on-version)) start endp)
-      26 (call-span s (primitive/load (primitive/field settings on-status)) start endp)
-      0)))
+    (if (primitive/icmp-eq (primitive/cast i64 settings) 0)
+        0
+        (case id
+          1 (span-result s id (call-span s (primitive/load (primitive/field settings on-method)) start endp))
+          3 (span-result s id (call-span s (primitive/load (primitive/field settings on-url)) start endp))
+          5 (span-result s id (call-span s (primitive/load (primitive/field settings on-header-field)) start endp))
+          7 (span-result s id (call-span s (primitive/load (primitive/field settings on-header-value)) start endp))
+          15 (span-result s id (call-span s (primitive/load (primitive/field settings on-body)) start endp))
+          17 (span-result s id (call-span s (primitive/load (primitive/field settings on-chunk-extension-name)) start endp))
+          19 (span-result s id (call-span s (primitive/load (primitive/field settings on-chunk-extension-value)) start endp))
+          21 (span-result s id (call-span s (primitive/load (primitive/field settings on-protocol)) start endp))
+          23 (span-result s id (call-span s (primitive/load (primitive/field settings on-version)) start endp))
+          26 (span-result s id (call-span s (primitive/load (primitive/field settings on-status)) start endp))
+          0))))

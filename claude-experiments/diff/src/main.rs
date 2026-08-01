@@ -281,6 +281,9 @@ fn run() -> Result<(), String> {
             let references_only = remaining
                 .iter()
                 .any(|value| value.to_str() == Some("--references-only"));
+            let development = remaining
+                .iter()
+                .any(|value| value.to_str() == Some("--development"));
 
             // `static` — the SSG prerender phase (Full SSG). It builds NO graph: it
             // reuses the three already-emitted bundles (client / react-server render /
@@ -334,10 +337,16 @@ fn run() -> Result<(), String> {
             // and returns a ready config; a non-Next project returns `None` and falls
             // back to the TanStack `derive_config` path unchanged.
             let configure_stage = diffpack_core::build_profile::stage("adapter/configure");
-            let (mut config, is_next_app) = match diffpack::config::configure_next_app(
-                Path::new(&project_root),
-                &environment,
-            )? {
+            let next_config = if development {
+                diffpack::config::configure_next_app_dev(
+                    Path::new(&project_root),
+                    &environment,
+                    &diffpack_next::next_adapter::RouteScope::All,
+                )?
+            } else {
+                diffpack::config::configure_next_app(Path::new(&project_root), &environment)?
+            };
+            let (mut config, is_next_app) = match next_config {
                 Some(next_config) => {
                     println!(
                         "next app-router adapter: scaffolded .diffpack-next/ for environment={environment}"
@@ -426,10 +435,18 @@ fn run() -> Result<(), String> {
                     println!(
                         "async island set changed; regenerating the entries and rediscovering"
                     );
-                    diffpack::config::configure_next_app(
-                        Path::new(&project_root),
-                        &config.environment,
-                    )?;
+                    if development {
+                        diffpack::config::configure_next_app_dev(
+                            Path::new(&project_root),
+                            &config.environment,
+                            &diffpack_next::next_adapter::RouteScope::All,
+                        )?;
+                    } else {
+                        diffpack::config::configure_next_app(
+                            Path::new(&project_root),
+                            &config.environment,
+                        )?;
+                    }
                     continue;
                 }
                 break (bundler, reachable, warnings);
@@ -452,8 +469,9 @@ fn run() -> Result<(), String> {
             // (`server/index.mjs` plus its `_ssr/` adapter, SSR, and router
             // modules) that boots the SSR handler and serves the `public/` assets.
             let emit_options = EmitOptions {
-                minify,
+                minify: minify && !development,
                 source_map,
+                hmr: development,
                 ..EmitOptions::default()
             };
             if is_next_app {

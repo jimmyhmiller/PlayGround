@@ -1,5 +1,6 @@
 (module llhttp-coil-test)
-(import "../src/stdlib/llhttp.coil" :as ll :use [HTTP_REQUEST HPE_OK])
+(import "../src/stdlib/llhttp.coil" :as ll
+  :use [HTTP_REQUEST HTTP_RESPONSE HPE_OK HPE_INVALID_EOF_STATE HPE_PAUSED HPE_USER])
 (import "../src/stdlib/llhttp_types.coil" :as types)
 (import "../src/stdlib/alloc.coil" :as alloc)
 (import "../src/stdlib/str.coil" :as str)
@@ -69,6 +70,18 @@
       (primitive/iadd (primitive/load (primitive/field t messages)) 1)))
   0)
 
+(defn pause-at-message-begin [(p (ptr types/Parser))] (-> i64)
+  (let [t (trace-of p)]
+    (primitive/store! (primitive/field t messages)
+      (primitive/iadd (primitive/load (primitive/field t messages)) 1)))
+  HPE_PAUSED)
+
+(defn reject-url [(p (ptr types/Parser)) (at (ptr u8)) (len i64)] (-> i64) -1)
+
+(defn reject-url-with-reason [(p (ptr types/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (ll/set-error-reason! p "application rejected URL")
+  HPE_USER)
+
 (defn configure [(settings (ptr types/Settings))] (-> i64)
   (ll/settings-init settings)
   (ll/set-span-callback! settings 4 (primitive/fnptr-of add-method))
@@ -91,11 +104,14 @@
     (ll/init parser HTTP_REQUEST settings)
     (primitive/store! (primitive/field parser data) (primitive/cast (ptr i8) trace))
     (let [err (ll/execute parser input)]
-      (println "err={d} off={d} byte={d} reason={s}" err
-        (primitive/isub (primitive/cast i64 (ll/get-error-pos parser))
-                        (primitive/cast i64 (slice/slice-data input)))
-        (primitive/cast i64 (primitive/load (ll/get-error-pos parser)))
-        (ll/get-error-reason parser))
+      (when (primitive/icmp-ne err HPE_OK)
+        (do
+          (println "err={d} off={d} byte={d} reason={s}" err
+            (primitive/isub (primitive/cast i64 (ll/get-error-pos parser))
+                            (primitive/cast i64 (slice/slice-data input)))
+            (primitive/cast i64 (primitive/load (ll/get-error-pos parser)))
+            (ll/get-error-reason parser))
+          0))
       (assert-eq err HPE_OK))
     (assert-eq (ll/get-method parser) 3)
     (assert-eq (ll/get-http-major parser) 1)
@@ -130,3 +146,89 @@
     (assert-eq (primitive/load (primitive/field trace method-bytes)) 3)
     (assert-eq (primitive/load (primitive/field trace url-bytes)) 7)
     (assert-eq (primitive/load (primitive/field trace messages)) 1)))
+
+(deftest finish-eof-delimited-response
+  (let [parser (primitive/alloc-stack types/Parser)
+        settings (primitive/alloc-stack types/Settings)
+        trace (primitive/alloc-stack Trace)
+        input (request-input "HTTP/1.1 200 OK" "" "" "hello")]
+    (primitive/store! trace (primitive/zeroed Trace))
+    (configure settings)
+    (ll/init parser HTTP_RESPONSE settings)
+    (primitive/store! (primitive/field parser data) (primitive/cast (ptr i8) trace))
+    (assert-eq (ll/execute parser input) HPE_OK)
+    (assert-eq (primitive/load (primitive/field trace messages)) 0)
+    (assert-eq (ll/finish parser) HPE_OK)
+    (assert-eq (primitive/load (primitive/field trace body-bytes)) 5)
+    (assert-eq (primitive/load (primitive/field trace messages)) 1)))
+
+(deftest finish-rejects-incomplete-message
+  (let [parser (primitive/alloc-stack types/Parser)
+        settings (primitive/alloc-stack types/Settings)]
+    (ll/settings-init settings)
+    (ll/init parser HTTP_REQUEST settings)
+    (assert-eq (ll/execute parser "GET / HTTP/1.1") HPE_OK)
+    (assert-eq (ll/finish parser) HPE_INVALID_EOF_STATE)))
+
+(deftest unsigned-mul-add-boundaries
+  (let [parser (primitive/alloc-stack types/Parser)]
+    (types/parser-zero! parser)
+    ; UINT64_MAX / 10, followed by its final digit, is accepted exactly.
+    (types/field-store! parser 0 1844674407370955161)
+    (assert-eq (types/field-mul-add! parser 0 10 -1 false 5) 0)
+    (assert-eq (types/field-load parser 0) -1)
+    ; Any further decimal digit overflows without modifying the field.
+    (assert-eq (types/field-mul-add! parser 0 10 -1 false 0) 1)
+    (assert-eq (types/field-load parser 0) -1)
+    ; status_code is an unsigned i16 property in the llhttp graph.
+    (types/field-store! parser 10 6553)
+    (assert-eq (types/field-mul-add! parser 10 10 -1 false 5) 0)
+    (assert-eq (types/field-load parser 10) 65535)
+    (assert-eq (types/field-mul-add! parser 10 10 -1 false 0) 1)))
+
+(deftest null-settings-skips-callbacks
+  (let [parser (primitive/alloc-stack types/Parser)
+        input (request-input "GET / HTTP/1.1" "" "" "")]
+    (ll/init parser HTTP_REQUEST (primitive/cast (ptr types/Settings) 0))
+    (assert-eq (ll/execute parser input) HPE_OK)))
+
+(deftest callback-pause-and-resume
+  (let [parser (primitive/alloc-stack types/Parser)
+        settings (primitive/alloc-stack types/Settings)
+        trace (primitive/alloc-stack Trace)
+        input (request-input "GET /paused HTTP/1.1" "" "" "")]
+    (primitive/store! trace (primitive/zeroed Trace))
+    (ll/settings-init settings)
+    (ll/set-simple-callback! settings 0 (primitive/fnptr-of pause-at-message-begin))
+    (ll/init parser HTTP_REQUEST settings)
+    (primitive/store! (primitive/field parser data) (primitive/cast (ptr i8) trace))
+    (assert-eq (ll/execute parser input) HPE_PAUSED)
+    (assert-eq (ll/get-errno parser) HPE_PAUSED)
+    (assert-eq (primitive/load (primitive/field trace messages)) 1)
+    (let [offset (primitive/isub (primitive/cast i64 (ll/get-error-pos parser))
+                                 (primitive/cast i64 (slice/slice-data input)))]
+      (assert-eq offset 0)
+      (ll/resume parser)
+      (assert-eq (ll/get-errno parser) HPE_OK)
+      (assert-eq (ll/execute parser (slice/subslice input offset (slice/slice-len input))) HPE_OK)
+      (assert-eq (primitive/load (primitive/field trace messages)) 1))))
+
+(deftest span-callback-minus-one-reason
+  (let [parser (primitive/alloc-stack types/Parser)
+        settings (primitive/alloc-stack types/Settings)
+        input (request-input "GET /rejected HTTP/1.1" "" "" "")]
+    (ll/settings-init settings)
+    (ll/set-span-callback! settings 2 (primitive/fnptr-of reject-url))
+    (ll/init parser HTTP_REQUEST settings)
+    (assert-eq (ll/execute parser input) HPE_USER)
+    (assert (str/str-eq (ll/get-error-reason parser) "Span callback error in on_url"))))
+
+(deftest span-callback-preserves-custom-reason
+  (let [parser (primitive/alloc-stack types/Parser)
+        settings (primitive/alloc-stack types/Settings)
+        input (request-input "GET /custom HTTP/1.1" "" "" "")]
+    (ll/settings-init settings)
+    (ll/set-span-callback! settings 2 (primitive/fnptr-of reject-url-with-reason))
+    (ll/init parser HTTP_REQUEST settings)
+    (assert-eq (ll/execute parser input) HPE_USER)
+    (assert (str/str-eq (ll/get-error-reason parser) "application rejected URL"))))

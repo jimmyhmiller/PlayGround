@@ -36,6 +36,8 @@ enum Request {
         project_root: PathBuf,
         output_dir: PathBuf,
         next_config_output: Option<String>,
+        #[serde(default)]
+        development: bool,
     },
     WatchDevelopment {
         protocol_version: u32,
@@ -112,6 +114,7 @@ fn run() -> Result<Option<Response>, String> {
             project_root,
             output_dir,
             next_config_output,
+            development,
         } => {
             check_protocol(protocol_version)?;
             let binary = std::env::var_os("DIFFPACK_BINARY")
@@ -128,10 +131,15 @@ fn run() -> Result<Option<Response>, String> {
                 .join(".diffpack-output")
                 .join(diffpack_next::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
             let _ = std::fs::remove_file(&client_manifest);
-            let mut client = Command::new(&binary)
+            let mut client_command = Command::new(&binary);
+            client_command
                 .arg("build-app")
                 .arg(&project_root)
-                .arg("client")
+                .arg("client");
+            if development {
+                client_command.arg("--development");
+            }
+            let mut client = client_command
                 .env("DIFFPACK_NATIVE_NEXT_OUTPUT", &output_dir)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
@@ -153,11 +161,16 @@ fn run() -> Result<Option<Response>, String> {
                     Err(error) => return Err(format!("cannot wait for Diffpack client: {error}")),
                 }
             }
-            let mut ssr = Command::new(&binary)
+            let mut ssr_command = Command::new(&binary);
+            ssr_command
                 .arg("build-app")
                 .arg(&project_root)
                 .arg("ssr")
-                .arg("--references-only")
+                .arg("--references-only");
+            if development {
+                ssr_command.arg("--development");
+            }
+            let mut ssr = ssr_command
                 .env("DIFFPACK_NATIVE_NEXT_OUTPUT", &output_dir)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
@@ -188,11 +201,19 @@ fn run() -> Result<Option<Response>, String> {
             }
             let routes = diffpack_next::artifacts::discover_app_routes(&project_root)?;
             let standalone_root = project_root.join(".diffpack-output");
-            diffpack_next::native::compile_app_entries(
-                &project_root,
-                &output_dir,
-                next_config_output.as_deref(),
-            )?;
+            if development {
+                diffpack_next::native::compile_app_entries_development(
+                    &project_root,
+                    &output_dir,
+                    next_config_output.as_deref(),
+                )?;
+            } else {
+                diffpack_next::native::compile_app_entries(
+                    &project_root,
+                    &output_dir,
+                    next_config_output.as_deref(),
+                )?;
+            }
             diffpack_next::artifacts::NativeNextOutput {
                 dist_dir: &output_dir,
                 standalone_root: &standalone_root,
@@ -255,6 +276,7 @@ fn production_request(
         "project_root": project_root,
         "output_dir": output_dir,
         "next_config_output": next_config_output,
+        "development": true,
     });
     serde_json::to_writer(
         child

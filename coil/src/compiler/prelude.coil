@@ -20,6 +20,12 @@
 ; functions are unreferenced → dead-stripped).
 (import "print.coil" :reexport)
 
+; Everyday typed pointer access. Keep the raw operations in coil.primitive for
+; compiler lowering, but make their safe, type-preserving surface core vocabulary.
+(defprimitive field :field)
+(defprimitive load :load)
+(defprimitive store! :store!)
+
 ; Option / Result (and Some/None/Ok/Err) are core vocabulary, always in scope.
 ; Pure generic sums (no runtime/externs), so this is freestanding-safe, and the
 ; allocator/IO trait signatures can use Option with no import at the use site.

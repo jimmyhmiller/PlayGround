@@ -131,8 +131,8 @@ These results do not certify native development/HMR or Cal.com yet.
 
 ## Development and HMR: current truth
 
-There is development scaffolding, but full support is **not verified and should not
-be described as complete**.
+Native cold-start development is now verified on the version-aligned Next
+hello-world fixture, but full HMR support is **not complete**.
 
 The current bridge can:
 
@@ -146,20 +146,95 @@ The current bridge can:
 
 Important limitations in the current implementation:
 
-- A change invokes the production build path again rather than maintaining
-  incremental client, SSR, RSC, Pages, and route-entry graphs.
+- Development selects Diffpack's development client, SSR, RSC, Pages, and native
+  route-entry policies. The bridge still reconstructs those graphs on each change
+  rather than retaining them incrementally.
 - `projectHmrEvents` currently returns only an empty issues event.
 - `projectHmrChunkNamesSubscribe` returns no chunk names.
 - endpoint responses report no client paths.
 - the bridge has no real browser update payload or module accept/dispose graph.
 - The README still describes the old production-only milestone and must be updated
   after the development contract is real.
-- A sandboxed attempt to launch `next dev --diffpack` could not bind a port. A later
-  escalated launch was interrupted before yielding evidence, so cold-start dev
-  rendering has not yet been certified.
+- The local Next 16.3 canary CLI starts with `--diffpack`, renders a valid App Router
+  document through Next's development server, and serves the emitted browser chunks.
+  The validation must use a fixture whose installed Next version matches the CLI;
+  route templates and endpoint ABI are versioned together.
+- Server source edits rebuild and republish stable endpoint handles, but the running
+  renderer does not yet consume the restart as a fresh render. State-preserving
+  browser HMR is therefore not certified.
 
-In short: the watcher may be capable of triggering a server restart, but this is
-not genuine HMR and is not sufficient for the goal.
+In short: native cold start works; edit-time cache replacement and genuine browser
+HMR remain insufficient for the goal.
+
+### Exact HMR continuation point (2026-08-01)
+
+The server-edit failure has been traced through the complete build and transport
+path on the version-aligned Next 16.3 canary `examples/hello-world` fixture:
+
+1. Editing `app/page.tsx` starts the binding watcher and reconstructs the
+   development client, SSR, RSC, and native entry graphs.
+2. The changed literal is present in `.next/dev/server/diffpack-app-entries.js`.
+3. The binding has one live entrypoint subscriber, one endpoint subscriber, and
+   one aggregate server-HMR subscriber. It publishes a `restart` after the files
+   are complete.
+4. Next consumes that aggregate restart. Its main process contains exactly these
+   relevant cached files: `server/app/page.js`, `server/diffpack-app-entries.js`,
+   and `server/diffpack-ssr.js` (plus three manifests).
+5. `deleteCache` removes all six entries from the main process's `require.cache`;
+   an immediate postcondition check found none remaining.
+6. A later HTTP request still renders the old page, and a top-level evaluation
+   marker in the edited page does not run. Therefore clearing Next's main
+   CommonJS cache is necessary but insufficient. The earlier conclusion that the
+   emitted Diffpack registry was ruled out was incorrect: the generated registry
+   runtime deliberately survives CommonJS module eviction on `globalThis`.
+7. Static tracing rules out a separately spawned render worker for this path:
+   `router-server.ts` loads `render-server.ts` in-process and initializes the
+   `NextServer` instance directly. The stale reference is therefore in-process,
+   not in an unnotified child process.
+8. The strongest source-level explanation is now Diffpack's persistent registry:
+   `diffpack-core/src/runtime.rs` emits
+   `globalThis["__diffpack_runtime:<entry>"] ??= ...`, and that runtime owns its
+   own `__cache`. Requiring the newly written `diffpack-app-entries.js` after
+   deleting Node's `require.cache` can therefore reconnect to the old runtime and
+   return the old page factory without evaluating the edited page. The native dev
+   registry currently leaves `globalThis.__next__clear_chunk_cache__` unavailable,
+   so Next's existing restart callback has no supported way to reset this cache.
+
+This registry explanation is source-supported but still needs one focused runtime
+probe when processes may run again: record the exact `__diffpack_runtime:*` key and
+module-cache identity before restart, after Next's eviction, and on the following
+request. If deleting that exact runtime through a bundler-owned clear hook makes the
+edited marker execute, the stale-server-render cause is confirmed.
+
+Resume in this order:
+
+1. Confirm the persistent-registry diagnosis with the focused runtime probe above.
+   A temporary top-level page evaluation marker remains the decisive end condition:
+   the updated marker must run on the first request after restart.
+2. Implement the reset at the mechanism boundary: Diffpack's development runtime
+   must expose a precise cache-clear operation through the hook Next already calls
+   during `reEvaluateAllModulesExpensive`. The hook must delete/reset only the
+   runtime instance(s) owned by the rebuilt native server graph. Do not move
+   Diffpack artifacts under a fake Turbopack path, put Next semantics in
+   `diffpack-core`, or clear runtime caches from `@diffpack/next-bindings`; the
+   binding remains transport-only.
+3. Add a regression test proving that reloading a CJS entry after the clear hook
+   constructs a new registry, evaluates the changed module, and does not retain the
+   old factory/export cache. Also prove unrelated Diffpack runtimes are untouched.
+4. Replace rebuild-wide anonymous responses with generation-tagged typed events,
+   so endpoint changes and aggregate restart/HMR cannot race or apply stale output.
+5. Once server-component edits render freshly, implement client chunk-name and HMR
+   payload subscriptions, then prove state preservation in a real browser by
+   editing a client component with live `useState` state.
+6. Add syntax-error -> overlay -> correction recovery, route add/remove, simultaneous
+   edit coalescing, and shutdown/no-child-leak gates before calling native dev done.
+
+Reproduction uses the local Next checkout rather than
+`integration/next-app-router`, whose installed Next 16.2 version does not match the
+16.3 canary CLI/template ABI. Start the Next package watch build, build
+`diffpack` plus `diffpack-next-bindings`, then run the local Next CLI with
+`DIFFPACK_BINDINGS`, `DIFFPACK_NEXT_REPO`, `DIFFPACK_NEXT_BRIDGE`, and
+`DIFFPACK_BINARY` pointing at their repository-local absolute paths.
 
 ## Ordered next steps
 

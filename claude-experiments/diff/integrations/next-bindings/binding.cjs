@@ -42,6 +42,19 @@ function assertProduction(project) {
 }
 
 function endpoint(kind = 'none', route, outputDir, project) {
+  if (project && route) {
+    const key = `${kind}:${route.kind}:${route.original_name}`
+    const existing = project.endpointCache.get(key)
+    if (existing) {
+      existing.route = route
+      existing.outputDir = outputDir
+      return existing
+    }
+    const value = { __napiType: 'Endpoint', kind, route, outputDir, project }
+    project.endpointCache.set(key, value)
+    endpoints.add(value)
+    return value
+  }
   const value = { __napiType: 'Endpoint', kind, route, outputDir, project }
   endpoints.add(value)
   return value
@@ -155,6 +168,7 @@ function startDevelopment(project) {
     entrypoints: new Set(),
     serverHmr: new Set(),
     endpoints: new Set(),
+    routesKey: null,
   }
   project.development = development
   const lines = readline.createInterface({ input: child.stdout })
@@ -174,8 +188,17 @@ function startDevelopment(project) {
     }
     const wasBuilt = development.built
     development.built = true
+    const routesKey = JSON.stringify(response.routes.map((route) => [
+      route.kind,
+      route.pathname,
+      route.original_name,
+    ]))
+    const routesChanged = routesKey !== development.routesKey
+    development.routesKey = routesKey
     project.entrypoints = entrypointsFor(response.routes, outputDir, project)
-    notify(development.entrypoints, undefined, project.entrypoints)
+    if (!wasBuilt || routesChanged) {
+      notify(development.entrypoints, undefined, project.entrypoints)
+    }
     if (wasBuilt) {
       notify(development.endpoints, undefined, { issues: [] })
       notify(development.serverHmr, undefined, { type: 'restart', issues: [] })
@@ -209,6 +232,7 @@ async function projectNew(options, turboEngineOptions, callbacks) {
     turboEngineOptions,
     callbacks,
     entrypoints: null,
+    endpointCache: new Map(),
   }
   projects.add(project)
   return project
@@ -284,7 +308,10 @@ function projectAllHmrEvents(project, _target, callback) {
   if (!projects.has(project)) throw new TypeError('invalid Diffpack project handle')
   const development = startDevelopment(project)
   development.serverHmr.add(callback)
-  queueMicrotask(() => callback(undefined, { type: 'restart', issues: [] }))
+  // Next deliberately discards the first aggregate HMR event as the current
+  // state. Emit it synchronously, like the native binding, so a real rebuild
+  // cannot race ahead and become the event Next discards.
+  callback(undefined, { type: 'restart', issues: [] })
   return subscription(() => development.serverHmr.delete(callback))
 }
 

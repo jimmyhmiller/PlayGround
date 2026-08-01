@@ -237,8 +237,36 @@ pub fn compile_app_entries(
     dist_dir: &Path,
     next_config_output: Option<&str>,
 ) -> Result<(), String> {
-    let native_ssr_bundle = compile_native_ssr_modules(project_root, dist_dir)?;
-    let mut config = crate::next_adapter::configure_app_router(project_root, "react-server")?
+    compile_app_entries_inner(project_root, dist_dir, next_config_output, false)
+}
+
+/// Development counterpart to [`compile_app_entries`]. It emits the same native
+/// endpoint ABI while selecting Next's development source/runtime policies.
+pub fn compile_app_entries_development(
+    project_root: &Path,
+    dist_dir: &Path,
+    next_config_output: Option<&str>,
+) -> Result<(), String> {
+    compile_app_entries_inner(project_root, dist_dir, next_config_output, true)
+}
+
+fn compile_app_entries_inner(
+    project_root: &Path,
+    dist_dir: &Path,
+    next_config_output: Option<&str>,
+    development: bool,
+) -> Result<(), String> {
+    let native_ssr_bundle = compile_native_ssr_modules(project_root, dist_dir, development)?;
+    let configured = if development {
+        crate::next_adapter::configure_app_router_dev(
+            project_root,
+            "react-server",
+            &crate::next_adapter::RouteScope::All,
+        )?
+    } else {
+        crate::next_adapter::configure_app_router(project_root, "react-server")?
+    };
+    let mut config = configured
         .ok_or_else(|| format!("{} is not an App Router project", project_root.display()))?;
     // Native Next workers already own these singleton stores. Route entries
     // must require those exact files while still bundling the renderer and the
@@ -390,7 +418,7 @@ pub fn compile_app_entries(
         &entries,
         &dist_dir.join("server/diffpack-app-entries.js"),
     )?;
-    compile_pages_api_entries(project_root, dist_dir)?;
+    compile_pages_api_entries(project_root, dist_dir, development)?;
     Ok(())
 }
 
@@ -458,7 +486,11 @@ fn native_pages_react_aliases(
     Ok((aliases, external))
 }
 
-fn compile_pages_api_entries(project_root: &Path, dist_dir: &Path) -> Result<(), String> {
+fn compile_pages_api_entries(
+    project_root: &Path,
+    dist_dir: &Path,
+    development: bool,
+) -> Result<(), String> {
     let routes = crate::artifacts::discover_app_routes(project_root)?;
     if !routes.iter().any(|route| {
         matches!(
@@ -469,7 +501,16 @@ fn compile_pages_api_entries(project_root: &Path, dist_dir: &Path) -> Result<(),
     }) {
         return Ok(());
     }
-    let mut config = crate::next_adapter::configure_app_router(project_root, "ssr")?
+    let configured = if development {
+        crate::next_adapter::configure_app_router_dev(
+            project_root,
+            "ssr",
+            &crate::next_adapter::RouteScope::All,
+        )?
+    } else {
+        crate::next_adapter::configure_app_router(project_root, "ssr")?
+    };
+    let mut config = configured
         .ok_or_else(|| format!("{} is not an App Router project", project_root.display()))?;
     let next_root = crate::rsc_runtime_resolve::installed_package_root(project_root, "next")?;
     use_native_next_server_apis(&mut config.build, &next_root);
@@ -520,8 +561,8 @@ fn compile_pages_api_entries(project_root: &Path, dist_dir: &Path) -> Result<(),
         .iter()
         .any(|route| route.kind == crate::artifacts::NextRouteArtifactKind::PagesPage)
     {
-        let mut client =
-            crate::next_pages::configure(project_root, "client", false)?.ok_or_else(|| {
+        let mut client = crate::next_pages::configure(project_root, "client", development)?
+            .ok_or_else(|| {
                 format!(
                     "{} has Pages routes but no Pages client profile",
                     project_root.display()
@@ -724,6 +765,7 @@ fn compile_pages_api_entries(project_root: &Path, dist_dir: &Path) -> Result<(),
 fn compile_native_ssr_modules(
     project_root: &Path,
     dist_dir: &Path,
+    development: bool,
 ) -> Result<std::path::PathBuf, String> {
     let manifest_path = project_root
         .join(".diffpack-output")
@@ -757,7 +799,16 @@ fn compile_native_ssr_modules(
     std::fs::write(&generated, source)
         .map_err(|error| format!("cannot write {}: {error}", generated.display()))?;
 
-    let mut config = crate::next_adapter::configure_app_router(project_root, "ssr")?
+    let configured = if development {
+        crate::next_adapter::configure_app_router_dev(
+            project_root,
+            "ssr",
+            &crate::next_adapter::RouteScope::All,
+        )?
+    } else {
+        crate::next_adapter::configure_app_router(project_root, "ssr")?
+    };
+    let mut config = configured
         .ok_or_else(|| format!("{} is not an App Router project", project_root.display()))?;
     let next_root = crate::rsc_runtime_resolve::installed_package_root(project_root, "next")?;
     use_native_next_server_apis(&mut config.build, &next_root);

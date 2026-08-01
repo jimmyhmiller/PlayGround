@@ -318,7 +318,7 @@ class CoilEmitter {
         `(primitive/store! (primitive/field s span-pos) (primitive/cast (ptr u8) 0)) ` +
         `(let [err (invoke-span s ${callback} start (primitive/load p))] ` +
         `(if (primitive/icmp-ne err 0) ` +
-        `(do (ll/fail! s err "Span callback error" ${resumePos} ${this.id(ref.otherwise.node)}) -2) ` +
+        `(do (ll/fail-code! s err ${resumePos} ${this.id(ref.otherwise.node)}) -2) ` +
         `${this.transition(ref.otherwise)})))`;
     }
     throw new Error(`unsupported node kind: ${kind}`);
@@ -408,7 +408,7 @@ class CoilEmitter {
       '                                   (primitive/load (primitive/field s span-pos)) endp)]',
       '                        (if (primitive/icmp-eq err 0)',
       '                            0',
-      '                            (ll/fail! s err "Span callback error" endp (primitive/load state)))))',
+      '                            (ll/fail-code! s err endp (primitive/load state)))))',
       '                  (break (primitive/load (primitive/field s error))))',
       '              :else (break (primitive/load (primitive/field s error)))))))))',
     ];

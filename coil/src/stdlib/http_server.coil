@@ -8,6 +8,8 @@
 (import "arraylist.coil" :as arraylist)
 (import "slice.coil" :as slice)
 (import "str.coil" :as str)
+(import "llhttp.coil" :as ll :use [HTTP_REQUEST HPE_OK HPE_PAUSED HPE_USER])
+(import "llhttp_types.coil" :as lltypes)
 
 (export Header
         Request
@@ -27,27 +29,6 @@
         error-offset
         error-code)
 
-(extern coil_llhttp_parse_request :cc c [(ptr u8) i64] (-> (ptr i8)))
-(extern coil_llhttp_result_free :cc c [(ptr i8)] (-> void))
-(extern coil_llhttp_status :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_error_code :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_error_offset :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_consumed :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_http_major :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_http_minor :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_keep_alive :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_header_count :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_method :cc c [(ptr i8)] (-> (ptr u8)))
-(extern coil_llhttp_method_len :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_target :cc c [(ptr i8)] (-> (ptr u8)))
-(extern coil_llhttp_target_len :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_body :cc c [(ptr i8)] (-> (ptr u8)))
-(extern coil_llhttp_body_len :cc c [(ptr i8)] (-> i64))
-(extern coil_llhttp_header_name :cc c [(ptr i8) i64] (-> (ptr u8)))
-(extern coil_llhttp_header_name_len :cc c [(ptr i8) i64] (-> i64))
-(extern coil_llhttp_header_value :cc c [(ptr i8) i64] (-> (ptr u8)))
-(extern coil_llhttp_header_value_len :cc c [(ptr i8) i64] (-> i64))
-
 (defstruct Header [(name (slice u8)) (value (slice u8))])
 (defstruct Request
   [(method (slice u8))
@@ -57,8 +38,105 @@
    (body (slice u8))
    (consumed i64)
    (keep-alive bool)
-   (native (ptr i8))])
+   (allocator (ptr alloc/Allocator))])
 (defstruct Error [(offset i64) (code i64)])
+
+(const HTTP_MAX_HEADERS 100)
+(const HTTP_MAX_HEADER_BYTES 65536)
+(const HTTP_MAX_BODY_BYTES 8388608)
+(const HTTP_ERROR_LIMIT 1000)
+
+(defstruct ParseContext
+  [(allocator (ptr alloc/Allocator))
+   (headers (arraylist/ArrayList Header))
+   (body str/StrBuf)
+   (method-start (ptr u8))
+   (method-len i64)
+   (target-start (ptr u8))
+   (target-len i64)
+   (header-name-start (ptr u8))
+   (header-name-len i64)
+   (header-value-start (ptr u8))
+   (header-value-len i64)
+   (header-bytes i64)
+   (keep-alive bool)
+   (complete bool)
+   (error-code i64)])
+
+(defn context-of [(p (ptr lltypes/Parser))] (-> (ptr ParseContext))
+  (primitive/cast (ptr ParseContext) (primitive/load (primitive/field p data))))
+
+(defn append-span! [(start (ptr (ptr u8))) (total (ptr i64))
+                    (at (ptr u8)) (len i64)] (-> i64)
+  (if (primitive/icmp-eq (primitive/cast i64 (primitive/load start)) 0)
+      (primitive/store! start at)
+      0)
+  (primitive/store! total (primitive/iadd (primitive/load total) len))
+  0)
+
+(defn server-on-method [(p (ptr lltypes/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [c (context-of p)]
+    (append-span! (primitive/field c method-start) (primitive/field c method-len) at len)))
+
+(defn server-on-url [(p (ptr lltypes/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [c (context-of p)]
+    (append-span! (primitive/field c target-start) (primitive/field c target-len) at len)))
+
+(defn server-on-header-field [(p (ptr lltypes/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [c (context-of p)
+        bytes (primitive/iadd (primitive/load (primitive/field c header-bytes)) len)]
+    (if (or (primitive/icmp-ge (arraylist/al-len (primitive/field c headers)) HTTP_MAX_HEADERS)
+            (primitive/icmp-gt bytes HTTP_MAX_HEADER_BYTES))
+        (do (primitive/store! (primitive/field c error-code) HTTP_ERROR_LIMIT) HPE_USER)
+        (do
+          (primitive/store! (primitive/field c header-bytes) bytes)
+          (append-span! (primitive/field c header-name-start)
+                        (primitive/field c header-name-len) at len)))))
+
+(defn server-on-header-value [(p (ptr lltypes/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [c (context-of p)
+        bytes (primitive/iadd (primitive/load (primitive/field c header-bytes)) len)]
+    (if (primitive/icmp-gt bytes HTTP_MAX_HEADER_BYTES)
+        (do (primitive/store! (primitive/field c error-code) HTTP_ERROR_LIMIT) HPE_USER)
+        (do
+          (primitive/store! (primitive/field c header-bytes) bytes)
+          (append-span! (primitive/field c header-value-start)
+                        (primitive/field c header-value-len) at len)))))
+
+(defn server-on-header-value-complete [(p (ptr lltypes/Parser))] (-> i64)
+  (let [c (context-of p)]
+    (if (primitive/icmp-ge (arraylist/al-len (primitive/field c headers)) HTTP_MAX_HEADERS)
+        (do (primitive/store! (primitive/field c error-code) HTTP_ERROR_LIMIT) HPE_USER)
+        (let [(mut h) (primitive/zeroed Header)]
+          (primitive/store! (primitive/field h name)
+            (slice/slice-new [u8] (primitive/load (primitive/field c header-name-start))
+                                  (primitive/load (primitive/field c header-name-len))))
+          (primitive/store! (primitive/field h value)
+            (slice/slice-new [u8] (primitive/load (primitive/field c header-value-start))
+                                  (primitive/load (primitive/field c header-value-len))))
+          (arraylist/al-push! [Header] (mut (primitive/field c headers)) (primitive/load h))
+          (primitive/store! (primitive/field c header-name-start) (primitive/cast (ptr u8) 0))
+          (primitive/store! (primitive/field c header-name-len) 0)
+          (primitive/store! (primitive/field c header-value-start) (primitive/cast (ptr u8) 0))
+          (primitive/store! (primitive/field c header-value-len) 0)
+          0))))
+
+(defn server-on-body [(p (ptr lltypes/Parser)) (at (ptr u8)) (len i64)] (-> i64)
+  (let [c (context-of p)
+        current (slice/slice-len (str/sb-str (primitive/load (primitive/field c body))))]
+    (if (primitive/icmp-gt (primitive/iadd current len) HTTP_MAX_BODY_BYTES)
+        (do (primitive/store! (primitive/field c error-code) HTTP_ERROR_LIMIT) HPE_USER)
+        (do
+          (str/sb-push-str! (mut (primitive/field c body)) (slice/slice-new [u8] at len))
+          0))))
+
+(defn server-on-headers-complete [(p (ptr lltypes/Parser))] (-> i64)
+  (primitive/store! (primitive/field (context-of p) keep-alive) (ll/should-keep-alive? p))
+  0)
+
+(defn server-on-message-complete [(p (ptr lltypes/Parser))] (-> i64)
+  (primitive/store! (primitive/field (context-of p) complete) true)
+  HPE_PAUSED)
 
 (defn http-ascii-lower [(c i64)] (-> i64)
   (if (and (primitive/icmp-ge c \A) (primitive/icmp-le c \Z)) (primitive/iadd c 32) c))
@@ -95,9 +173,9 @@
                     (primitive/store! i (primitive/iadd (primitive/load i) 1))))))
     (primitive/load value)))
 
-(defn http-version [(native (ptr i8))] (-> (slice u8))
-  (if (and (primitive/icmp-eq (coil_llhttp_http_major native) 1)
-           (primitive/icmp-eq (coil_llhttp_http_minor native) 0))
+(defn http-version [(parser (ptr lltypes/Parser))] (-> (slice u8))
+  (if (and (primitive/icmp-eq (ll/get-http-major parser) 1)
+           (primitive/icmp-eq (ll/get-http-minor parser) 0))
       "HTTP/1.0"
       "HTTP/1.1"))
 
@@ -108,59 +186,71 @@
 ;; limit and 1001 is native allocation failure. Truncated input reports llhttp's
 ;; HPE_INVALID_EOF_STATE (14).
 (defn parse-request [(a (ptr alloc/Allocator)) (source (slice u8))] (-> (Result Request Error))
-  (let [native (coil_llhttp_parse_request (slice/slice-data source) (slice/slice-len source))]
-    (if (primitive/icmp-eq (primitive/cast i64 native) 0)
-        (let [(mut e) (primitive/zeroed Error)]
-          (primitive/store! (primitive/field e offset) 0)
-          (primitive/store! (primitive/field e code) 1001)
-          (Err (primitive/load e)))
-        (if (primitive/icmp-ne (coil_llhttp_status native) 0)
-            (let [(mut e) (primitive/zeroed Error)]
-              (primitive/store! (primitive/field e offset) (coil_llhttp_error_offset native))
-              (primitive/store! (primitive/field e code) (coil_llhttp_error_code native))
-              (coil_llhttp_result_free native)
-              (Err (primitive/load e)))
-            (let [(mut hs) (arraylist/al-new [Header] a)
-                  (mut i) 0]
-              (loop (if (primitive/icmp-ge (primitive/load i) (coil_llhttp_header_count native))
-                        (break)
-                        (let [(mut h) (primitive/zeroed Header)
-                              index (primitive/load i)]
-                          (primitive/store! (primitive/field h name)
-                                            (slice/slice-new [u8]
-                                              (coil_llhttp_header_name native index)
-                                              (coil_llhttp_header_name_len native index)))
-                          (primitive/store! (primitive/field h value)
-                                            (slice/slice-new [u8]
-                                              (coil_llhttp_header_value native index)
-                                              (coil_llhttp_header_value_len native index)))
-                          (arraylist/al-push! [Header] (mut hs) (primitive/load h))
-                          (primitive/store! i (primitive/iadd index 1)))))
-              (let [(mut r) (primitive/zeroed Request)]
-                (primitive/store! (primitive/field r method)
-                                  (slice/slice-new [u8]
-                                    (coil_llhttp_method native)
-                                    (coil_llhttp_method_len native)))
-                (primitive/store! (primitive/field r target)
-                                  (slice/slice-new [u8]
-                                    (coil_llhttp_target native)
-                                    (coil_llhttp_target_len native)))
-                (primitive/store! (primitive/field r version) (http-version native))
-                (primitive/store! (primitive/field r headers) (primitive/load hs))
-                (primitive/store! (primitive/field r body)
-                                  (slice/slice-new [u8]
-                                    (coil_llhttp_body native)
-                                    (coil_llhttp_body_len native)))
-                (primitive/store! (primitive/field r consumed) (coil_llhttp_consumed native))
-                (primitive/store! (primitive/field r keep-alive)
-                                  (primitive/icmp-ne (coil_llhttp_keep_alive native) 0))
-                (primitive/store! (primitive/field r native) native)
-                (Ok (primitive/load r))))))))
+  (let [parser (primitive/alloc-stack lltypes/Parser)
+        settings (primitive/alloc-stack lltypes/Settings)
+        context (primitive/alloc-stack ParseContext)
+        (mut initial) (primitive/zeroed ParseContext)]
+    (primitive/store! (primitive/field initial allocator) a)
+    (primitive/store! (primitive/field initial headers) (arraylist/al-new [Header] a))
+    (primitive/store! (primitive/field initial body) (str/sb-new a))
+    (primitive/store! context (primitive/load initial))
+    (ll/settings-init settings)
+    (ll/set-span-callback! settings 4 (primitive/fnptr-of server-on-method))
+    (ll/set-span-callback! settings 2 (primitive/fnptr-of server-on-url))
+    (ll/set-span-callback! settings 6 (primitive/fnptr-of server-on-header-field))
+    (ll/set-span-callback! settings 7 (primitive/fnptr-of server-on-header-value))
+    (ll/set-span-callback! settings 11 (primitive/fnptr-of server-on-body))
+    (ll/set-simple-callback! settings 19 (primitive/fnptr-of server-on-header-value-complete))
+    (ll/set-simple-callback! settings 10 (primitive/fnptr-of server-on-headers-complete))
+    (ll/set-simple-callback! settings 12 (primitive/fnptr-of server-on-message-complete))
+    (ll/init parser HTTP_REQUEST settings)
+    (primitive/store! (primitive/field parser data) (primitive/cast (ptr i8) context))
+    (let [err (ll/execute parser source)
+          complete (primitive/load (primitive/field context complete))]
+      (if (and complete (primitive/icmp-eq err HPE_PAUSED))
+          (let [(mut r) (primitive/zeroed Request)]
+            (primitive/store! (primitive/field r method)
+              (slice/slice-new [u8] (primitive/load (primitive/field context method-start))
+                                    (primitive/load (primitive/field context method-len))))
+            (primitive/store! (primitive/field r target)
+              (slice/slice-new [u8] (primitive/load (primitive/field context target-start))
+                                    (primitive/load (primitive/field context target-len))))
+            (primitive/store! (primitive/field r version) (http-version parser))
+            (primitive/store! (primitive/field r headers) (primitive/load (primitive/field context headers)))
+            (primitive/store! (primitive/field r body) (str/sb-finish! (mut (primitive/field context body))))
+            (primitive/store! (primitive/field r consumed)
+              (primitive/isub (primitive/cast i64 (ll/get-error-pos parser))
+                              (primitive/cast i64 (slice/slice-data source))))
+            (primitive/store! (primitive/field r keep-alive)
+              (primitive/load (primitive/field context keep-alive)))
+            (primitive/store! (primitive/field r allocator) a)
+            (Ok (primitive/load r)))
+          (let [(mut hs) (primitive/load (primitive/field context headers))
+                (mut body) (primitive/load (primitive/field context body))
+                (mut e) (primitive/zeroed Error)
+                code (if (primitive/icmp-ne (primitive/load (primitive/field context error-code)) 0)
+                         (primitive/load (primitive/field context error-code))
+                         (if (primitive/icmp-eq err HPE_OK) (ll/finish parser) err))
+                pos (ll/get-error-pos parser)]
+            (arraylist/al-free! [Header] (mut hs))
+            (str/sb-free! (mut body))
+            (primitive/store! (primitive/field e offset)
+              (if (primitive/icmp-eq (primitive/cast i64 pos) 0)
+                  (slice/slice-len source)
+                  (primitive/isub (primitive/cast i64 pos)
+                                  (primitive/cast i64 (slice/slice-data source)))))
+            (primitive/store! (primitive/field e code) code)
+            (Err (primitive/load e)))))))
 
 (defn request-free [(r Request)] (-> i64)
   (let [(mut hs) (primitive/load (primitive/field r headers))]
     (arraylist/al-free! [Header] (mut hs))
-    (coil_llhttp_result_free (primitive/load (primitive/field r native)))
+    (let [owned-body (primitive/load (primitive/field r body))]
+      (if (primitive/icmp-gt (slice/slice-len owned-body) 0)
+          (alloc/raw-free (primitive/load (primitive/field r allocator))
+            (primitive/cast (ptr i8) (slice/slice-data owned-body))
+            (slice/slice-len owned-body) 1)
+          0))
     0))
 
 (defn method-is [(r Request) (expected (slice u8))] (-> bool)
