@@ -131,13 +131,20 @@ fn vendored_version_matches_the_pinned_lockfile() {
             )
         })
         .1;
-    let after = entry.split_once("\"version\": \"").expect("a lockfile entry has a version").1;
+    let after = entry
+        .split_once("\"version\": \"")
+        .expect("a lockfile entry has a version")
+        .1;
     let pinned = &after[..after.find('"').unwrap()];
 
     let fixture = reference_fixture();
-    let (lock, vendored) = (lock_path.display(), diffpack::tailwind::VERSION);
+    let (lock, vendored) = (
+        lock_path.display(),
+        diffpack_default_loader::tailwind::VERSION,
+    );
     assert_eq!(
-        pinned, vendored,
+        pinned,
+        vendored,
         "{lock} pins tailwindcss v{pinned} but src/tailwind.rs vendors v{vendored}. \
          Re-vendor and bump `tailwind::VERSION`:\n  \
          cp {fixture}/node_modules/tailwindcss/theme.css     src/tailwind_theme.css\n  \
@@ -157,12 +164,12 @@ fn upstream_version_matches_the_vendored_version() {
         .unwrap_or_else(|| panic!("{}/package.json has no version", upstream.display()));
     assert_eq!(
         installed,
-        diffpack::tailwind::VERSION,
+        diffpack_default_loader::tailwind::VERSION,
         "the installed tailwindcss at {} is v{installed}, but src/tailwind.rs vendors \
          v{}. The byte comparisons below are only meaningful against the release the \
          banner claims, so re-vendor (see `tailwind::VERSION`) before trusting them.",
         upstream.display(),
-        diffpack::tailwind::VERSION,
+        diffpack_default_loader::tailwind::VERSION,
     );
 }
 
@@ -173,7 +180,7 @@ fn theme_css_is_verbatim_upstream() {
     };
     let path = upstream.join("theme.css");
     let expected = std::fs::read_to_string(&path).unwrap();
-    let vendored = diffpack::tailwind::vendored_theme_css();
+    let vendored = diffpack_default_loader::tailwind::vendored_theme_css();
     assert!(
         vendored == expected,
         "src/tailwind_theme.css has drifted from upstream {}.\n{}\n\nrepair:\n  \
@@ -191,7 +198,7 @@ fn preflight_source_is_verbatim_upstream() {
     };
     let path = upstream.join("preflight.css");
     let expected = std::fs::read_to_string(&path).unwrap();
-    let vendored = diffpack::tailwind::vendored_preflight_source_css();
+    let vendored = diffpack_default_loader::tailwind::vendored_preflight_source_css();
     assert!(
         vendored == expected,
         "src/tailwind_preflight.source.css has drifted from upstream {}. The COMPILED \
@@ -211,7 +218,8 @@ fn v3_preflight_source_is_verbatim_upstream_v3() {
     // the e2e corpus. Unlike the v4 preflight this needs no separately extracted
     // compiled form: v3 emits it through PostCSS with no lightningcss lowering, so the
     // engine resolves its `theme()` calls itself.
-    let app = manifest_dir().join("integration/e2e/apps/next-blog-starter/node_modules/tailwindcss");
+    let app =
+        manifest_dir().join("integration/e2e/apps/next-blog-starter/node_modules/tailwindcss");
     let installed = app.join("package.json");
     let Ok(manifest) = std::fs::read_to_string(&installed) else {
         return skip(
@@ -221,15 +229,18 @@ fn v3_preflight_source_is_verbatim_upstream_v3() {
         );
     };
     assert!(
-        manifest.contains(&format!("\"version\": \"{}\"", diffpack::tailwind::V3_VERSION)),
+        manifest.contains(&format!(
+            "\"version\": \"{}\"",
+            diffpack_default_loader::tailwind::V3_VERSION
+        )),
         "integration/e2e/apps/next-blog-starter pins a tailwindcss other than the \
          vendored v{} — re-vendor src/tailwind_preflight_v3.source.css and bump \
          tailwind::V3_VERSION",
-        diffpack::tailwind::V3_VERSION,
+        diffpack_default_loader::tailwind::V3_VERSION,
     );
     let path = app.join("src/css/preflight.css");
     let expected = std::fs::read_to_string(&path).unwrap();
-    let vendored = diffpack::tailwind::vendored_preflight_v3_source_css();
+    let vendored = diffpack_default_loader::tailwind::vendored_preflight_v3_source_css();
     assert!(
         vendored == expected,
         "src/tailwind_preflight_v3.source.css has drifted from upstream {}.\n{}\n\nrepair:\n  \
@@ -261,7 +272,7 @@ fn embedded_preflight_is_the_compiled_form_of_that_source() {
         );
     };
     let built = std::fs::read_to_string(&stylesheet).unwrap();
-    let vendored = diffpack::tailwind::vendored_preflight_css();
+    let vendored = diffpack_default_loader::tailwind::vendored_preflight_css();
     assert!(
         built.contains(vendored),
         "src/tailwind_preflight.css is not a verbatim run of the reference build's \

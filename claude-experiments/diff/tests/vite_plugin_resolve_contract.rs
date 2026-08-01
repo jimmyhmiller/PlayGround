@@ -36,8 +36,8 @@ fn release_binary() -> Option<PathBuf> {
 /// The pinned `vite-preact` corpus install: real `preact` + real
 /// `@preact/preset-vite`. Reused by symlink rather than installed a second time.
 fn corpus_node_modules() -> Option<PathBuf> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("integration/e2e/apps/vite-preact/node_modules");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/e2e/apps/vite-preact/node_modules");
     path.is_dir().then_some(path)
 }
 

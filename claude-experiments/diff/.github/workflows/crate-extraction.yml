@@ -1,0 +1,48 @@
+name: Crate extraction
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "scripts/check-crate-boundaries.sh"
+      - "scripts/check-extraction.sh"
+      - ".github/workflows/crate-extraction.yml"
+  push:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "scripts/check-crate-boundaries.sh"
+      - "scripts/check-extraction.sh"
+      - ".github/workflows/crate-extraction.yml"
+  workflow_dispatch:
+    inputs:
+      level:
+        description: Validation depth
+        required: true
+        default: phase
+        type: choice
+        options:
+          - phase
+          - final
+
+concurrency:
+  group: crate-extraction-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate extraction
+        env:
+          VALIDATION_LEVEL: ${{ inputs.level || 'phase' }}
+        run: ./scripts/check-extraction.sh "$VALIDATION_LEVEL"

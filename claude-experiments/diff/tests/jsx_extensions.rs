@@ -117,7 +117,11 @@ fn a_next_pages_build_compiles_jsx_in_js_and_keeps_the_importers_subtree() {
     }
 
     std::fs::write(root.join("next.config.js"), "module.exports = {};\n").unwrap();
-    std::fs::write(root.join("package.json"), "{\"name\":\"jsx-in-js\",\"private\":true}\n").unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        "{\"name\":\"jsx-in-js\",\"private\":true}\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(root.join("pages")).unwrap();
     std::fs::create_dir_all(root.join("components")).unwrap();
     std::fs::write(

@@ -1,0 +1,21 @@
+[package]
+name = "diffpack-web"
+version = "0.1.0"
+edition = "2024"
+description = "HTML entry and browser build integration for diffpack"
+license = "MIT"
+
+[features]
+memory-accounting = []
+
+[dependencies]
+diffpack-core = { path = "../diffpack-core" }
+diffpack-default-loader = { path = "../diffpack-default-loader" }
+diffpack-vite-compat = { path = "../diffpack-vite-compat" }
+flate2 = "1.1.9"
+notify = "8.2.0"
+rayon = "1.11.0"
+serde_json = "1.0.150"
+
+[dev-dependencies]
+tempfile = "3.23.0"

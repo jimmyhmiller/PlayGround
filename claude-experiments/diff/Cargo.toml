@@ -5,42 +5,37 @@ edition = "2024"
 description = "An experimental incremental JavaScript bundler built with Oxc"
 license = "MIT"
 
+[workspace]
+members = [
+    ".",
+    "crates/diffpack-core",
+    "crates/diffpack-default-loader",
+    "crates/diffpack-web",
+    "crates/diffpack-vite-compat",
+    "crates/diffpack-next",
+    "crates/diffpack-tanstack",
+]
+resolver = "3"
+
 [features]
 # Compiles in the deterministic allocation-accounting layer (a tracking global
 # allocator) used ONLY by `bundle-scale-memory` and the memory thesis guards.
 # Production/default builds have NO allocator override: plain system malloc.
-memory-accounting = []
+memory-accounting = ["diffpack-web/memory-accounting"]
 
 [dependencies]
-# The same glob matcher oxc_resolver matches tsconfig `include`/`exclude` with, so
-# `src/jsx_project_config.rs` reads a config's file set exactly as the resolver does.
-fast-glob = "1.0.1"
-markdown = "1.0"
-oxc_allocator = "0.140.0"
-oxc_ast = "0.140.0"
-oxc_ast_visit = "0.140.0"
-oxc_codegen = "0.140.0"
-oxc_diagnostics = "0.140.0"
-oxc_ecmascript = "0.140.0"
-oxc_parser = "0.140.0"
-oxc_resolver = "11.24.2"
-oxc_semantic = "0.140.0"
-oxc_sourcemap = "8.1.1"
-oxc_span = "0.140.0"
-oxc_syntax = "0.140.0"
-oxc_transformer = "0.140.0"
+diffpack-core = { path = "crates/diffpack-core" }
+diffpack-default-loader = { path = "crates/diffpack-default-loader" }
+diffpack-vite-compat = { path = "crates/diffpack-vite-compat" }
+diffpack-web = { path = "crates/diffpack-web" }
+diffpack-next = { path = "crates/diffpack-next" }
+diffpack-tanstack = { path = "crates/diffpack-tanstack" }
 serde_json = "1.0.150"
 notify = "8.2.0"
-rayon = "1.11.0"
-oxc_minifier = "0.140.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-# WOFF2 payloads are a single raw Brotli stream; decompressing one is the only way to
-# reach the `head`/`hhea`/`hmtx`/`cmap` tables `next/font/local` derives its fallback
-# metrics from. Decompression only — no encoder.
-brotli-decompressor = { version = "5.0.3", default-features = false, features = ["std"] }
-# WOFF (v1) compresses each table with zlib. Already in the tree via `image`'s png
-# decoder; named directly here because `src/font_file.rs` depends on it.
-flate2 = "1.1.9"
 
 [dev-dependencies]
+oxc_sourcemap = "8.1.1"
+oxc_resolver = "11.24.2"
+rayon = "1.11.0"
 tempfile = "3.23.0"

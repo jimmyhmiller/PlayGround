@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use diffpack::bundler::{BuildConfig, BuildUpdate, Bundler, DirectReachability, EmitOptions};
+use diffpack::bundler::{BuildConfig, BuildUpdate, DirectReachability, EmitOptions};
 use tempfile::tempdir;
 
 #[test]
@@ -22,7 +22,7 @@ fn incremental_bundle_matches_a_clean_rebuild_after_structural_edits() {
     let incremental_output = workspace.path().join("incremental.cjs");
     let fresh_output = workspace.path().join("fresh.cjs");
 
-    let (mut incremental, _) = Bundler::discover(&entry).unwrap();
+    let (mut incremental, _) = diffpack::bundler::discover(&entry).unwrap();
     let mut reachability = incremental.direct_reachability();
     let mut reachable = reachability.reachable_modules();
 
@@ -36,7 +36,7 @@ fn incremental_bundle_matches_a_clean_rebuild_after_structural_edits() {
     apply_update(&mut reachability, &mut reachable, &value_update);
     incremental.emit(&reachable, &incremental_output).unwrap();
 
-    let (fresh, _) = Bundler::discover(&entry).unwrap();
+    let (fresh, _) = diffpack::bundler::discover(&entry).unwrap();
     let fresh_reachable = fresh.reachable_modules_direct();
     fresh.emit(&fresh_reachable, &fresh_output).unwrap();
 
@@ -60,9 +60,17 @@ fn incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build() {
     // entry + a form the main chunk; b + bleaf form a dynamic-import chunk. The
     // leaf `bleaf` lives only in the dynamic chunk, so editing it must re-render
     // that chunk alone and leave the main chunk untouched.
-    write(root, "entry.js", "import { a } from \"./a.js\";\nimport(\"./b.js\").then((m) => console.log(a, m.b));\n");
+    write(
+        root,
+        "entry.js",
+        "import { a } from \"./a.js\";\nimport(\"./b.js\").then((m) => console.log(a, m.b));\n",
+    );
     write(root, "a.js", "export const a = 10;\n");
-    write(root, "b.js", "import { l } from \"./bleaf.js\";\nexport const b = l + 1;\n");
+    write(
+        root,
+        "b.js",
+        "import { l } from \"./bleaf.js\";\nexport const b = l + 1;\n",
+    );
     write(root, "bleaf.js", "export const l = 100;\n");
 
     let entry = root.join("entry.js");
@@ -71,7 +79,7 @@ fn incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build() {
     let fresh_dir = root.join("out-fresh");
 
     // Initial incremental build + emit: every chunk renders from scratch.
-    let (mut incremental, _) = Bundler::discover(&entry).unwrap();
+    let (mut incremental, _) = diffpack::bundler::discover(&entry).unwrap();
     let mut reachability = incremental.direct_reachability();
     let mut reachable = reachability.reachable_modules();
     let initial = incremental
@@ -87,7 +95,10 @@ fn incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build() {
     // Edit the leaf, re-transform exactly it, then re-emit incrementally.
     fs::write(&bleaf, "export const l = 200;\n").unwrap();
     let update = incremental.rebuild_path(&bleaf).unwrap();
-    assert_eq!(update.transformed_modules, 1, "a leaf edit re-transforms one module");
+    assert_eq!(
+        update.transformed_modules, 1,
+        "a leaf edit re-transforms one module"
+    );
     apply_update(&mut reachability, &mut reachable, &update);
     let reemit = incremental
         .emit(&reachable, &incremental_dir.join("bundle.js"))
@@ -100,12 +111,17 @@ fn incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build() {
     // The main chunk (which does not contain the leaf) is byte-identical across
     // the edit: it was served from the render cache, not re-rendered.
     let main_after = fs::read(incremental_dir.join("bundle.js")).unwrap();
-    assert_eq!(main_before, main_after, "the unchanged main chunk must be reused verbatim");
+    assert_eq!(
+        main_before, main_after,
+        "the unchanged main chunk must be reused verbatim"
+    );
 
     // A clean from-scratch build of the final filesystem state.
-    let (fresh, _) = Bundler::discover(&entry).unwrap();
+    let (fresh, _) = diffpack::bundler::discover(&entry).unwrap();
     let fresh_reachable = fresh.reachable_modules_direct();
-    fresh.emit(&fresh_reachable, &fresh_dir.join("bundle.js")).unwrap();
+    fresh
+        .emit(&fresh_reachable, &fresh_dir.join("bundle.js"))
+        .unwrap();
 
     // The whole incrementally-emitted tree equals the clean build's, file for
     // file, byte for byte (the changed chunk AND every reused chunk).
@@ -133,9 +149,17 @@ fn incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build() {
 fn minified_incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build() {
     let workspace = tempdir().unwrap();
     let root = workspace.path();
-    write(root, "entry.js", "import { a } from \"./a.js\";\nimport(\"./b.js\").then((m) => console.log(a, m.b));\n");
+    write(
+        root,
+        "entry.js",
+        "import { a } from \"./a.js\";\nimport(\"./b.js\").then((m) => console.log(a, m.b));\n",
+    );
     write(root, "a.js", "// module a\nexport const a = 10;\n");
-    write(root, "b.js", "// module b\nimport { l } from \"./bleaf.js\";\nexport const b = l + 1;\n");
+    write(
+        root,
+        "b.js",
+        "// module b\nimport { l } from \"./bleaf.js\";\nexport const b = l + 1;\n",
+    );
     write(root, "bleaf.js", "// leaf\nexport const l = 100;\n");
 
     let entry = root.join("entry.js");
@@ -147,7 +171,7 @@ fn minified_incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_bu
         ..EmitOptions::default()
     };
 
-    let (mut incremental, _) = Bundler::discover(&entry).unwrap();
+    let (mut incremental, _) = diffpack::bundler::discover(&entry).unwrap();
     let mut reachability = incremental.direct_reachability();
     let mut reachable = reachability.reachable_modules();
     let initial = incremental
@@ -167,7 +191,10 @@ fn minified_incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_bu
 
     fs::write(&bleaf, "// leaf\nexport const l = 200;\n").unwrap();
     let update = incremental.rebuild_path(&bleaf).unwrap();
-    assert_eq!(update.transformed_modules, 1, "a leaf edit re-transforms one module");
+    assert_eq!(
+        update.transformed_modules, 1,
+        "a leaf edit re-transforms one module"
+    );
     apply_update(&mut reachability, &mut reachable, &update);
     let reemit = incremental
         .emit_with_options(&reachable, &incremental_dir.join("bundle.js"), minify)
@@ -182,7 +209,7 @@ fn minified_incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_bu
         "the unchanged minified main chunk must be reused verbatim"
     );
 
-    let (fresh, _) = Bundler::discover(&entry).unwrap();
+    let (fresh, _) = diffpack::bundler::discover(&entry).unwrap();
     let fresh_reachable = fresh.reachable_modules_direct();
     fresh
         .emit_with_options(&fresh_reachable, &fresh_dir.join("bundle.js"), minify)
@@ -213,9 +240,17 @@ fn minified_incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_bu
 fn source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map() {
     let workspace = tempdir().unwrap();
     let root = workspace.path();
-    write(root, "entry.js", "import { a } from \"./a.js\";\nimport(\"./b.js\").then((m) => console.log(a, m.b));\n");
+    write(
+        root,
+        "entry.js",
+        "import { a } from \"./a.js\";\nimport(\"./b.js\").then((m) => console.log(a, m.b));\n",
+    );
     write(root, "a.js", "// module a\nexport const a = 10;\n");
-    write(root, "b.js", "// module b\nimport { l } from \"./bleaf.js\";\nexport const b = l + 1;\n");
+    write(
+        root,
+        "b.js",
+        "// module b\nimport { l } from \"./bleaf.js\";\nexport const b = l + 1;\n",
+    );
     write(root, "bleaf.js", "// leaf\nexport const l = 100;\n");
 
     let entry = root.join("entry.js");
@@ -236,7 +271,8 @@ fn source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map() {
         source_maps: true,
         ..BuildConfig::default()
     };
-    let (mut incremental, _) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+    let (mut incremental, _) =
+        diffpack::bundler::discover_direct_with_config(&entry, &config).unwrap();
     let mut reachability = incremental.direct_reachability();
     let mut reachable = reachability.reachable_modules();
     let initial = incremental
@@ -261,7 +297,10 @@ fn source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map() {
 
     fs::write(&bleaf, "// leaf\nexport const l = 200;\n").unwrap();
     let update = incremental.rebuild_path(&bleaf).unwrap();
-    assert_eq!(update.transformed_modules, 1, "a leaf edit re-transforms one module");
+    assert_eq!(
+        update.transformed_modules, 1,
+        "a leaf edit re-transforms one module"
+    );
     apply_update(&mut reachability, &mut reachable, &update);
     let reemit = incremental
         .emit_with_options(&reachable, &incremental_dir.join("bundle.js"), options)
@@ -283,7 +322,7 @@ fn source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map() {
         "the unchanged main chunk's composed map must be reused verbatim"
     );
 
-    let (fresh, _) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+    let (fresh, _) = diffpack::bundler::discover_direct_with_config(&entry, &config).unwrap();
     let fresh_reachable = fresh.reachable_modules_direct();
     fresh
         .emit_with_options(&fresh_reachable, &fresh_dir.join("bundle.js"), options)
@@ -294,7 +333,11 @@ fn source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map() {
     let fresh_tree = read_tree(&fresh_dir);
     // The tree includes both `.js` chunks and their `.map` siblings.
     assert!(
-        incremental_tree.keys().filter(|path| path.extension().is_some_and(|ext| ext == "map")).count() >= 2,
+        incremental_tree
+            .keys()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "map"))
+            .count()
+            >= 2,
         "expected a `.map` per chunk, got {:?}",
         incremental_tree.keys().collect::<Vec<_>>()
     );
@@ -369,13 +412,19 @@ fn measure_incremental_emit_speedup() {
     let chunks = 200usize;
     let mut entry_src = String::new();
     for i in 0..chunks {
-        write(root, &format!("leaf{i}.js"), &format!("export const v = {i};\nexport const w = v + 1;\n"));
-        entry_src.push_str(&format!("import(\"./leaf{i}.js\").then((m) => console.log(m.v));\n"));
+        write(
+            root,
+            &format!("leaf{i}.js"),
+            &format!("export const v = {i};\nexport const w = v + 1;\n"),
+        );
+        entry_src.push_str(&format!(
+            "import(\"./leaf{i}.js\").then((m) => console.log(m.v));\n"
+        ));
     }
     write(root, "entry.js", &entry_src);
     let entry = root.join("entry.js");
 
-    let (mut bundler, _) = Bundler::discover(&entry).unwrap();
+    let (mut bundler, _) = diffpack::bundler::discover(&entry).unwrap();
     let mut reachability = bundler.direct_reachability();
     let mut reachable = reachability.reachable_modules();
 
@@ -385,7 +434,11 @@ fn measure_incremental_emit_speedup() {
     let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     // Edit one leaf and re-emit with a warm cache.
-    fs::write(root.join("leaf137.js"), "export const v = 9999;\nexport const w = v + 1;\n").unwrap();
+    fs::write(
+        root.join("leaf137.js"),
+        "export const v = 9999;\nexport const w = v + 1;\n",
+    )
+    .unwrap();
     let update = bundler.rebuild_path(&root.join("leaf137.js")).unwrap();
     apply_update(&mut reachability, &mut reachable, &update);
     let t1 = Instant::now();
@@ -394,8 +447,16 @@ fn measure_incremental_emit_speedup() {
 
     eprintln!(
         "chunks={chunks} cold: rendered {} chunks in {cold_ms:.2}ms | warm(leaf edit): rendered {} chunk(s) in {warm_ms:.2}ms | speedup {:.1}x",
-        cold.rendered_chunks, warm.rendered_chunks, cold_ms / warm_ms
+        cold.rendered_chunks,
+        warm.rendered_chunks,
+        cold_ms / warm_ms
     );
-    assert_eq!(warm.rendered_chunks, 1, "leaf edit re-renders exactly one chunk");
-    assert!(cold.rendered_chunks >= chunks, "cold build renders every chunk");
+    assert_eq!(
+        warm.rendered_chunks, 1,
+        "leaf edit re-renders exactly one chunk"
+    );
+    assert!(
+        cold.rendered_chunks >= chunks,
+        "cold build renders every chunk"
+    );
 }

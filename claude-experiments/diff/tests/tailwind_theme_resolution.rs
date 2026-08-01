@@ -48,7 +48,9 @@ fn write_project(root: &Path, css_rel: &str, installed_tailwind: bool) {
     // whichever layout the case uses.
     let import_specifier = format!(
         "./{}",
-        css_rel.strip_prefix("src/").expect("the entry lives under src/")
+        css_rel
+            .strip_prefix("src/")
+            .expect("the entry lives under src/")
     );
     std::fs::write(
         root.join("src/main.js"),
@@ -67,7 +69,7 @@ fn write_project(root: &Path, css_rel: &str, installed_tailwind: bool) {
             package.join("package.json"),
             format!(
                 "{{\"name\":\"tailwindcss\",\"version\":{:?}}}\n",
-                diffpack::tailwind::VERSION
+                diffpack_default_loader::tailwind::VERSION
             ),
         )
         .unwrap();
@@ -77,7 +79,7 @@ fn write_project(root: &Path, css_rel: &str, installed_tailwind: bool) {
             package.join("theme.css"),
             format!(
                 "{}\n@theme {{\n  --color-sentinel: {SENTINEL_COLOR};\n}}\n",
-                diffpack::tailwind::vendored_theme_css()
+                diffpack_default_loader::tailwind::vendored_theme_css()
             ),
         )
         .unwrap();

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
-use diffpack::tailwind::{compile, scan_class_candidates};
+use diffpack_default_loader::tailwind::{compile, scan_class_candidates};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("integration/tanstack-start-reference")
@@ -121,11 +121,7 @@ fn extract_class_name(selector: &str) -> Option<String> {
             _ => name.push(c),
         }
     }
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 #[test]

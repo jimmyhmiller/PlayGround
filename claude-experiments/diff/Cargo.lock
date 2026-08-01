@@ -181,12 +181,25 @@ dependencies = [
 name = "diffpack"
 version = "0.1.0"
 dependencies = [
- "brotli-decompressor",
- "fast-glob",
- "flate2",
+ "diffpack-core",
+ "diffpack-default-loader",
+ "diffpack-next",
+ "diffpack-tanstack",
+ "diffpack-vite-compat",
+ "diffpack-web",
  "image",
- "markdown",
  "notify",
+ "oxc_resolver",
+ "oxc_sourcemap",
+ "rayon",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "diffpack-core"
+version = "0.1.0"
+dependencies = [
  "oxc_allocator",
  "oxc_ast",
  "oxc_ast_visit",
@@ -195,12 +208,107 @@ dependencies = [
  "oxc_ecmascript",
  "oxc_minifier",
  "oxc_parser",
- "oxc_resolver",
  "oxc_semantic",
  "oxc_sourcemap",
  "oxc_span",
  "oxc_syntax",
  "oxc_transformer",
+ "rayon",
+ "serde_json",
+]
+
+[[package]]
+name = "diffpack-default-loader"
+version = "0.1.0"
+dependencies = [
+ "brotli-decompressor",
+ "diffpack-core",
+ "fast-glob",
+ "flate2",
+ "image",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_parser",
+ "oxc_resolver",
+ "oxc_sourcemap",
+ "oxc_span",
+ "rayon",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "diffpack-next"
+version = "0.1.0"
+dependencies = [
+ "diffpack-core",
+ "diffpack-default-loader",
+ "diffpack-vite-compat",
+ "diffpack-web",
+ "image",
+ "markdown",
+ "notify",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_codegen",
+ "oxc_parser",
+ "oxc_resolver",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_transformer",
+ "rayon",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "diffpack-tanstack"
+version = "0.1.0"
+dependencies = [
+ "diffpack-core",
+ "diffpack-default-loader",
+ "diffpack-vite-compat",
+ "diffpack-web",
+ "notify",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_ecmascript",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "diffpack-vite-compat"
+version = "0.1.0"
+dependencies = [
+ "diffpack-core",
+ "diffpack-default-loader",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "diffpack-web"
+version = "0.1.0"
+dependencies = [
+ "diffpack-core",
+ "diffpack-default-loader",
+ "diffpack-vite-compat",
+ "flate2",
+ "notify",
  "rayon",
  "serde_json",
  "tempfile",

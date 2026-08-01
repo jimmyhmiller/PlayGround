@@ -15,8 +15,7 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn release_binary() -> Option<PathBuf> {
-    let binary = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/release/diffpack");
+    let binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/release/diffpack");
     binary.is_file().then_some(binary)
 }
 
@@ -61,7 +60,12 @@ fn relative_out_dir_resolves_against_the_project_root_not_the_cwd() {
     let elsewhere = tempdir().unwrap();
     write_project(project.path());
 
-    build(&binary, project.path(), elsewhere.path(), Some("dist-custom"));
+    build(
+        &binary,
+        project.path(),
+        elsewhere.path(),
+        Some("dist-custom"),
+    );
 
     assert!(
         project.path().join("dist-custom/index.html").is_file(),

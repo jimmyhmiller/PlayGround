@@ -1,0 +1,25 @@
+[package]
+name = "diffpack-default-loader"
+version = "0.1.0"
+edition = "2024"
+description = "Default filesystem, JavaScript, CSS, and asset loading for diffpack"
+license = "MIT"
+
+[dependencies]
+brotli-decompressor = { version = "5.0.3", default-features = false, features = ["std"] }
+diffpack-core = { path = "../diffpack-core" }
+fast-glob = "1.0.1"
+flate2 = "1.1.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+oxc_allocator = "0.140.0"
+oxc_ast = "0.140.0"
+oxc_ast_visit = "0.140.0"
+oxc_parser = "0.140.0"
+oxc_resolver = "11.24.2"
+oxc_sourcemap = "8.1.1"
+oxc_span = "0.140.0"
+rayon = "1.11.0"
+serde_json = "1.0.150"
+
+[dev-dependencies]
+tempfile = "3.23.0"

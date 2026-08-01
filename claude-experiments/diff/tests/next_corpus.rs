@@ -16,7 +16,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use diffpack::next_adapter::{configure, configure_dev, is_app_router, write_prerender_plan};
+use diffpack::config::{configure_next_app as configure, configure_next_app_dev as configure_dev};
+use diffpack_next::next_adapter::{is_app_router, write_prerender_plan};
 use serde_json::Value;
 use tempfile::tempdir;
 
@@ -29,7 +30,10 @@ fn copy_directory(source: &Path, destination: &Path) {
         let entry = entry.unwrap();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if matches!(name_str.as_ref(), "node_modules" | ".diffpack-output" | ".diffpack-next" | ".next") {
+        if matches!(
+            name_str.as_ref(),
+            "node_modules" | ".diffpack-output" | ".diffpack-next" | ".next"
+        ) {
             continue;
         }
         let from = entry.path();
@@ -56,24 +60,35 @@ fn corpus_apps() -> Vec<PathBuf> {
         .filter(|p| p.is_dir() && p.join("expected.json").is_file())
         .collect();
     apps.sort();
-    assert!(!apps.is_empty(), "no corpus apps found under {}", corpus_dir().display());
+    assert!(
+        !apps.is_empty(),
+        "no corpus apps found under {}",
+        corpus_dir().display()
+    );
     apps
 }
 
 fn read(path: &Path) -> String {
-    fs::read_to_string(path).unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
 
 fn parse(path: &Path) -> Value {
-    serde_json::from_str(&read(path)).unwrap_or_else(|error| panic!("invalid JSON {}: {error}", path.display()))
+    serde_json::from_str(&read(path))
+        .unwrap_or_else(|error| panic!("invalid JSON {}: {error}", path.display()))
 }
 
 /// Drive one corpus app through the hermetic (node-free) adapter surface.
 fn check_app(app_src: &Path) {
     let expected = parse(&app_src.join("expected.json"));
-    let label = expected["name"].as_str().expect("expected.json has a name").to_string();
+    let label = expected["name"]
+        .as_str()
+        .expect("expected.json has a name")
+        .to_string();
     let label = &label;
-    let routes = expected["routes"].as_array().expect("expected.json has routes");
+    let routes = expected["routes"]
+        .as_array()
+        .expect("expected.json has routes");
     let handlers = expected["handlers"].as_array().cloned().unwrap_or_default();
     let scaffold = &expected["scaffold"];
 
@@ -84,7 +99,10 @@ fn check_app(app_src: &Path) {
     copy_directory(app_src, &root);
 
     // (1) app-router detection.
-    assert!(is_app_router(&root), "[{label}] is_app_router must detect the app");
+    assert!(
+        is_app_router(&root),
+        "[{label}] is_app_router must detect the app"
+    );
 
     // (2) configure() for every environment; each returns Some and re-writes the shared
     // .diffpack-next/ scaffold. Capture the client config for the alias assertions.
@@ -115,15 +133,27 @@ fn check_app(app_src: &Path) {
         "ERROR_BOUNDARY",
         "function notFoundTree()",
     ] {
-        assert!(rsc.contains(marker), "[{label}] rsc-entry missing marker `{marker}`");
+        assert!(
+            rsc.contains(marker),
+            "[{label}] rsc-entry missing marker `{marker}`"
+        );
     }
-    assert!(client_src.contains("hydrateRoot(document"), "[{label}] client entry hydrates the document");
+    assert!(
+        client_src.contains("hydrateRoot(document"),
+        "[{label}] client entry hydrates the document"
+    );
     assert!(
         client_src.contains("window.__diffpack_navigate"),
         "[{label}] client entry installs the soft-nav router"
     );
-    assert!(ssr_src.contains("renderFlightToDocument"), "[{label}] ssr entry renders flight to document");
-    assert!(adapter.join("image-manifest.ts").is_file(), "[{label}] image variant manifest is generated");
+    assert!(
+        ssr_src.contains("renderFlightToDocument"),
+        "[{label}] ssr entry renders flight to document"
+    );
+    assert!(
+        adapter.join("image-manifest.ts").is_file(),
+        "[{label}] image variant manifest is generated"
+    );
 
     // (4) every expected route path appears in the rsc ROUTES table.
     for route in routes {
@@ -137,8 +167,20 @@ fn check_app(app_src: &Path) {
     // (5) scaffold-boundary interning is present iff the app declares it. `loading: M`/
     // `error: M` mark a real boundary module in a level (vs `loading: null`/`error: null`);
     // `APP_NOT_FOUND = M<i>` (vs `= null`) marks app/not-found.* wired into the 404 tree.
-    assert_boundary(&rsc, "loading: M", scaffold["loading"].as_bool().unwrap(), label, "loading.tsx");
-    assert_boundary(&rsc, "error: M", scaffold["error"].as_bool().unwrap(), label, "error.tsx");
+    assert_boundary(
+        &rsc,
+        "loading: M",
+        scaffold["loading"].as_bool().unwrap(),
+        label,
+        "loading.tsx",
+    );
+    assert_boundary(
+        &rsc,
+        "error: M",
+        scaffold["error"].as_bool().unwrap(),
+        label,
+        "error.tsx",
+    );
     if scaffold["notFound"].as_bool().unwrap() {
         assert!(
             rsc.contains("const APP_NOT_FOUND = M"),
@@ -168,35 +210,66 @@ fn check_app(app_src: &Path) {
         }
     }
     if handlers.is_empty() {
-        assert!(rsc.contains("const ROUTE_HANDLERS = [\n];"), "[{label}] expected NO route handlers");
+        assert!(
+            rsc.contains("const ROUTE_HANDLERS = [\n];"),
+            "[{label}] expected NO route handlers"
+        );
     } else {
-        assert!(rsc.contains("import * as H0 from"), "[{label}] a route handler must be namespace-imported");
+        assert!(
+            rsc.contains("import * as H0 from"),
+            "[{label}] a route handler must be namespace-imported"
+        );
     }
 
     // (7) next/* shims aliased to real generated files (assert on the client config).
     let aliases: std::collections::HashMap<_, _> = client.build.aliases.iter().cloned().collect();
-    for spec in ["next/link", "next/image", "next/navigation", "next/headers", "next/server"] {
+    for spec in [
+        "next/link",
+        "next/image",
+        "next/navigation",
+        "next/headers",
+        "next/server",
+    ] {
         let target = aliases
             .get(spec)
             .unwrap_or_else(|| panic!("[{label}] {spec} must be aliased"));
-        assert!(Path::new(target).is_file(), "[{label}] {spec} shim file `{target}` must exist");
+        assert!(
+            Path::new(target).is_file(),
+            "[{label}] {spec} shim file `{target}` must exist"
+        );
     }
     // Production config never turns HMR on and defines NODE_ENV=production.
-    assert!(!client.build.hmr, "[{label}] production config keeps HMR off");
     assert!(
-        client.build.defines.iter().any(|(k, v)| k == "process.env.NODE_ENV" && v == "\"production\""),
+        !client.build.hmr,
+        "[{label}] production config keeps HMR off"
+    );
+    assert!(
+        client
+            .build
+            .source_policy
+            .defines()
+            .iter()
+            .any(|(k, v)| k == "process.env.NODE_ENV" && v == "\"production\""),
         "[{label}] production config defines NODE_ENV=production"
     );
 
     // (8) configure_dev: HMR on, NODE_ENV=development, production condition swapped, for
     // every environment.
     for environment in ["client", "react-server", "ssr"] {
-        let dev = configure_dev(&root, environment, &diffpack::next_adapter::RouteScope::All)
-            .unwrap_or_else(|e| panic!("[{label}] configure_dev({environment}) errored: {e}"))
-            .unwrap_or_else(|| panic!("[{label}] configure_dev({environment}) returned None"));
+        let dev = configure_dev(
+            &root,
+            environment,
+            &diffpack_next::next_adapter::RouteScope::All,
+        )
+        .unwrap_or_else(|e| panic!("[{label}] configure_dev({environment}) errored: {e}"))
+        .unwrap_or_else(|| panic!("[{label}] configure_dev({environment}) returned None"));
         assert!(dev.build.hmr, "[{label}] dev {environment} turns HMR on");
         assert!(
-            dev.build.defines.iter().any(|(k, v)| k == "process.env.NODE_ENV" && v == "\"development\""),
+            dev.build
+                .source_policy
+                .defines()
+                .iter()
+                .any(|(k, v)| k == "process.env.NODE_ENV" && v == "\"development\""),
             "[{label}] dev {environment} defines NODE_ENV=development"
         );
         assert!(
@@ -210,7 +283,12 @@ fn check_app(app_src: &Path) {
     let out = tempdir().unwrap();
     let count = write_prerender_plan(&root, out.path())
         .unwrap_or_else(|e| panic!("[{label}] write_prerender_plan errored: {e}"));
-    assert_eq!(count, routes.len(), "[{label}] plan route count {count} != expected {}", routes.len());
+    assert_eq!(
+        count,
+        routes.len(),
+        "[{label}] plan route count {count} != expected {}",
+        routes.len()
+    );
     let plan = parse(&out.path().join("static/prerender-plan.json"));
     let plan = plan.as_array().expect("plan is an array");
 
@@ -221,7 +299,11 @@ fn check_app(app_src: &Path) {
             .iter()
             .find(|e| e["path"].as_str() == Some(path))
             .unwrap_or_else(|| panic!("[{label}] prerender plan has no route `{path}`"));
-        assert_eq!(entry["kind"].as_str(), Some(kind), "[{label}] route `{path}` kind");
+        assert_eq!(
+            entry["kind"].as_str(),
+            Some(kind),
+            "[{label}] route `{path}` kind"
+        );
 
         if let Some(expected_reval) = route.get("revalidate").and_then(|r| r.as_u64()) {
             assert_eq!(
@@ -231,9 +313,14 @@ fn check_app(app_src: &Path) {
             );
         }
         if kind == "ssg" {
-            if let Some(has_gsp) = route.get("hasGenerateStaticParams").and_then(|b| b.as_bool()) {
+            if let Some(has_gsp) = route
+                .get("hasGenerateStaticParams")
+                .and_then(|b| b.as_bool())
+            {
                 assert_eq!(
-                    entry.get("hasGenerateStaticParams").and_then(|b| b.as_bool()),
+                    entry
+                        .get("hasGenerateStaticParams")
+                        .and_then(|b| b.as_bool()),
                     Some(has_gsp),
                     "[{label}] route `{path}` hasGenerateStaticParams"
                 );
@@ -260,9 +347,15 @@ fn check_app(app_src: &Path) {
 /// appear when `present`, and must NOT appear when absent.
 fn assert_boundary(rsc: &str, marker: &str, present: bool, label: &str, what: &str) {
     if present {
-        assert!(rsc.contains(marker), "[{label}] expected a {what} boundary interned (`{marker}`)");
+        assert!(
+            rsc.contains(marker),
+            "[{label}] expected a {what} boundary interned (`{marker}`)"
+        );
     } else {
-        assert!(!rsc.contains(marker), "[{label}] expected NO {what} boundary, found `{marker}`");
+        assert!(
+            !rsc.contains(marker),
+            "[{label}] expected NO {what} boundary, found `{marker}`"
+        );
     }
 }
 
@@ -308,7 +401,10 @@ fn corpus_native_build_smoke_when_prereqs_present() {
             .arg("--no-minify")
             .status()
             .unwrap_or_else(|e| panic!("cannot run build-app {environment}: {e}"));
-        assert!(status.success(), "build-app {environment} failed for blog-static");
+        assert!(
+            status.success(),
+            "build-app {environment} failed for blog-static"
+        );
     }
 
     // At least one client bundle was emitted under public/.
@@ -318,5 +414,8 @@ fn corpus_native_build_smoke_when_prereqs_present() {
         .flatten()
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("js"))
         .count();
-    assert!(js_count > 0, "the client build emitted no public/*.js for blog-static");
+    assert!(
+        js_count > 0,
+        "the client build emitted no public/*.js for blog-static"
+    );
 }
