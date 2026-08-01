@@ -35,10 +35,18 @@ enum Selection: Equatable {
 
 // MARK: - Projects & pull requests
 
+/// A checkout the user can review. Either a repository's main worktree, or one
+/// of its linked worktrees — the two behave identically for diffing and
+/// staging, so linked worktrees are modelled as nested `Project`s rather than a
+/// separate type.
 struct Project: Identifiable, Hashable {
-    let name: String
+    var name: String
     let path: URL
     let modified: Date
+    /// Checked-out branch, `nil` when the checkout is detached.
+    var branch: String?
+    /// Linked worktrees of this repo. Always empty on a worktree itself.
+    var worktrees: [Project] = []
 
     var id: String { path.path }
 }
@@ -78,6 +86,16 @@ struct PullRequest: Identifiable, Hashable, Codable {
         default: return "open"
         }
     }
+}
+
+// MARK: - Branch comparison
+
+/// How the checked-out branch relates to its base branch (main / master).
+struct BranchComparison: Hashable, Codable {
+    let baseBranch: String       // "main" or "master"
+    let ahead: Int               // commits ahead of base
+    let behind: Int              // commits behind base
+    let filesChanged: Int        // files changed on this branch vs merge-base
 }
 
 // MARK: - Diffs

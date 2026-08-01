@@ -45,6 +45,7 @@ final class AppStore: ObservableObject {
     @Published var prErrors: [String: String] = [:]
     @Published var loadingPRs: Set<String> = []
     @Published var wtCounts: [String: Int] = [:]
+    @Published var branchComparisons: [String: BranchComparison] = [:]
     @Published var projectFilter: String = ""
     @Published var needsAuth: Set<String> = []
     @Published var authIssues: [String: AccessIssue] = [:]
@@ -107,6 +108,7 @@ final class AppStore: ObservableObject {
         slugs = cache.slugs
         prsByProject = cache.prs
         wtCounts = cache.wtCounts
+        branchComparisons = cache.branchComparisons
         needsAuth = cache.needsAuth
         authIssues = cache.authIssues ?? [:]
         expanded = cache.expanded
@@ -141,10 +143,19 @@ final class AppStore: ObservableObject {
                 select(pr: pr, in: p)
             }
         case .workingTree(let projectID):
-            if let p = projects.first(where: { $0.id == projectID }) {
+            if let p = checkout(id: projectID) {
                 selectWorkingTree(p)
             }
         }
+    }
+
+    /// Every checkout the sidebar can select — projects plus their worktrees.
+    func checkout(id: String) -> Project? {
+        for p in projects {
+            if p.id == id { return p }
+            if let wt = p.worktrees.first(where: { $0.id == id }) { return wt }
+        }
+        return nil
     }
 
     func ensureProjectLoaded(_ project: Project, force: Bool = false) {
@@ -174,8 +185,14 @@ final class AppStore: ObservableObject {
         }
         for t in targets { refreshedThisSession.insert(t.id) }
 
-        // Phase 1 — local only, so dirty dots light up across the whole list fast.
-        await runLimited(targets, limit: 12) { await self.loadLocal($0) }
+        // Phase 1 — local only, so dirty dots light up across the whole list
+        // fast. Worktrees are only statted for projects the user has open;
+        // a repo can easily have a dozen of them, and each costs its own
+        // `git status` against its own index.
+        let localTargets = targets.flatMap { p in
+            expanded.contains(p.id) ? [p] + p.worktrees.filter { !hiddenProjects.contains($0.id) } : [p]
+        }
+        await runLimited(localTargets, limit: 12) { await self.loadLocal($0) }
 
         // Phase 2 — GitHub, for the projects the user actually keeps on top.
         let priority = targets.filter { slugs[$0.id] != nil }.prefix(Self.prPriorityLimit)
@@ -205,12 +222,14 @@ final class AppStore: ObservableObject {
         }
     }
 
-    /// Local git facts: remote slug + working-tree dirtiness. No network.
+    /// Local git facts: remote slug + working-tree dirtiness + base-branch comparison. No network.
     private func loadLocal(_ project: Project) async {
         async let slugTask = GitClient.remoteSlug(repo: project.path)
         async let statusTask = GitClient.status(repo: project.path)
+        async let comparisonTask = GitClient.branchComparison(repo: project.path)
         let slug = await slugTask
         let statusEntries = await statusTask
+        let comparison = await comparisonTask
 
         if let slug {
             slugs[project.id] = slug
@@ -218,6 +237,10 @@ final class AppStore: ObservableObject {
         }
         wtCounts[project.id] = statusEntries.count
         cache.wtCounts[project.id] = statusEntries.count
+        if let comparison {
+            branchComparisons[project.id] = comparison
+            cache.branchComparisons[project.id] = comparison
+        }
         if slug == nil, prsByProject[project.id] == nil {
             prsByProject[project.id] = []
             loadingPRs.remove(project.id)
@@ -258,6 +281,10 @@ final class AppStore: ObservableObject {
     private func loadProject(_ project: Project) async {
         await loadLocal(project)
         await loadPRs(project)
+        // Worktree rows are only visible once the project is expanded, which is
+        // exactly when this runs.
+        let worktrees = project.worktrees.filter { !hiddenProjects.contains($0.id) }
+        await runLimited(worktrees, limit: 6) { await self.loadLocal($0) }
     }
 
     private var cacheSavePending = false
@@ -326,6 +353,9 @@ final class AppStore: ObservableObject {
         persistProjectPrefs()
         if let p = projects.first(where: { $0.id == id }) {
             ensureProjectLoaded(p)
+        } else if let worktree = checkout(id: id) {
+            // Worktrees have no PR list of their own — just refresh the dot.
+            Task { await loadLocal(worktree) }
         }
     }
 
@@ -580,13 +610,23 @@ final class AppStore: ObservableObject {
             }
         }
 
-        for fd in state.stagedDiffs {
-            merge(path: fd.path, status: fd.status, hunks: fd.hunks,
-                  add: fd.additions, del: fd.deletions, binary: fd.isBinary, untracked: false)
-        }
-        for fd in state.unstagedDiffs {
-            merge(path: fd.path, status: fd.status, hunks: fd.hunks,
-                  add: fd.additions, del: fd.deletions, binary: fd.isBinary, untracked: false)
+        // Main pane shows the full branch diff vs the base branch (what the
+        // user actually wants to review), not just pending staged+unstaged.
+        if !state.branchDiffs.isEmpty {
+            for fd in state.branchDiffs {
+                merge(path: fd.path, status: fd.status, hunks: fd.hunks,
+                      add: fd.additions, del: fd.deletions, binary: fd.isBinary, untracked: false)
+            }
+        } else {
+            // Fall back to pending changes when no base branch is available.
+            for fd in state.stagedDiffs {
+                merge(path: fd.path, status: fd.status, hunks: fd.hunks,
+                      add: fd.additions, del: fd.deletions, binary: fd.isBinary, untracked: false)
+            }
+            for fd in state.unstagedDiffs {
+                merge(path: fd.path, status: fd.status, hunks: fd.hunks,
+                      add: fd.additions, del: fd.deletions, binary: fd.isBinary, untracked: false)
+            }
         }
         for path in state.untracked {
             let df = DiffParser.untrackedFile(repo: project.path, path: path)
@@ -597,29 +637,47 @@ final class AppStore: ObservableObject {
         displayFiles = order.compactMap { byPath[$0] }
         wtCounts[project.id] = state.entries.count
 
+        // Sidebar file list: when we have a branch diff, the main section shows
+        // those files (matching the review pane). Otherwise fall back to pending
+        // unstaged changes. The staged section always shows pending staged files.
         var unstaged: [FileEntry] = []
         var staged: [FileEntry] = []
         let unstagedByPath = Dictionary(uniqueKeysWithValues: state.unstagedDiffs.map { ($0.path, $0) })
         let stagedByPath = Dictionary(uniqueKeysWithValues: state.stagedDiffs.map { ($0.path, $0) })
 
-        for entry in state.entries {
-            let path = entry.path
-            if entry.index == "?" {
-                unstaged.append(FileEntry(path: path, status: "A", add: byPath[path]?.additions ?? 0,
-                                          del: 0, checked: false, inStagedSection: false))
-                continue
+        if !state.branchDiffs.isEmpty {
+            let branchPaths = Set(state.branchDiffs.map(\.path))
+            for path in order {
+                guard branchPaths.contains(path) else { continue }
+                let fd = byPath[path]
+                unstaged.append(FileEntry(path: path, status: fd?.status ?? "M",
+                                          add: fd?.additions ?? 0, del: fd?.deletions ?? 0,
+                                          checked: false, inStagedSection: false))
             }
-            if entry.worktree != " " {
-                let fd = unstagedByPath[path]
-                unstaged.append(FileEntry(path: path, status: String(entry.worktree), add: fd?.additions ?? 0,
-                                          del: fd?.deletions ?? 0, checked: false, inStagedSection: false))
-            }
-            if entry.index != " " {
-                let fd = stagedByPath[path]
-                staged.append(FileEntry(path: path, status: String(entry.index), add: fd?.additions ?? 0,
-                                        del: fd?.deletions ?? 0, checked: true, inStagedSection: true))
+        } else {
+            for entry in state.entries {
+                let path = entry.path
+                if entry.index == "?" {
+                    unstaged.append(FileEntry(path: path, status: "A", add: byPath[path]?.additions ?? 0,
+                                              del: 0, checked: false, inStagedSection: false))
+                    continue
+                }
+                if entry.worktree != " " {
+                    let fd = unstagedByPath[path]
+                    unstaged.append(FileEntry(path: path, status: String(entry.worktree), add: fd?.additions ?? 0,
+                                              del: fd?.deletions ?? 0, checked: false, inStagedSection: false))
+                }
             }
         }
+
+        // Staged entries from the index — always shown for staging context.
+        for entry in state.entries where entry.index != " " && entry.index != "?" {
+            let path = entry.path
+            let fd = stagedByPath[path]
+            staged.append(FileEntry(path: path, status: String(entry.index), add: fd?.additions ?? 0,
+                                    del: fd?.deletions ?? 0, checked: true, inStagedSection: true))
+        }
+
         changeEntries = unstaged
         stagedEntries = staged
 
@@ -647,7 +705,6 @@ final class AppStore: ObservableObject {
 
     func selectFile(_ path: String) {
         selectedPath = path
-        composer = nil
         editingID = nil
     }
 
@@ -1036,7 +1093,7 @@ final class AppStore: ObservableObject {
     func buildSummary() -> String {
         var out = "# Code review — \(reviewTitle)\n"
         out += "Verdict: \(verdict.rawValue)\n"
-        let active = comments
+        let active = comments.filter { !$0.id.hasPrefix("r") }
         var byPath: [String: [ReviewComment]] = [:]
         var pathOrder: [String] = []
         for c in active {

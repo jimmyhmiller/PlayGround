@@ -107,8 +107,10 @@ private struct DiffRowView: View {
             HunkHeaderView(hunk: hunk, file: file)
         case .uline(_, let line, let hunk, let index):
             UnifiedLineView(line: line, path: file.path, hunk: hunk, index: index)
+                .frame(maxWidth: .infinity)
         case .pair(_, let left, let right):
             SplitPairView(left: left, right: right, path: file.path)
+                .frame(maxWidth: .infinity)
         case .thread(let thread):
             ThreadView(thread: thread)
         case .note(_, let text):
@@ -297,18 +299,21 @@ private struct UnifiedLineView: View {
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.trailing, 12)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    store.openComposer(path: path, line: line.newNo ?? line.oldNo)
-                }
-                .help("Click to comment on this line")
         }
-        .frame(minHeight: 20)
+        .frame(maxWidth: .infinity, minHeight: 28)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            store.openComposer(path: path, line: line.newNo ?? line.oldNo)
+        }
         .background(rowColor)
-        .overlay(isSelected ? Th.accent.opacity(0.14) : (hovered ? Color.white.opacity(0.04) : Color.clear))
+        .overlay(
+            (isSelected ? Th.accent.opacity(0.14) : (hovered ? Color.white.opacity(0.04) : Color.clear))
+                .allowsHitTesting(false)
+        )
         .overlay(alignment: .leading) {
             if isSelected {
                 Rectangle().fill(Th.accent).frame(width: 2)
+                    .allowsHitTesting(false)
             }
         }
         .onHover { hovered = $0 }
@@ -358,10 +363,18 @@ private struct SplitPairView: View {
             sideView(line: left, isLeft: true)
                 .overlay(alignment: .trailing) {
                     Rectangle().fill(Color.white.opacity(0.06)).frame(width: 1)
+                        .allowsHitTesting(false)
                 }
             sideView(line: right, isLeft: false)
         }
-        .frame(minHeight: 20)
+        .frame(minHeight: 28)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            let line = right ?? left
+            if let line {
+                store.openComposer(path: path, line: line.newNo ?? line.oldNo)
+            }
+        }
     }
 
     @ViewBuilder
@@ -400,11 +413,5 @@ private struct SplitPairView: View {
                 .padding(.horizontal, 8)
         }
         .background(bg)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if let line {
-                store.openComposer(path: path, line: line.newNo ?? line.oldNo)
-            }
-        }
     }
 }

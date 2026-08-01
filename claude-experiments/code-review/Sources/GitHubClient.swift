@@ -51,7 +51,7 @@ enum GitHubClient {
     static func prList(repo: URL) async -> Result<[PullRequest], GHError> {
         let fields = "number,title,author,headRefName,updatedAt,state,isDraft,reviewDecision,additions,deletions,statusCheckRollup"
         let r = await Shell.run(
-            ["gh", "pr", "list", "--state", "open", "--limit", "30", "--json", fields],
+            ["gh", "pr", "list", "--state", "open", "--limit", "30", "--author", "@me", "--json", fields],
             cwd: repo
         )
         guard r.ok else {
