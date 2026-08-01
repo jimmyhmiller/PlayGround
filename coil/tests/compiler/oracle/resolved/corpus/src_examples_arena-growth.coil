@@ -19,7 +19,7 @@
       (= (al-len [i64] (load xs)) 100000)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-len [i64] (load xs))"
           "100000"
@@ -30,7 +30,7 @@
       (= (al-get (load xs) 0) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 0)"
           "0"
@@ -41,7 +41,7 @@
       (= (al-get (load xs) 99999) 99999)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 99999)"
           "99999"
@@ -52,7 +52,7 @@
       (= (arena-used a) (* 131072 8))
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(arena-used a)"
           "(* 131072 8)"
@@ -86,7 +86,7 @@
       (= (al-len [i64] (load xs)) 64)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-len [i64] (load xs))"
           "64"
@@ -97,7 +97,7 @@
       (= (al-len [i64] (load ys)) 64)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-len [i64] (load ys))"
           "64"
@@ -108,7 +108,7 @@
       (= (al-get (load xs) 0) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 0)"
           "0"
@@ -119,7 +119,7 @@
       (= (al-get (load ys) 0) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load ys) 0)"
           "0"
@@ -130,7 +130,7 @@
       (= (al-get (load xs) 63) 63)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 63)"
           "63"
@@ -141,7 +141,7 @@
       (= (al-get (load ys) 63) 630)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load ys) 63)"
           "630"
@@ -175,7 +175,7 @@
       (= (al-len [i64] (load xs)) 601)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-len [i64] (load xs))"
           "601"
@@ -186,7 +186,7 @@
       (= (al-get (load xs) 0) -1)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 0)"
           "-1"
@@ -197,7 +197,7 @@
       (= (al-get (load xs) 1) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 1)"
           "0"
@@ -208,7 +208,7 @@
       (= (al-get (load xs) 300) 299)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 300)"
           "299"
@@ -219,7 +219,7 @@
       (= (al-get (load xs) 301) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 301)"
           "0"
@@ -230,7 +230,7 @@
       (= (al-get (load xs) 600) 299)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 600)"
           "299"
@@ -254,7 +254,7 @@
       (= (al-len [i64] (load xs)) 50000)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-len [i64] (load xs))"
           "50000"
@@ -265,7 +265,7 @@
       (= (al-get (load xs) 0) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 0)"
           "0"
@@ -276,7 +276,7 @@
       (= (al-get (load xs) 49999) 149997)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 49999)"
           "149997"
@@ -287,7 +287,10 @@
       (<= (arena-used a) cap)
       0
       (do
-        (assert.assert-fail "(<= (arena-used a) cap)" "src/examples/arena-growth.coil" 91)
+        (coil.assert.assert-fail
+          "(<= (arena-used a) cap)"
+          "src/examples/arena-growth.coil"
+          91)
         0)))
   0)
 
@@ -301,7 +304,7 @@
       (= (arena-used a) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(arena-used a)"
           "0"
@@ -313,7 +316,7 @@
       (= (arena-used a) 16)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(arena-used a)"
           "16"
@@ -325,7 +328,7 @@
       (= (arena-used a) 16)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(arena-used a)"
           "16"
@@ -337,7 +340,7 @@
       (= (arena-used a) 32)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(arena-used a)"
           "32"
@@ -350,7 +353,7 @@
       (= (arena-used a) 64)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(arena-used a)"
           "64"
@@ -361,7 +364,7 @@
       (= (al-get (load xs) 4) 5)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 4)"
           "5"
@@ -395,7 +398,7 @@
       (= (al-len [i64] (load out)) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-len [i64] (load out))"
           "0"
@@ -406,7 +409,7 @@
       (= (al-len [i64] (load in)) 0)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-len [i64] (load in))"
           "0"
@@ -427,7 +430,7 @@
       (= (al-len [i64] (load xs)) 1)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-len [i64] (load xs))"
           "1"
@@ -438,7 +441,7 @@
       (= (al-get (load xs) 0) 7)
       0
       (do
-        (assert.assert-fail-cmp
+        (coil.assert.assert-fail-cmp
           "=="
           "(al-get (load xs) 0)"
           "7"
@@ -451,27 +454,27 @@
   main
   []
   (-> i64)
-  (assert.test-run-begin 7)
-  (assert.test-run-one
+  (coil.assert.test-run-begin 7)
+  (coil.assert.test-run-one
     "arena-top-block-grows-in-place"
     (fnptr-of coil-test$arena-top-block-grows-in-place))
-  (assert.test-run-one
+  (coil.assert.test-run-one
     "arena-interleaved-lists-keep-their-elements"
     (fnptr-of coil-test$arena-interleaved-lists-keep-their-elements))
-  (assert.test-run-one
+  (coil.assert.test-run-one
     "al-extend-appends-in-bulk"
     (fnptr-of coil-test$al-extend-appends-in-bulk))
-  (assert.test-run-one
+  (coil.assert.test-run-one
     "overflow-arena-outlives-its-region"
     (fnptr-of coil-test$overflow-arena-outlives-its-region))
-  (assert.test-run-one
+  (coil.assert.test-run-one
     "overflow-arena-actually-bumps"
     (fnptr-of coil-test$overflow-arena-actually-bumps))
-  (assert.test-run-one
+  (coil.assert.test-run-one
     "overflow-arena-frees-only-overflow-blocks"
     (fnptr-of coil-test$overflow-arena-frees-only-overflow-blocks))
-  (assert.test-run-one
+  (coil.assert.test-run-one
     "al-extend-of-nothing-changes-nothing"
     (fnptr-of coil-test$al-extend-of-nothing-changes-nothing))
-  (assert.test-run-end))
+  (coil.assert.test-run-end))
 

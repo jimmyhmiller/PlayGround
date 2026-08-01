@@ -5,14 +5,14 @@
   (let
     [w (stderr)]
     (do
-      (io.print-str w "assertion failed: ")
-      (io.print-str w expr)
-      (io.print-str w "
+      (coil.io.print-str w "assertion failed: ")
+      (coil.io.print-str w expr)
+      (coil.io.print-str w "
   at ")
-      (io.print-str w file)
-      (io.print-str w ":")
-      (fmt.print-i w line)
-      (io.print-str w "
+      (coil.io.print-str w file)
+      (coil.io.print-str w ":")
+      (coil.fmt.print-i w line)
+      (coil.io.print-str w "
 ")))
   (abort)
   0)
@@ -24,18 +24,18 @@
   (let
     [w (stderr)]
     (do
-      (io.print-str w "assertion failed: ")
-      (io.print-str w lx)
-      (io.print-str w " ")
-      (io.print-str w op)
-      (io.print-str w " ")
-      (io.print-str w rx)
-      (io.print-str w "
+      (coil.io.print-str w "assertion failed: ")
+      (coil.io.print-str w lx)
+      (coil.io.print-str w " ")
+      (coil.io.print-str w op)
+      (coil.io.print-str w " ")
+      (coil.io.print-str w rx)
+      (coil.io.print-str w "
   at ")
-      (io.print-str w file)
-      (io.print-str w ":")
-      (fmt.print-i w line)
-      (io.print-str w "
+      (coil.io.print-str w file)
+      (coil.io.print-str w ":")
+      (coil.fmt.print-i w line)
+      (coil.io.print-str w "
 ")))
   (abort)
   0)
@@ -221,12 +221,12 @@
   (let
     [w (stdout)]
     (do
-      (io.print-str w "
+      (coil.io.print-str w "
 running ")
-      (fmt.print-i w n)
-      (io.print-str w " test")
-      (io.print-str w (if (icmp-eq n 1) "" "s"))
-      (io.print-str w "
+      (coil.fmt.print-i w n)
+      (coil.io.print-str w " test")
+      (coil.io.print-str w (if (icmp-eq n 1) "" "s"))
+      (coil.io.print-str w "
 ")))
   0)
 
@@ -242,7 +242,10 @@ running ")
   (-> i64)
   (let
     [w (stdout)]
-    (do (io.print-str w "test ") (io.print-str w name) (io.print-str w " ... ")))
+    (do
+      (coil.io.print-str w "test ")
+      (coil.io.print-str w name)
+      (coil.io.print-str w " ... ")))
   (let
     [pid (cast i64 (fork))]
     (if
@@ -250,7 +253,7 @@ running ")
       (let
         [s (test-state) w (stdout)]
         (store! (field s failed) (iadd (load (field s failed)) 1))
-        (do (io.print-str w "FAILED (could not fork)
+        (do (coil.io.print-str w "FAILED (could not fork)
 "))
         0)
       (if
@@ -266,7 +269,7 @@ running ")
               (icmp-eq code 0)
               (do
                 (store! (field s passed) (iadd (load (field s passed)) 1))
-                (do (io.print-str w "ok
+                (do (coil.io.print-str w "ok
 "))
                 0)
               (do
@@ -274,11 +277,11 @@ running ")
                 (if
                   (icmp-gt code 128)
                   (do
-                    (io.print-str w "FAILED (signal ")
-                    (fmt.print-i w (isub code 128))
-                    (io.print-str w ")
+                    (coil.io.print-str w "FAILED (signal ")
+                    (coil.fmt.print-i w (isub code 128))
+                    (coil.io.print-str w ")
 "))
-                  (do (io.print-str w "FAILED
+                  (do (coil.io.print-str w "FAILED
 ")))
                 0))))))))
 
@@ -289,14 +292,14 @@ running ")
   (let
     [s (test-state) w (stdout) p (load (field s passed)) f (load (field s failed))]
     (do
-      (io.print-str w "
+      (coil.io.print-str w "
 test result: ")
-      (io.print-str w (if (icmp-eq f 0) "ok" "FAILED"))
-      (io.print-str w ". ")
-      (fmt.print-i w p)
-      (io.print-str w " passed; ")
-      (fmt.print-i w f)
-      (io.print-str w " failed
+      (coil.io.print-str w (if (icmp-eq f 0) "ok" "FAILED"))
+      (coil.io.print-str w ". ")
+      (coil.fmt.print-i w p)
+      (coil.io.print-str w " passed; ")
+      (coil.fmt.print-i w f)
+      (coil.io.print-str w " failed
 "))
     (if (icmp-gt f 0) 1 0)))
 

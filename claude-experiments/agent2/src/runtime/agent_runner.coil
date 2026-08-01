@@ -1,0 +1,202 @@
+(module harness-agent-runner)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "atomic.coil" :use *)
+(import "match.coil" :use *)
+(import "thread.coil" :use *)
+(import "../core/event.coil" :use *)
+(import "../core/json.coil" :use *)
+(import "../core/model.coil" :use *)
+(import "../core/tool.coil" :use *)
+(import "../infra/native.coil" :use *)
+(import "../runtime/tool_executor.coil" :use *)
+
+(defstruct AgentRunPolicy
+  [(max-model-turns i64)
+   (max-parallel-tools i64)])
+
+;; Caller-owned request/provider dependencies must outlive the handle. The job itself
+;; is allocator-owned and its completion flag is safe to poll from another thread.
+(defstruct AgentRunJob
+  [(allocator (ptr Allocator))
+   (provider (dyn ModelProvider))
+   (request (ptr ModelRequest))
+   (authorizer (dyn ToolAuthorizer))
+   (emitter (ptr EventEmitter))
+   (policy AgentRunPolicy)
+   (result ModelResult)
+   (completed (ptr i64))])
+
+(defstruct AgentRunHandle
+  [(thread Thread)
+   (job (ptr AgentRunJob))
+   (spawned bool)
+   (joined bool)])
+
+(defn runner-event [(emitter (ptr EventEmitter))
+                    (request (ptr ModelRequest))
+                    (kind EventKind)
+                    (payload Json)] (-> i64)
+  (emit-event emitter
+              (harness_now_ms)
+              kind
+              (load (field request run-id))
+              (load (field request operation-id))
+              ""
+              "runtime"
+              (load (field request model))
+              payload))
+
+(defn runner-budget-failure [] (-> ModelResult)
+  (let [failure (alloc-stack ModelFailure)]
+    (store! (field failure kind) (ConfigurationFailure))
+    (store! (field failure provider) "runtime")
+    (store! (field failure status-code) 0)
+    (store! (field failure message) "model turn budget exhausted")
+    (store! (field failure retryable) false)
+    (ModelErr (load failure))))
+
+;; Run the model/tool loop until the model produces no function calls, a provider
+;; fails, or the explicit turn budget is exhausted. Provider continuations retain
+;; opaque prior output so reasoning/signature fields are never lost.
+(defn run-agent [(allocator (ptr Allocator))
+                 (provider (dyn ModelProvider))
+                 (request (ptr ModelRequest))
+                 (authorizer (dyn ToolAuthorizer))
+                 (emitter (ptr EventEmitter))
+                 (policy AgentRunPolicy)] (-> ModelResult)
+  (let [current (box allocator ModelRequest (load request))
+        (mut turn) 0
+        (mut finished) false
+        (mut final) (runner-budget-failure)]
+    (runner-event emitter current (RunStarted) (JsonNull))
+    (loop (if (or (load finished)
+                  (icmp-ge (load turn) (load (field policy max-model-turns))))
+              (break)
+              (do
+                (store! turn (iadd (load turn) 1))
+                (let [model-result (execute-model provider current emitter allocator)]
+                  (match model-result
+                    (ModelErr [failure]
+                              (let [failure-value failure]
+                                (store! final (ModelErr failure))
+                                (store! finished true)
+                                (runner-event emitter
+                                              current
+                                              (RunFailed)
+                                              (JsonString (load (field failure-value message))))))
+                    (ModelOk [response]
+                             (let [response-value response
+                                   call-count
+                                     (al-len [ToolCall]
+                                             (load (field response-value tool-calls)))]
+                               (if (icmp-eq call-count 0)
+                                   (do
+                                     (store! final (ModelOk response))
+                                     (store! finished true)
+                                     (runner-event emitter
+                                                   current
+                                                   (RunCompleted)
+                                                   (JsonString (load (field response-value response-id)))))
+                                   (let [calls
+                                           (box allocator
+                                                (ArrayList ToolCall)
+                                                (load (field response-value tool-calls)))
+                                         execution (alloc-stack ToolExecutionRequest)]
+                                     (store! (field execution run-id) (load (field current run-id)))
+                                     (store! (field execution provider) (provider-name provider))
+                                     (store! (field execution model) (load (field current model)))
+                                     (store! (field execution registry) (load (field current tools)))
+                                     (store! (field execution authorizer) authorizer)
+                                     (store! (field execution calls) calls)
+                                     (store! (field execution emitter) emitter)
+                                     (store! (field execution max-parallel)
+                                             (load (field policy max-parallel-tools)))
+                                     (let [batch (execute-tools-parallel allocator execution)
+                                           results
+                                             (box allocator
+                                                  (ArrayList ToolResult)
+                                                  (load (field batch results)))]
+                                       (store! (field (field current continuation) present) true)
+                                       (store! (field (field current continuation)
+                                                      previous-response-id)
+                                               (load (field response-value response-id)))
+                                       (store! (field (field current continuation) previous-output)
+                                               (load (field response-value raw-output)))
+                                       (store! (field (field current continuation) tool-results)
+                                               results)
+                                       ; Required/forced selection is an initial-turn constraint.
+                                       ; Continuing with it would force an endless tool loop after
+                                       ; the requested result has already been supplied.
+                                       (store! (field current tool-choice) (ToolsAuto))))))))))))
+    (when (not (load finished))
+      (runner-event emitter
+                    current
+                    (RunFailed)
+                    (JsonString "model turn budget exhausted"))
+      0)
+    (load final)))
+
+(defn agent-run-worker [(opaque (ptr i8))] (-> (ptr i8))
+  (let [job (cast (ptr AgentRunJob) opaque)
+        result
+          (run-agent (load (field job allocator))
+                     (load (field job provider))
+                     (load (field job request))
+                     (load (field job authorizer))
+                     (load (field job emitter))
+                     (load (field job policy)))]
+    (store! (field job result) result)
+    (atomic-store (load (field job completed)) 1)
+    (cast (ptr i8) 0)))
+
+;; Start an owned background worker. Completion is observable through the same event
+;; emitter as a foreground run; callers poll `agent-run-finished?` and eventually join.
+(defn run-agent-background [(allocator (ptr Allocator))
+                            (provider (dyn ModelProvider))
+                            (request (ptr ModelRequest))
+                            (authorizer (dyn ToolAuthorizer))
+                            (emitter (ptr EventEmitter))
+                            (policy AgentRunPolicy)] (-> AgentRunHandle)
+  (let [job (box allocator AgentRunJob (zeroed AgentRunJob))
+        completed (box allocator i64 0)
+        handle (alloc-stack AgentRunHandle)]
+    (store! (field job allocator) allocator)
+    (store! (field job provider) provider)
+    (store! (field job request) request)
+    (store! (field job authorizer) authorizer)
+    (store! (field job emitter) emitter)
+    (store! (field job policy) policy)
+    (store! (field job result) (runner-budget-failure))
+    (store! (field job completed) completed)
+    (store! (field handle job) job)
+    (store! (field handle spawned)
+            (icmp-eq (thread-spawn (field handle thread)
+                                   (fnptr-of agent-run-worker)
+                                   (cast (ptr i8) job))
+                     0))
+    (store! (field handle joined) false)
+    (load handle)))
+
+(defn agent-run-finished? [(handle (ptr AgentRunHandle))] (-> bool)
+  (or (not (load (field handle spawned)))
+      (icmp-eq (atomic-load (load (field (load (field handle job)) completed))) 1)))
+
+;; Join exactly once and return the terminal result. A second join is harmless and
+;; returns the stored result. A spawn failure is reported as a configuration failure.
+(defn agent-run-join [(handle (mut AgentRunHandle))] (-> ModelResult)
+  (if (not (load (field handle spawned)))
+      (let [failure (runner-budget-failure)]
+        (match failure
+          (ModelErr [value]
+                    (let [(mut failed) value]
+                      (store! (field failed message) "could not spawn agent worker")
+                      (ModelErr (load failed))))
+          (ModelOk [response] failure)))
+      (do
+        (when (not (load (field handle joined)))
+          (thread-join (field handle thread))
+          (store! (field handle joined) true)
+          0)
+        (load (field (load (field handle job)) result)))))

@@ -158,16 +158,6 @@
   [(tn Code)]
   (-> Code)
   (let
-    [n
-      (code-trait-method-count tn)
-      _safe
-      (dyn--check-all tn 0 n)
-      vtname
-      (code-symbol tn "-vtable")
-      dynname
-      (code-symbol tn "-dyn")]
-    (quasiquote
-      (do
-        (defstruct (unquote vtname) [(unquote-splicing (dyn--vt-fields tn 0 n))])
-        (defstruct (unquote dynname) [(data (ptr i8)) (vtable (ptr (unquote vtname)))])))))
+    [n (code-trait-method-count tn) _safe (dyn--check-all tn 0 n)]
+    (quasiquote (defdyn-marker (unquote tn)))))
 

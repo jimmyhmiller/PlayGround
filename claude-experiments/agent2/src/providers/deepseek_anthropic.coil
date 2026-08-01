@@ -1,0 +1,286 @@
+(module deepseek-anthropic)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "../core/event.coil" :use *)
+(import "../core/json.coil" :use *)
+(import "../core/model.coil" :use *)
+(import "../core/tool.coil" :use *)
+(import "../infra/http.coil" :use *)
+(import "../infra/native.coil" :use *)
+(import "../providers/common.coil" :use *)
+
+(defstruct DeepSeekAnthropicContext
+  [(endpoint (slice u8))
+   (credential ApiCredential)])
+
+(defn deepseek-anthropic-context-default [] (-> DeepSeekAnthropicContext)
+  (let [context (alloc-stack DeepSeekAnthropicContext)]
+    (store! (field context endpoint) "https://api.deepseek.com/anthropic/v1/messages")
+    (store! (field (field context credential) primary-env) c"DEEPSEEK_API_KEY")
+    (store! (field (field context credential) fallback-env) c"DEEPSEEK_KEY")
+    (load context)))
+
+(defn anthropic-base-messages [(allocator (ptr Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
+  (let [(mut result) (json-array allocator)
+        (mut i) 0
+        n (al-len [Message] (load messages))]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [message (al-get [Message] (load messages) (load i))]
+                (match (load (field message role))
+                  (SystemRole [] 0)
+                  (UserRole []
+                            (do
+                              (let [(mut wire) (json-object allocator)]
+                                (json-put-string! (mut wire) "role" "user")
+                                (json-put-string! (mut wire) "content" (load (field message content)))
+                                (json-array-push! (mut result) (load wire)))
+                              0))
+                  (AssistantRole []
+                                 (do
+                                   (let [(mut wire) (json-object allocator)]
+                                     (json-put-string! (mut wire) "role" "assistant")
+                                     (json-put-string! (mut wire) "content" (load (field message content)))
+                                     (json-array-push! (mut result) (load wire)))
+                                   0)))
+                (store! i (iadd (load i) 1)))))
+    (load result)))
+
+(defn anthropic-tool-result-block [(allocator (ptr Allocator)) (result ToolResult)] (-> Json)
+  (let [(mut block) (json-object allocator)
+        output
+          (match (load (field result status))
+            (ToolSucceeded [] (json-stringify allocator (load (field result output))))
+            (ToolErrored [] (load (field result error)))
+            (ToolDenied [] (load (field result error)))
+            (ToolUnknown [] (load (field result error))))]
+    (json-put-string! (mut block) "type" "tool_result")
+    (json-put-string! (mut block) "tool_use_id" (load (field result call-id)))
+    (json-put-string! (mut block) "content" output)
+    (load block)))
+
+;; Preserve the previous Anthropic content block array verbatim. This retains
+;; thinking blocks and signatures while adding all parallel tool results together.
+(defn anthropic-messages [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+  (let [(mut messages) (anthropic-base-messages allocator (load (field request messages)))
+        continuation (field request continuation)]
+    (when (load (field continuation present))
+      (let [(mut assistant) (json-object allocator)]
+        (json-put-string! (mut assistant) "role" "assistant")
+        (json-object-put! (mut assistant)
+                          "content"
+                          (json-get (load (field continuation previous-output)) "content"))
+        (json-array-push! (mut messages) (load assistant)))
+      (let [(mut content) (json-array allocator)
+            results (load (field continuation tool-results))
+            (mut i) 0
+            n (al-len [ToolResult] (load results))]
+        (loop (if (icmp-ge (load i) n)
+                  (break)
+                  (do
+                    (json-array-push! (mut content)
+                                      (anthropic-tool-result-block allocator
+                                                                   (al-get [ToolResult] (load results) (load i))))
+                    (store! i (iadd (load i) 1)))))
+        (let [(mut user) (json-object allocator)]
+          (json-put-string! (mut user) "role" "user")
+          (json-object-put! (mut user) "content" (load content))
+          (json-array-push! (mut messages) (load user))))
+      0)
+    (load messages)))
+
+(defn deepseek-anthropic-request-json [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+  (let [(mut body) (json-object allocator)
+        (mut thinking) (json-object allocator)]
+    (json-put-string! (mut body) "model" (load (field request model)))
+    (json-object-put! (mut body)
+                      "max_tokens"
+                      (json-integer allocator
+                                    (if (icmp-gt (load (field request max-output-tokens)) 0)
+                                        (load (field request max-output-tokens))
+                                        4096)))
+    (when (icmp-gt (slice-len [u8] (load (field request instructions))) 0)
+      (json-put-string! (mut body) "system" (load (field request instructions)))
+      0)
+    (json-object-put! (mut body)
+                      "messages"
+                      (anthropic-messages allocator request))
+    (json-put-string! (mut thinking)
+                      "type"
+                      (match-else (load (field request reasoning))
+                                  (ReasoningNone [] "disabled")
+                                  (_ "enabled")))
+    (when (not (match-else (load (field request reasoning))
+                           (ReasoningNone [] true)
+                           (_ false)))
+      (json-object-put! (mut thinking) "budget_tokens" (json-integer allocator 1024))
+      (let [(mut output-config) (json-object allocator)]
+        (json-put-string! (mut output-config)
+                          "effort"
+                          (reasoning-effort-name (load (field request reasoning))))
+        (json-object-put! (mut body) "output_config" (load output-config)))
+      0)
+    (json-object-put! (mut body) "thinking" (load thinking))
+    (when (icmp-gt (al-len [ToolDefinition]
+                           (load (field (load (field request tools)) definitions)))
+                   0)
+      (json-object-put! (mut body)
+                        "tools"
+                        (tool-registry-wire allocator
+                                            (load (field request tools))
+                                            TOOL_LAYOUT_ANTHROPIC))
+      (json-object-put! (mut body)
+                        "tool_choice"
+                        (tool-choice-anthropic allocator
+                                               (load (field request tool-choice))))
+      0)
+    (json-put-bool! (mut body) "stream" false)
+    (load body)))
+
+(defn deepseek-anthropic-usage [(root Json)] (-> ModelUsage)
+  (let [usage (alloc-stack ModelUsage)
+        wire (json-get root "usage")]
+    (store! (field usage input-tokens)
+            (json-number-i64 (json-get wire "input_tokens")))
+    (store! (field usage output-tokens)
+            (json-number-i64 (json-get wire "output_tokens")))
+    (store! (field usage reasoning-tokens) 0)
+    (store! (field usage cached-input-tokens)
+            (json-number-i64 (json-get wire "cache_read_input_tokens")))
+    (load usage)))
+
+(defn deepseek-anthropic-parse-response [(allocator (ptr Allocator)) (root Json)] (-> ModelResponse)
+  (let [(mut response) (response-empty allocator)
+        (mut text) (sb-new allocator)
+        content (json-get root "content")
+        (mut i) 0
+        count (json-array-length content)]
+    (store! (field response provider) "deepseek-anthropic")
+    (store! (field response response-id)
+            (match (json-string-at root "id") (Some [value] value) (None [] "")))
+    (store! (field response model)
+            (match (json-string-at root "model") (Some [value] value) (None [] "")))
+    (loop (if (icmp-ge (load i) count)
+              (break)
+              (let [block (json-array-get content (load i))
+                    kind
+                      (match (json-string-at block "type")
+                        (Some [value] value)
+                        (None [] ""))]
+                (cond (str-eq kind "text")
+                        (match (json-string-at block "text")
+                          (Some [value] (sb-push-str! (mut text) value))
+                          (None [] 0))
+                      (str-eq kind "tool_use")
+                        (let [id
+                                (match (json-string-at block "id")
+                                  (Some [value] value)
+                                  (None [] ""))
+                              name
+                                (match (json-string-at block "name")
+                                  (Some [value] value)
+                                  (None [] ""))
+                              input (json-get block "input")
+                              arguments (json-stringify allocator input)
+                              call (alloc-stack ToolCall)]
+                          (store! (field call id) id)
+                          (store! (field call name) name)
+                          (store! (field call arguments) input)
+                          (store! (field call raw-arguments) arguments)
+                          (al-push! [ToolCall] (mut (field response tool-calls)) (load call)))
+                      :else 0)
+                (store! i (iadd (load i) 1)))))
+    (store! (field response output-text) (sb-finish! (mut text)))
+    (store! (field response usage) (deepseek-anthropic-usage root))
+    (store! (field response raw-output) root)
+    (load response)))
+
+(defn deepseek-anthropic-event [(emitter (ptr EventEmitter))
+                                (request (ptr ModelRequest))
+                                (kind EventKind)
+                                (payload Json)] (-> i64)
+  (emit-event emitter
+              (harness_now_ms)
+              kind
+              (load (field request run-id))
+              (load (field request operation-id))
+              ""
+              "deepseek-anthropic"
+              (load (field request model))
+              payload))
+
+(defn deepseek-anthropic-execute [(context (ptr DeepSeekAnthropicContext))
+                                  (request (ptr ModelRequest))
+                                  (emitter (ptr EventEmitter))
+                                  (allocator (ptr Allocator))] (-> ModelResult)
+  (let [key (api-key (load (field context credential)))]
+    (if (icmp-eq (cast i64 key) 0)
+        (model-failure "deepseek-anthropic" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
+        (let [headers
+                (box allocator
+                     (ArrayList (slice u8))
+                     (al-new [(slice u8)] allocator))
+              api-header (concat-or-empty allocator "x-api-key: " (cstr->str key))]
+          (al-push! [(slice u8)] headers "Content-Type: application/json")
+          (al-push! [(slice u8)] headers "anthropic-version: 2023-06-01")
+          (al-push! [(slice u8)] headers api-header)
+          (let [wire (deepseek-anthropic-request-json allocator request)
+                body (json-stringify allocator wire)
+                http-request (alloc-stack HttpRequest)]
+            (store! (field http-request url) (load (field context endpoint)))
+            (store! (field http-request headers) headers)
+            (store! (field http-request body) body)
+            (store! (field http-request timeout-ms) (load (field request timeout-ms)))
+            (store! (field (field http-request chunks) context) (cast (ptr i8) 0))
+            (store! (field (field http-request chunks) consume) (fnptr-of discard-http-chunk))
+            (deepseek-anthropic-event emitter request (ModelRequestStarted) (JsonNull))
+            (let [http (http-post allocator http-request)]
+              (if (icmp-ne (load (field http transport-code)) 0)
+                  (do
+                    (deepseek-anthropic-event emitter
+                                              request
+                                              (ModelRequestFailed)
+                                              (JsonString (load (field http error))))
+                    (model-failure "deepseek-anthropic" 0 (load (field http error))))
+                  (let [parsed (json-parse allocator (load (field http body)))]
+                    (if (not (load (field parsed ok)))
+                        (do
+                          (deepseek-anthropic-event emitter
+                                                    request
+                                                    (ModelRequestFailed)
+                                                    (JsonString "DeepSeek returned invalid JSON"))
+                          (model-failure "deepseek-anthropic"
+                                         (load (field http status-code))
+                                         "DeepSeek returned invalid JSON"))
+                        (let [root (load (field parsed value))
+                              status (load (field http status-code))]
+                          (if (or (icmp-lt status 200) (icmp-ge status 300))
+                              (let [message (json-error-message root (load (field http body)))]
+                                (deepseek-anthropic-event emitter
+                                                          request
+                                                          (ModelRequestFailed)
+                                                          (JsonString message))
+                                (model-failure "deepseek-anthropic" status message))
+                              (let [response (deepseek-anthropic-parse-response allocator root)]
+                                (deepseek-anthropic-event emitter
+                                                          request
+                                                          (ModelRequestCompleted)
+                                                          (JsonString (load (field response response-id))))
+                                (ModelOk response)))))))))))))
+
+(impl ModelProvider DeepSeekAnthropicContext
+  (provider-name [(self (ptr DeepSeekAnthropicContext))]
+                 (-> (slice u8))
+                 "deepseek-anthropic")
+  
+  (execute-model [(self (ptr DeepSeekAnthropicContext))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (deepseek-anthropic-execute self request emitter allocator)))

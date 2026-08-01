@@ -1,15 +1,14 @@
-(module dyn)
-; Runtime-dispatched trait objects ("dyn traits"). `(defdyn Trait)` reflects a
-; trait's method signatures (the `code-trait-*` comptime ops) and generates a
-; vtable struct + a fat-pointer struct `Trait-dyn` + a forwarding impl, so the
-; type `(dyn Trait)` (sugar for `(ptr Trait-dyn)`) is "any implementer, chosen at
-; runtime" and trait-method calls on it dispatch through the vtable.
+(module coil.dyn)
+; Runtime-dispatched trait objects ("dyn traits"). The compiler derives a vtable
+; layout and a two-word `{data, vtable}` value layout directly from every
+; object-safe trait. `(defdyn Trait)` remains as a compatibility marker and runs
+; the source-level object-safety diagnostics.
 ;
 ; Erasing a concrete `(ptr T)` to a `(dyn Trait)` is automatic at argument/return
 ; sites, or explicit with `(make-dyn Trait ptr)`. Both are a small compiler
-; coercion (it materialises a caller-frame fat pointer + a constant vtable of the
-; impl methods' addresses — opaque pointers make them directly callable, so there
-; are NO thunks and nothing to register per type).
+; coercion producing a two-word value plus a constant vtable of the impl methods'
+; addresses — opaque pointers make them directly callable, so there are NO thunks
+; and nothing to register per type.
 ;
 ;   (deftrait Write [Self] (write [(self (ptr Self)) (bytes (slice u8))] (-> i64)))
 ;   (defdyn Write)
@@ -106,15 +105,11 @@
 
 (defn defdyn [(tn Code)] (-> Code)
   (let [n       (code-trait-method-count tn)
-        _safe   (dyn--check-all tn 0 n)
-        vtname  (code-symbol tn "-vtable")
-        dynname (code-symbol tn "-dyn")]
-    ;; Just the types: a vtable struct (one fnptr per method, in trait order) and
-    ;; the fat-pointer struct. Calling a trait method on a `<Trait>-dyn` value is
-    ;; lowered by the compiler to a vtable dispatch (no forwarding impl needed).
-    `(do
-       (defstruct ~vtname [~@(dyn--vt-fields tn 0 n)])
-       (defstruct ~dynname [(data (ptr i8)) (vtable (ptr ~vtname))]))))
+        _safe   (dyn--check-all tn 0 n)]
+    ;; Compatibility marker: the compiler now creates the vtable and two-word
+    ;; dynamic value layout directly from `deftrait`, before macro expansion.
+    ;; Retain `defdyn` for source compatibility and its object-safety diagnostics.
+    `(defdyn-marker ~tn)))
 
 ; Erasure (a concrete `(ptr T)` -> a `(dyn Trait)`) needs no library support: it
 ; is the compiler's `make-dyn` coercion (automatic at call/return sites, explicit

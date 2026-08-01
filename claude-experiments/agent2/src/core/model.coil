@@ -1,0 +1,111 @@
+(module harness-model)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "../core/json.coil" :use *)
+(import "../core/tool.coil" :use *)
+(import "../core/event.coil" :use *)
+
+(defsum MessageRole
+  (SystemRole [])
+  (UserRole [])
+  (AssistantRole []))
+
+(defstruct Message
+  [(role MessageRole)
+   (content (slice u8))])
+
+(defsum ReasoningEffort
+  (ReasoningNone [])
+  (ReasoningLow [])
+  (ReasoningMedium [])
+  (ReasoningHigh [])
+  (ReasoningXHigh [])
+  (ReasoningMax []))
+
+(defsum ModelToolChoice
+  (ToolsAuto [])
+  (ToolsNone [])
+  (ToolsRequired [])
+  (ToolForced [(name (slice u8))]))
+
+;; Provider-neutral continuation data. `previous-output` is deliberately opaque to
+;; the runtime: an adapter can preserve reasoning/signature items without projecting
+;; them into a lossy common message format.
+(defstruct ModelContinuation
+  [(present bool)
+   (previous-response-id (slice u8))
+   (previous-output Json)
+   (tool-results (ptr (ArrayList ToolResult)))])
+
+(defstruct ModelRequest
+  [(run-id (slice u8))
+   (operation-id (slice u8))
+   (model (slice u8))
+   (instructions (slice u8))
+   (messages (ptr (ArrayList Message)))
+   (tools (ptr ToolRegistry))
+   (tool-choice ModelToolChoice)
+   (parallel-tool-calls bool)
+   (reasoning ReasoningEffort)
+   (max-output-tokens i64)
+   (timeout-ms i64)
+   (continuation ModelContinuation)])
+
+(defstruct ModelUsage
+  [(input-tokens i64)
+   (output-tokens i64)
+   (reasoning-tokens i64)
+   (cached-input-tokens i64)])
+
+(defstruct ModelResponse
+  [(provider (slice u8))
+   (model (slice u8))
+   (response-id (slice u8))
+   (output-text (slice u8))
+   (tool-calls (ArrayList ToolCall))
+   (usage ModelUsage)
+   (raw-output Json)])
+
+(defsum ModelFailureKind
+  (ConfigurationFailure [])
+  (TransportFailure [])
+  (AuthenticationFailure [])
+  (RateLimitFailure [])
+  (ProviderFailure [])
+  (ProtocolFailure [])
+  (CancelledFailure []))
+
+(defstruct ModelFailure
+  [(kind ModelFailureKind)
+   (provider (slice u8))
+   (status-code i64)
+   (message (slice u8))
+   (retryable bool)])
+
+(defsum ModelResult
+  (ModelOk [(response ModelResponse)])
+  (ModelErr [(failure ModelFailure)]))
+
+(deftrait ModelProvider [Self]
+  (provider-name [(self (ptr Self))] (-> (slice u8)))
+  (execute-model [(self (ptr Self))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)))
+
+(defn reasoning-effort-name [(effort ReasoningEffort)] (-> (slice u8))
+  (match effort
+    (ReasoningNone [] "none")
+    (ReasoningLow [] "low")
+    (ReasoningMedium [] "medium")
+    (ReasoningHigh [] "high")
+    (ReasoningXHigh [] "xhigh")
+    (ReasoningMax [] "max")))
+
+(defn message-role-name [(role MessageRole)] (-> (slice u8))
+  (match role
+    (SystemRole [] "system")
+    (UserRole [] "user")
+    (AssistantRole [] "assistant")))

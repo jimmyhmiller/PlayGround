@@ -126,6 +126,73 @@ impl Parinfer {
         !in_string && stack.is_empty()
     }
 
+    /// Remove closing delimiters that cannot close the delimiter currently at
+    /// the top of the structural stack. This is the least invasive repair for
+    /// surplus closers: every non-delimiter byte and every valid delimiter stays
+    /// exactly where it was.
+    ///
+    /// The caller must still verify that the candidate is well formed. For
+    /// mixed damage such as `([)]`, deleting the mismatched `)` leaves an open
+    /// `(`, so indentation-driven repair remains responsible for the result.
+    fn without_unmatched_closers(source: &str) -> String {
+        let mut output = String::with_capacity(source.len());
+        let mut stack: Vec<char> = Vec::new();
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut in_comment = false;
+
+        for ch in source.chars() {
+            if escape_next {
+                escape_next = false;
+                output.push(ch);
+                continue;
+            }
+            if ch == '\\' && !in_comment {
+                escape_next = true;
+                output.push(ch);
+                continue;
+            }
+            if ch == '"' && !in_comment {
+                in_string = !in_string;
+                output.push(ch);
+                continue;
+            }
+            if !in_string && ch == ';' {
+                in_comment = true;
+            }
+            if ch == '\n' || ch == '\r' {
+                in_comment = false;
+            }
+            if in_string || in_comment {
+                output.push(ch);
+                continue;
+            }
+
+            match ch {
+                '(' | '[' | '{' => {
+                    stack.push(ch);
+                    output.push(ch);
+                }
+                ')' | ']' | '}' => {
+                    let expected = match ch {
+                        ')' => '(',
+                        ']' => '[',
+                        '}' => '{',
+                        _ => unreachable!(),
+                    };
+                    if stack.last() == Some(&expected) {
+                        stack.pop();
+                        output.push(ch);
+                    }
+                    // A mismatched or stack-empty closer is deliberately omitted.
+                }
+                _ => output.push(ch),
+            }
+        }
+
+        output
+    }
+
     /// Byte ranges of the file's top-level segments, in order and contiguous
     /// (their concatenation is the whole source).
     ///
@@ -213,6 +280,18 @@ impl Parinfer {
         // the enclosing paren. Only genuinely broken paren structure falls through.
         if Self::is_well_formed(&self.source) {
             return Ok(self.source.clone());
+        }
+
+        // Prefer a minimal, position-preserving repair when the only damage is
+        // one or more surplus/mismatched closing delimiters. Sending that case
+        // through indentation inference can move valid delimiters across forms
+        // (for example, moving a `let` binding vector's `]` past its body merely
+        // because a function ends with one extra `)`).
+        let without_unmatched_closers = Self::without_unmatched_closers(&self.source);
+        if without_unmatched_closers != self.source
+            && Self::is_well_formed(&without_unmatched_closers)
+        {
+            return Ok(without_unmatched_closers);
         }
 
         // Repair is per top-level form. The whole-file check above only spares a

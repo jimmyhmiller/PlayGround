@@ -1327,16 +1327,16 @@
         (let
           [$g8 (gc-sp)]
           (let [$g9 (let [$g10 (run)] (gc-root $g10) (print-val $g10))] (gc-sp-set $g8) $g9))
-        (do (io.print-str (stdout) "
+        (do (coil.io.print-str (stdout) "
 "))
         (do
-          (io.print-str (stderr) "[gc] peak_live=")
-          (fmt.print-i (stderr) (gc-peak))
-          (io.print-str (stderr) "  collections=")
-          (fmt.print-i (stderr) (gc-collections))
-          (io.print-str (stderr) "  total_alloc=")
-          (fmt.print-i (stderr) (gc-total))
-          (io.print-str (stderr) "
+          (coil.io.print-str (stderr) "[gc] peak_live=")
+          (coil.fmt.print-i (stderr) (gc-peak))
+          (coil.io.print-str (stderr) "  collections=")
+          (coil.fmt.print-i (stderr) (gc-collections))
+          (coil.io.print-str (stderr) "  total_alloc=")
+          (coil.fmt.print-i (stderr) (gc-total))
+          (coil.io.print-str (stderr) "
 "))
         (do (gc-sp-set $g4) 0)))))
 

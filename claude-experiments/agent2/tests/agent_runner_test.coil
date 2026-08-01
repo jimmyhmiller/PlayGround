@@ -1,0 +1,155 @@
+(module harness-agent-runner-test)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "atomic.coil" :use *)
+(import "match.coil" :use *)
+(import "str.coil" :use *)
+(import "../src/core/event.coil" :use *)
+(import "../src/core/json.coil" :use *)
+(import "../src/core/model.coil" :use *)
+(import "../src/core/tool.coil" :use *)
+(import "../src/providers/common.coil" :use *)
+(import "../src/runtime/agent_runner.coil" :use *)
+
+(defstruct FakeProviderState
+  [(calls (ptr i64))
+   (observed-continuation (ptr i64))])
+
+(defstruct FakeTool [])
+
+(defn execute-fake-tool [(self (ptr FakeTool))
+                         (call (ptr ToolCall))
+                         (allocator (ptr Allocator))] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+    (store! (field result output) (load (field call arguments)))
+    (load result)))
+
+(impl ToolImplementation FakeTool
+  (execute-tool [(self (ptr FakeTool))
+                 (call (ptr ToolCall))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-fake-tool self call allocator)))
+
+(defn fake-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
+  (let [parsed
+          (json-parse allocator
+                      "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
+        definition (alloc-stack ToolDefinition)
+        implementation (box allocator FakeTool (zeroed FakeTool))]
+    (store! (field (field definition spec) name) "fake")
+    (store! (field (field definition spec) description) "fake")
+    (store! (field (field definition spec) input-schema)
+            (load (field parsed value)))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (ReadOnly))
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 1000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn fake-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
+  (let [call (alloc-stack ToolCall)]
+    (store! (field call id) id)
+    (store! (field call name) "fake")
+    (store! (field call arguments) (json-object allocator))
+    (store! (field call raw-arguments) "{}")
+    (load call)))
+
+(defn fake-provider-execute [(state (ptr FakeProviderState))
+                             (request (ptr ModelRequest))
+                             (emitter (ptr EventEmitter))
+                             (allocator (ptr Allocator))] (-> ModelResult)
+  (let [call-number (iadd (atomic-add (load (field state calls)) 1) 1)
+        (mut response) (response-empty allocator)]
+    (store! (field response provider) "fake")
+    (store! (field response model) "fake-model")
+    (if (icmp-eq call-number 1)
+        (do
+          (store! (field response response-id) "first-response")
+          (store! (field response raw-output) (JsonString "opaque-provider-state"))
+          (al-push! [ToolCall]
+                    (mut (field response tool-calls))
+                    (fake-call allocator "call-a"))
+          (al-push! [ToolCall]
+                    (mut (field response tool-calls))
+                    (fake-call allocator "call-b")))
+        (do
+          (when (and (load (field (field request continuation) present))
+                     (icmp-eq (al-len [ToolResult]
+                                      (load (load (field (field request continuation)
+                                                         tool-results))))
+                              2))
+            (atomic-store (load (field state observed-continuation)) 1)
+            0)
+          (store! (field response response-id) "final-response")
+          (store! (field response output-text) "done")))
+    (ModelOk (load response))))
+
+(impl ModelProvider FakeProviderState
+  (provider-name [(self (ptr FakeProviderState))] (-> (slice u8)) "fake")
+  
+  (execute-model [(self (ptr FakeProviderState))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (fake-provider-execute self request emitter allocator)))
+
+(defstruct CountingEventSink [(count (ptr i64))])
+
+(impl EventSink CountingEventSink
+  (publish-event [(self (ptr CountingEventSink)) (event (ptr Event))]
+                 (-> i64)
+                 (atomic-add (load (field self count)) 1)))
+
+(deftest background-run-executes-tools-and-continues-the-model
+         (let [allocator (malloc-allocator)
+               calls (box allocator i64 0)
+               observed (box allocator i64 0)
+               events (box allocator i64 0)
+               sequence (box allocator i64 1)
+               state (box allocator FakeProviderState (zeroed FakeProviderState))
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+               request (box allocator ModelRequest (zeroed ModelRequest))
+               sink (alloc-stack CountingEventSink)
+               emitter (box allocator EventEmitter (zeroed EventEmitter))
+               policy (alloc-stack AgentRunPolicy)
+               authorizer (alloc-stack AllowAllAuthorizer)]
+           (store! (field state calls) calls)
+           (store! (field state observed-continuation) observed)
+           (tool-register! registry (fake-definition allocator))
+           (store! (field request run-id) "runner-test")
+           (store! (field request operation-id) "model")
+           (store! (field request model) "fake-model")
+           (store! (field request instructions) "")
+           (store! (field request messages) messages)
+           (store! (field request tools) registry)
+           (store! (field request tool-choice) (ToolsAuto))
+           (store! (field request parallel-tool-calls) true)
+           (store! (field request reasoning) (ReasoningNone))
+           (store! (field request timeout-ms) 1000)
+           (store! (field sink count) events)
+           (store! (field emitter sink) sink)
+           (store! (field emitter next-sequence) sequence)
+           (store! (field policy max-model-turns) 3)
+           (store! (field policy max-parallel-tools) 2)
+           (let [(mut handle)
+                   (run-agent-background allocator
+                                         state
+                                         request
+                                         authorizer
+                                         emitter
+                                         (load policy))
+                 result (agent-run-join (mut handle))]
+             (assert (agent-run-finished? (mut handle)))
+             (assert-eq (atomic-load calls) 2)
+             (assert-eq (atomic-load observed) 1)
+             (assert-eq (atomic-load events) 10)
+             (assert (match result
+                       (ModelOk [response]
+                                (let [final response]
+                                  (str-eq (load (field final output-text)) "done")))
+                       (ModelErr [failure] false))))))

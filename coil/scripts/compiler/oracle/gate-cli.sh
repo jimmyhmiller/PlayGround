@@ -922,6 +922,77 @@ expect_rc 1  "coil test: a failing suite exits 1"                         "$COIL
 expect_out "0 passed; 1 failed" "coil test: reports the failure count"    "$COIL" test "$T/redf.coil"
 expect_out "discovers every \(deftest" "coil test --help documents itself" "$COIL" test --help
 
+echo "== project workflows: test/check/fmt/lint/verify + native graph =="
+mkdir -p "$T/project/src" "$T/project/tests" "$T/project/native"
+cat > "$T/project/Coil.toml" <<'EOF'
+[package]
+name = "project"
+entry = "src/main.coil"
+source-roots = ["src", "tests"]
+
+[cc]
+sources = ["native/answer.c"]
+include-dirs = ["native"]
+flags = ["-std=c11", "-Wall", "-Werror"]
+
+[test]
+roots = ["tests"]
+suffixes = ["_test.coil"]
+EOF
+cat > "$T/project/native/answer.h" <<'EOF'
+long project_answer(void);
+EOF
+cat > "$T/project/native/answer.c" <<'EOF'
+#include "answer.h"
+long project_answer(void) { return 42; }
+EOF
+cat > "$T/project/src/main.coil" <<'EOF'
+(module project)
+(defn main [] (-> i64) 0)
+EOF
+cat > "$T/project/tests/native_test.coil" <<'EOF'
+(module native_test)
+(extern project_answer :cc c [] (-> i64))
+(deftest native-linkage (assert-eq (project_answer) 42))
+EOF
+cat > "$T/project/tests/second_test.coil" <<'EOF'
+(module second_test)
+(deftest second-suite (assert-eq (+ 20 22) 42))
+EOF
+"$COIL" fmt --write "$T/project/src/main.coil" "$T/project/tests/native_test.coil" \
+  "$T/project/tests/second_test.coil" >/dev/null
+expect_out "native_test.coil" "project test --list discovers configured suffixes" \
+  bash -c 'cd "$1" && "$2" test --list' _ "$T/project" "$COIL"
+expect_out "1 passed; 0 failed" "project test selector builds with inherited native inputs" \
+  bash -c 'cd "$1" && "$2" test native' _ "$T/project" "$COIL"
+expect_rc 0 "project test --jobs runs independent suites concurrently" \
+  bash -c 'cd "$1" && "$2" test --jobs 2' _ "$T/project" "$COIL"
+expect_rc 0 "project test --no-run compiles and links every suite" \
+  bash -c 'cd "$1" && "$2" test --no-run' _ "$T/project" "$COIL"
+expect_rc 2 "coil test rejects a user-owned -o instead of running stale output" \
+  bash -c 'cd "$1" && "$2" test tests/native_test.coil -o nope' _ "$T/project" "$COIL"
+expect_rc 0 "project check covers entry and test monomorphizations" \
+  bash -c 'cd "$1" && "$2" check' _ "$T/project" "$COIL"
+expect_rc 0 "project fmt --check discovers owned sources" \
+  bash -c 'cd "$1" && "$2" fmt --check' _ "$T/project" "$COIL"
+expect_rc 0 "project lint understands test graphs without explicit assert imports" \
+  bash -c 'cd "$1" && "$2" lint' _ "$T/project" "$COIL"
+expect_rc 0 "coil verify runs the structured project verification pipeline" \
+  bash -c 'cd "$1" && "$2" verify' _ "$T/project" "$COIL"
+[ ! -e "$T/project/native/answer.c.o" ] \
+  && ok "native objects do not dirty the source directory" \
+  || bad "native objects do not dirty the source directory" "native/answer.c.o exists"
+find "$T/project/.coil/build/native" -name source.d -type f | grep -q . \
+  && ok "native compilation records header depfiles under .coil/build" \
+  || bad "native compilation records header depfiles under .coil/build" "no source.d found"
+
+mkdir -p "$T/bad-native/src" "$T/bad-native/native"
+printf '[package]\nname="bad"\nentry="src/main.coil"\n[cc]\nsources=["native/bad.c"]\n' > "$T/bad-native/Coil.toml"
+printf '(defn main [] (-> i64) 0)\n' > "$T/bad-native/src/main.coil"
+printf 'this is not C;\n' > "$T/bad-native/native/bad.c"
+expect_rc 1 "a failed C compiler stops the project build immediately" \
+  bash -c 'cd "$1" && "$2" build' _ "$T/bad-native" "$COIL"
+
 echo "== -g: dsymutil runs, the .o is kept, lldb maps source (tool-11) =="
 # The arm64 backend now stamps __text-relative RELOCATIONS on every DWARF address (CU +
 # subprogram low_pc, the line program's set_address). WITHOUT them dsymutil printed "No

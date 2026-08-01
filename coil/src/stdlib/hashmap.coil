@@ -1,4 +1,4 @@
-(module hashmap)
+(module coil.hashmap)
 ; An open-addressing hash map `HashMap[K V]` — a generic-struct LIBRARY over the
 ; allocator interface + src/stdlib/mem; no compiler support, no ambient heap (the map
 ; carries its `(ptr Allocator)`).

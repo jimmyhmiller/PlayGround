@@ -1,0 +1,221 @@
+(module harness-main)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "core/event.coil" :use *)
+(import "core/json.coil" :use *)
+(import "core/model.coil" :use *)
+(import "core/tool.coil" :use *)
+(import "infra/http.coil" :use *)
+(import "infra/native.coil" :use *)
+(import "providers/codex_app_server.coil" :use *)
+(import "providers/deepseek_anthropic.coil" :use *)
+(import "providers/deepseek_openai.coil" :use *)
+(import "providers/openai_responses.coil" :use *)
+(import "runtime/agent_runner.coil" :use *)
+
+(defn write-slice [(fd i64) (value (slice u8))] (-> i64)
+  (harness_write_fd fd (slice-data [u8] value) (slice-len [u8] value)))
+
+(defn write-line [(fd i64) (value (slice u8))] (-> i64)
+  (let [(mut line) (sb-new (malloc-allocator))]
+    (sb-push-str! (mut line) value)
+    (sb-push-str! (mut line) "\n")
+    (write-slice fd (sb-finish! (mut line)))))
+
+(defn cli-usage [] (-> i64)
+  (write-line 2 "COIL agent harness")
+  (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex> <model> <prompt>")
+  (write-line 2 "  run   allows the model to choose whether to call the echo tool")
+  (write-line 2 "  tool  requires the model to call the echo tool")
+  64)
+
+(defstruct CliEventSink [])
+
+(defn publish-cli-event [(self (ptr CliEventSink)) (event (ptr Event))] (-> i64)
+  (let [allocator (malloc-allocator)
+        (mut record) (json-object allocator)]
+    (json-object-put! (mut record)
+                      "sequence"
+                      (json-integer allocator (load (field event sequence))))
+    (json-object-put! (mut record)
+                      "timestamp_ms"
+                      (json-integer allocator (load (field event timestamp-ms))))
+    (json-object-put! (mut record)
+                      "event"
+                      (JsonString (event-kind-name (load (field event kind)))))
+    (json-object-put! (mut record)
+                      "run_id"
+                      (JsonString (load (field event run-id))))
+    (json-object-put! (mut record)
+                      "operation_id"
+                      (JsonString (load (field event operation-id))))
+    (json-object-put! (mut record)
+                      "provider"
+                      (JsonString (load (field event provider))))
+    (json-object-put! (mut record)
+                      "model"
+                      (JsonString (load (field event model))))
+    (json-object-put! (mut record) "payload" (load (field event payload)))
+    (write-line 2 (json-stringify allocator (load record)))))
+
+(impl EventSink CliEventSink
+  (publish-event [(self (ptr CliEventSink)) (event (ptr Event))]
+                 (-> i64)
+                 (publish-cli-event self event)))
+
+(defstruct EchoTool [])
+
+(defn execute-echo [(self (ptr EchoTool))
+                    (call (ptr ToolCall))
+                    (allocator (ptr Allocator))] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+    (store! (field result output) (load (field call arguments)))
+    (load result)))
+
+(impl ToolImplementation EchoTool
+  (execute-tool [(self (ptr EchoTool))
+                 (call (ptr ToolCall))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-echo self call allocator)))
+
+(defn echo-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut text) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (json-object-put! (mut text) "type" (JsonString "string"))
+    (json-object-put! (mut properties) "text" (load text))
+    (json-array-push! (mut required) (JsonString "text"))
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn echo-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
+  (let [definition (alloc-stack ToolDefinition)
+        implementation (box allocator EchoTool (zeroed EchoTool))]
+    (store! (field (field definition spec) name) "echo")
+    (store! (field (field definition spec) description)
+            "Return the supplied text. Multiple calls may run in parallel.")
+    (store! (field (field definition spec) input-schema) (echo-schema allocator))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (ReadOnly))
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 10000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn make-request [(allocator (ptr Allocator))
+                    (model (slice u8))
+                    (prompt (slice u8))
+                    (force-tool bool)
+                    (registry (ptr ToolRegistry))] (-> ModelRequest)
+  (let [request (alloc-stack ModelRequest)
+        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+        message (alloc-stack Message)]
+    (store! (field message role) (UserRole))
+    (store! (field message content) prompt)
+    (al-push! [Message] messages (load message))
+    (store! (field request run-id) "cli-run")
+    (store! (field request operation-id) "model-1")
+    (store! (field request model) model)
+    (store! (field request instructions)
+            "Be concise. Use tools when they are required by the request.")
+    (store! (field request messages) messages)
+    (store! (field request tools) registry)
+    (store! (field request tool-choice)
+            (if force-tool (ToolForced "echo") (ToolsAuto)))
+    (store! (field request parallel-tool-calls) true)
+    ; DeepSeek thinking mode rejects forced tool selection. The CLI's deterministic
+    ; tool smoke test therefore disables reasoning; normal runs retain it.
+    (store! (field request reasoning)
+            (if force-tool (ReasoningNone) (ReasoningMedium)))
+    (store! (field request max-output-tokens) 2048)
+    (store! (field request timeout-ms) 120000)
+    (store! (field (field request continuation) present) false)
+    (store! (field (field request continuation) previous-response-id) "")
+    (store! (field (field request continuation) previous-output) (JsonNull))
+    (store! (field (field request continuation) tool-results)
+            (cast (ptr (ArrayList ToolResult)) 0))
+    (load request)))
+
+(defn cli-run-provider [(allocator (ptr Allocator))
+                        (registry (ptr ToolRegistry))
+                        (provider (dyn ModelProvider))
+                        (model (slice u8))
+                        (prompt (slice u8))
+                        (force-tool bool)] (-> i64)
+  (let [request
+          (box allocator
+               ModelRequest
+               (make-request allocator model prompt force-tool registry))
+        sequence (box allocator i64 1)
+        sink (alloc-stack CliEventSink)
+        authorizer (alloc-stack AllowAllAuthorizer)
+        policy (alloc-stack AgentRunPolicy)]
+    (let [emitter (box allocator EventEmitter (event-emitter-new sink sequence))]
+      (store! (field policy max-model-turns) 8)
+      (store! (field policy max-parallel-tools) 8)
+      (match (run-agent allocator
+                        provider
+                        request
+                        authorizer
+                        emitter
+                        (load policy))
+        (ModelOk [response]
+                 (let [success response]
+                   (write-line 1 (load (field success output-text)))
+                   0))
+        (ModelErr [failure]
+                  (let [failed failure]
+                    (write-line 2 (load (field failed message)))
+                    1))))))
+
+(defn cli-run [(provider-name (slice u8))
+               (model (slice u8))
+               (prompt (slice u8))
+               (force-tool bool)] (-> i64)
+  (let [allocator (malloc-allocator)
+        registry (box allocator ToolRegistry (tool-registry-new allocator))
+        openai-context (box allocator OpenAIResponsesContext (openai-context-default))
+        deepseek-openai-context (box allocator DeepSeekOpenAIContext (deepseek-openai-context-default))
+        deepseek-anthropic-context (box allocator DeepSeekAnthropicContext (deepseek-anthropic-context-default))
+        cwd-buffer (harness_current_dir)
+        cwd (http-owned-copy allocator cwd-buffer)
+        codex-context-value (box allocator CodexAppServerContext (codex-context cwd))]
+    (harness_buffer_free cwd-buffer)
+    (tool-register! registry (echo-definition allocator))
+    (if (and force-tool (str-eq provider-name "codex"))
+        (do
+          (write-line 2 "Codex App Server owns its tool registry; use the run command")
+          64)
+        (cond (str-eq provider-name "openai")
+                (cli-run-provider allocator registry openai-context model prompt force-tool)
+              (str-eq provider-name "deepseek-openai")
+                (cli-run-provider allocator registry deepseek-openai-context model prompt force-tool)
+              (str-eq provider-name "deepseek-anthropic")
+                (cli-run-provider allocator registry deepseek-anthropic-context model prompt force-tool)
+              (str-eq provider-name "codex")
+                (cli-run-provider allocator registry codex-context-value model prompt force-tool)
+              :else
+                (do
+                  (write-line 2 "unknown provider")
+                  64)))))
+
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [count (cast i64 argc)]
+    (if (icmp-lt count 5)
+        (cli-usage)
+        (let [command (cstr->str (load (index argv 1)))
+              provider (cstr->str (load (index argv 2)))
+              model (cstr->str (load (index argv 3)))
+              prompt (cstr->str (load (index argv 4)))]
+          (cond (str-eq command "run") (cli-run provider model prompt false)
+                (str-eq command "tool") (cli-run provider model prompt true)
+                :else (cli-usage))))))

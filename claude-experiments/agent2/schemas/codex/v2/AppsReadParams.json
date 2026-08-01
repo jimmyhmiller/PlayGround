@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AppsReadParams",
+  "description": "EXPERIMENTAL - read metadata for specific apps/connectors.",
+  "type": "object",
+  "required": [
+    "appIds"
+  ],
+  "properties": {
+    "appIds": {
+      "description": "App ids to read. The server accepts at most 100 ids and deduplicates repeated ids while preserving their first-request order.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "includeTools": {
+      "description": "When true, include display-only public tool summaries in the returned metadata.",
+      "type": "boolean"
+    }
+  }
+}

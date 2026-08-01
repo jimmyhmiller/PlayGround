@@ -232,7 +232,7 @@
           (break)
           (do
             (store! last (ev (parse-stmt pstate) (mut env)))
-            (do (fmt.print-i w (load last)) (io.print-str w "
+            (do (coil.fmt.print-i w (load last)) (coil.io.print-str w "
 "))
             (match
               (peek pstate)

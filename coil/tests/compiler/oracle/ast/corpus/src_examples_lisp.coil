@@ -187,11 +187,20 @@
           a)
         sq9
         (run-program "((lambda (x) (* x x)) 9)" a)]
-      (do (io.print-str w "fact 10 = ") (fmt.print-i w fact10) (io.print-str w "
+      (do
+        (coil.io.print-str w "fact 10 = ")
+        (coil.fmt.print-i w fact10)
+        (coil.io.print-str w "
 "))
-      (do (io.print-str w "fib 15  = ") (fmt.print-i w fib15) (io.print-str w "
+      (do
+        (coil.io.print-str w "fib 15  = ")
+        (coil.fmt.print-i w fib15)
+        (coil.io.print-str w "
 "))
-      (do (io.print-str w "sq 9    = ") (fmt.print-i w sq9) (io.print-str w "
+      (do
+        (coil.io.print-str w "sq 9    = ")
+        (coil.fmt.print-i w sq9)
+        (coil.io.print-str w "
 "))
       0)))
 

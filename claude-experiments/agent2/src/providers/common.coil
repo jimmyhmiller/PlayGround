@@ -1,0 +1,190 @@
+(module provider-common)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "../core/json.coil" :use *)
+(import "../core/model.coil" :use *)
+(import "../core/tool.coil" :use *)
+(import "../infra/native.coil" :use *)
+
+(const TOOL_LAYOUT_RESPONSES 0)
+(const TOOL_LAYOUT_CHAT 1)
+(const TOOL_LAYOUT_ANTHROPIC 2)
+
+(defstruct ApiCredential
+  [(primary-env (ptr i8))
+   (fallback-env (ptr i8))])
+
+;; Return a borrowed process-environment value, trying the primary name first.
+(defn api-key [(credential ApiCredential)] (-> (ptr i8))
+  (let [primary (harness_getenv (load (field credential primary-env)))]
+    (if (icmp-ne (cast i64 primary) 0)
+        primary
+        (harness_getenv (load (field credential fallback-env))))))
+
+(defn json-put-string! [(object (mut Json)) (key (slice u8)) (value (slice u8))] (-> bool)
+  (json-object-put! (mut object) key (JsonString value)))
+
+(defn json-put-bool! [(object (mut Json)) (key (slice u8)) (value bool)] (-> bool)
+  (json-object-put! (mut object) key (JsonBool value)))
+
+(defn concat-or-empty [(allocator (ptr Allocator)) (left (slice u8)) (right (slice u8))] (-> (slice u8))
+  (match (str-concat allocator left right)
+    (Some [value] value)
+    (None [] "")))
+
+(defn tool-spec-wire [(allocator (ptr Allocator)) (spec ToolSpec) (layout i64)] (-> Json)
+  (let [(mut function) (json-object allocator)]
+    (json-put-string! (mut function) "name" (load (field spec name)))
+    (json-put-string! (mut function) "description" (load (field spec description)))
+    (json-object-put! (mut function)
+                      (if (icmp-eq layout TOOL_LAYOUT_ANTHROPIC)
+                          "input_schema"
+                          "parameters")
+                      (load (field spec input-schema)))
+    (when (icmp-ne layout TOOL_LAYOUT_ANTHROPIC)
+      (json-put-bool! (mut function) "strict" (load (field spec strict)))
+      0)
+    (if (icmp-eq layout TOOL_LAYOUT_CHAT)
+        (let [(mut wrapper) (json-object allocator)]
+          (json-put-string! (mut wrapper) "type" "function")
+          (json-object-put! (mut wrapper) "function" (load function))
+          (load wrapper))
+        (do
+          (when (icmp-eq layout TOOL_LAYOUT_RESPONSES)
+            (json-put-string! (mut function) "type" "function")
+            0)
+          (load function)))))
+
+(defn tool-registry-wire [(allocator (ptr Allocator)) (registry (ptr ToolRegistry)) (layout i64)] (-> Json)
+  (let [(mut tools) (json-array allocator)
+        definitions (field registry definitions)
+        (mut i) 0
+        n (al-len [ToolDefinition] (load definitions))]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [definition (al-get [ToolDefinition] (load definitions) (load i))]
+                (json-array-push! (mut tools)
+                                  (tool-spec-wire allocator
+                                                  (load (field definition spec))
+                                                  layout))
+                (store! i (iadd (load i) 1)))))
+    (load tools)))
+
+(defn messages-wire [(allocator (ptr Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
+  (let [(mut result) (json-array allocator)
+        (mut i) 0
+        n (al-len [Message] (load messages))]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [message (al-get [Message] (load messages) (load i))
+                    (mut object) (json-object allocator)]
+                (json-put-string! (mut object)
+                                  "role"
+                                  (message-role-name (load (field message role))))
+                (json-put-string! (mut object)
+                                  "content"
+                                  (load (field message content)))
+                (json-array-push! (mut result) (load object))
+                (store! i (iadd (load i) 1)))))
+    (load result)))
+
+(defn tool-choice-responses [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
+  (match choice
+    (ToolsAuto [] (JsonString "auto"))
+    (ToolsNone [] (JsonString "none"))
+    (ToolsRequired [] (JsonString "required"))
+    (ToolForced [name]
+                (let [(mut value) (json-object allocator)]
+                  (json-put-string! (mut value) "type" "function")
+                  (json-put-string! (mut value) "name" name)
+                  (load value)))))
+
+(defn tool-choice-chat [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
+  (match choice
+    (ToolsAuto [] (JsonString "auto"))
+    (ToolsNone [] (JsonString "none"))
+    (ToolsRequired [] (JsonString "required"))
+    (ToolForced [name]
+                (let [(mut function) (json-object allocator)
+                      (mut value) (json-object allocator)]
+                  (json-put-string! (mut function) "name" name)
+                  (json-put-string! (mut value) "type" "function")
+                  (json-object-put! (mut value) "function" (load function))
+                  (load value)))))
+
+(defn tool-choice-anthropic [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
+  (let [(mut value) (json-object allocator)]
+    (match choice
+      (ToolsAuto [] (json-put-string! (mut value) "type" "auto"))
+      (ToolsNone [] (json-put-string! (mut value) "type" "none"))
+      (ToolsRequired [] (json-put-string! (mut value) "type" "any"))
+      (ToolForced [name]
+                  (do
+                    (json-put-string! (mut value) "type" "tool")
+                    (json-put-string! (mut value) "name" name))))
+    (load value)))
+
+(defn json-number-i64 [(value Json)] (-> i64)
+  (match-else value
+              (JsonNumber [raw]
+                          (match (str-parse-int raw)
+                            (Some [number] number)
+                            (None [] 0)))
+              (_ 0)))
+
+(defn usage-empty [] (-> ModelUsage)
+  (zeroed ModelUsage))
+
+(defn response-empty [(allocator (ptr Allocator))] (-> ModelResponse)
+  (let [response (alloc-stack ModelResponse)]
+    (store! (field response provider) "")
+    (store! (field response model) "")
+    (store! (field response response-id) "")
+    (store! (field response output-text) "")
+    (store! (field response tool-calls) (al-new [ToolCall] allocator))
+    (store! (field response usage) (usage-empty))
+    (store! (field response raw-output) (JsonNull))
+    (load response)))
+
+(defn model-failure [(provider (slice u8))
+                     (status i64)
+                     (message (slice u8))] (-> ModelResult)
+  (let [failure (alloc-stack ModelFailure)]
+    (store! (field failure kind)
+            (cond (icmp-eq status 0) (TransportFailure)
+                  (or (icmp-eq status 401) (icmp-eq status 403)) (AuthenticationFailure)
+                  (icmp-eq status 429) (RateLimitFailure)
+                  :else (ProviderFailure)))
+    (store! (field failure provider) provider)
+    (store! (field failure status-code) status)
+    (store! (field failure message) message)
+    (store! (field failure retryable)
+            (or (icmp-eq status 0)
+                (or (icmp-eq status 408)
+                    (or (icmp-eq status 429) (icmp-ge status 500)))))
+    (ModelErr (load failure))))
+
+(defn json-error-message [(root Json) (fallback (slice u8))] (-> (slice u8))
+  (match (json-string-at (json-get root "error") "message")
+    (Some [message] message)
+    (None [] fallback)))
+
+(defn parsed-tool-call [(allocator (ptr Allocator))
+                        (id (slice u8))
+                        (name (slice u8))
+                        (raw-arguments (slice u8))] (-> ToolCall)
+  (let [call (alloc-stack ToolCall)
+        parsed (json-parse allocator raw-arguments)]
+    (store! (field call id) id)
+    (store! (field call name) name)
+    (store! (field call raw-arguments) raw-arguments)
+    (store! (field call arguments)
+            (if (load (field parsed ok))
+                (load (field parsed value))
+                (JsonNull)))
+    (load call)))

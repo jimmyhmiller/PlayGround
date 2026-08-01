@@ -368,6 +368,36 @@ proptest! {
         }
     }
 
+    /// Property: surplus closers are repaired by deletion only. A valid form's
+    /// bytes (including whitespace) must not be reinterpreted from indentation.
+    #[test]
+    fn prop_surplus_closer_repair_is_minimal(
+        original in well_formed_sexpr(4),
+        extras in prop::collection::vec(prop::sample::select(vec![')', ']', '}']), 1..8)
+    ) {
+        let input = format!("{}{}", original, extras.iter().collect::<String>());
+        let output = Parinfer::new(&input).balance().unwrap();
+
+        prop_assert_eq!(output, original,
+            "repair must only remove the injected surplus closers");
+    }
+
+    /// Property: a surplus closer between valid top-level forms cannot cause
+    /// either neighboring form to be reflowed or nested into the other.
+    #[test]
+    fn prop_surplus_closer_between_forms_preserves_both(
+        left in well_formed_sexpr(3),
+        right in well_formed_sexpr(3),
+        extra in prop::sample::select(vec![')', ']', '}'])
+    ) {
+        let expected = format!("{}\n{}", left, right);
+        let input = format!("{}{}\n{}", left, extra, right);
+        let output = Parinfer::new(&input).balance().unwrap();
+
+        prop_assert_eq!(output, expected,
+            "repair must preserve valid forms byte-for-byte");
+    }
+
     /// Property: Multiline strings work correctly
     #[test]
     fn prop_multiline_strings(
@@ -462,5 +492,16 @@ mod regression_tests {
         let output = parinfer.balance().unwrap();
 
         assert_eq!(input, output, "Mixed nested delimiters should be preserved");
+    }
+
+    #[test]
+    fn test_coil_extra_function_closer_does_not_move_let_vector_bracket() {
+        let input = "(defn cli-run-provider [(allocator (ptr Allocator))] (-> i64)\n  (let [request (make-request)\n        policy (alloc-stack AgentRunPolicy)]\n    (store! (field policy max-model-turns) 8)\n    (match (run-agent request policy)\n      (ModelOk [response] 0)\n      (ModelErr [failure] 1)))))\n";
+        let expected = "(defn cli-run-provider [(allocator (ptr Allocator))] (-> i64)\n  (let [request (make-request)\n        policy (alloc-stack AgentRunPolicy)]\n    (store! (field policy max-model-turns) 8)\n    (match (run-agent request policy)\n      (ModelOk [response] 0)\n      (ModelErr [failure] 1))))\n";
+
+        let output = Parinfer::new(input).balance().unwrap();
+        assert_eq!(output, expected);
+        assert!(output.contains("AgentRunPolicy)]\n"),
+            "the let binding vector closer must stay before the body");
     }
 }

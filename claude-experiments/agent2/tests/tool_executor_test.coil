@@ -1,0 +1,116 @@
+(module harness-tool-executor-test)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "atomic.coil" :use *)
+(import "match.coil" :use *)
+(import "str.coil" :use *)
+(import "../src/core/event.coil" :use *)
+(import "../src/core/json.coil" :use *)
+(import "../src/core/tool.coil" :use *)
+(import "../src/infra/native.coil" :use *)
+(import "../src/runtime/tool_executor.coil" :use *)
+
+(defstruct ParallelProbe
+  [(active (ptr i64))
+   (maximum (ptr i64))])
+
+(defn update-maximum! [(maximum (ptr i64)) (candidate i64)] (-> i64)
+  (let [(mut observed) (atomic-load maximum)
+        (mut done) false]
+    (loop (if (or (load done) (icmp-ge (load observed) candidate))
+              (break)
+              (let [actual (atomic-cas maximum (load observed) candidate)]
+                (if (icmp-eq actual (load observed))
+                    (store! done true)
+                    (store! observed actual)))))
+    (atomic-load maximum)))
+
+(defn execute-probe [(probe (ptr ParallelProbe))
+                     (call (ptr ToolCall))
+                     (allocator (ptr Allocator))] (-> ToolResult)
+  (let [active (iadd (atomic-add (load (field probe active)) 1) 1)
+        (mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+    (update-maximum! (load (field probe maximum)) active)
+    (harness_sleep_ms 80)
+    (atomic-sub (load (field probe active)) 1)
+    (store! (field result output) (JsonString (load (field call id))))
+    (load result)))
+
+(impl ToolImplementation ParallelProbe
+  (execute-tool [(self (ptr ParallelProbe))
+                 (call (ptr ToolCall))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-probe self call allocator)))
+
+(defstruct CountingEventSink [(count (ptr i64))])
+
+(impl EventSink CountingEventSink
+  (publish-event [(self (ptr CountingEventSink)) (event (ptr Event))]
+                 (-> i64)
+                 (atomic-add (load (field self count)) 1)))
+
+(defn executor-tool [(allocator (ptr Allocator)) (probe (ptr ParallelProbe))] (-> ToolDefinition)
+  (let [schema-result
+          (json-parse allocator
+                      "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
+        definition (alloc-stack ToolDefinition)]
+    (store! (field (field definition spec) name) "probe")
+    (store! (field (field definition spec) description) "Parallelism probe")
+    (store! (field (field definition spec) input-schema) (load (field schema-result value)))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (ReadOnly))
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 1000)
+    (store! (field definition implementation) probe)
+    (load definition)))
+
+(defn executor-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
+  (let [call (alloc-stack ToolCall)]
+    (store! (field call id) id)
+    (store! (field call name) "probe")
+    (store! (field call arguments) (json-object allocator))
+    (store! (field call raw-arguments) "{}")
+    (load call)))
+
+(deftest executes-independent-tools-concurrently-and-keeps-result-order
+         (let [allocator (malloc-allocator)
+               active (box allocator i64 0)
+               maximum (box allocator i64 0)
+               event-count (box allocator i64 0)
+               sequence (box allocator i64 0)
+               probe (box allocator ParallelProbe (zeroed ParallelProbe))
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+               sink (alloc-stack CountingEventSink)
+               authorizer (alloc-stack AllowAllAuthorizer)
+               emitter (alloc-stack EventEmitter)
+               execution (alloc-stack ToolExecutionRequest)]
+           (store! (field probe active) active)
+           (store! (field probe maximum) maximum)
+           (let [(mut registry-value) (load registry)]
+             (tool-register! (mut registry-value) (executor-tool allocator probe))
+             (store! registry (load registry-value)))
+           (al-push! [ToolCall] calls (executor-call allocator "first"))
+           (al-push! [ToolCall] calls (executor-call allocator "second"))
+           (store! (field sink count) event-count)
+           (store! (field emitter sink) sink)
+           (store! (field emitter next-sequence) sequence)
+           (store! (field execution run-id) "parallel-test")
+           (store! (field execution provider) "fake")
+           (store! (field execution model) "fake")
+           (store! (field execution registry) registry)
+           (store! (field execution authorizer) authorizer)
+           (store! (field execution calls) calls)
+           (store! (field execution emitter) emitter)
+           (store! (field execution max-parallel) 2)
+           (let [batch (execute-tools-parallel allocator execution)]
+             (assert-eq (al-len [ToolResult] (load (field batch results))) 2)
+             (assert-eq (atomic-load maximum) 2)
+             (let [first (al-get [ToolResult] (load (field batch results)) 0)]
+               (assert (match-else (load (field first status))
+                                   (ToolSucceeded [] true)
+                                   (_ false)))
+               (assert (str-eq (load (field first call-id)) "first")))
+             (assert-eq (atomic-load event-count) 8))))

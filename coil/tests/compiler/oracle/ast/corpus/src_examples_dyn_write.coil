@@ -4,9 +4,7 @@
 
 (deftrait Write [Self] (emit [(self (ptr Self)) (bytes (slice u8))] (-> i64)))
 
-(defstruct Write-vtable [(emit (fnptr c [(ptr i8) (slice u8)] i64))])
-
-(defstruct Write-dyn [(data (ptr i8)) (vtable (ptr Write-vtable))])
+(defdyn-marker Write)
 
 (defstruct File [(fd i64)])
 

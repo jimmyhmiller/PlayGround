@@ -1,0 +1,16 @@
+[package]
+name = "harness"
+entry = "src/main.coil"
+source-roots = ["src", "tests"]
+
+[cc]
+sources = ["native/harness_native.c"]
+include-dirs = ["native"]
+flags = ["-std=c11", "-Wall", "-Wextra", "-Werror"]
+
+[native-dependencies]
+libcurl = { pkg-config = "libcurl" }
+
+[test]
+roots = ["tests"]
+suffixes = ["_test.coil"]

@@ -328,28 +328,28 @@
     [tg (tag-of p)]
     (if
       (= tg 0)
-      (do (do (io.print-str (stdout) "()")) 0)
+      (do (do (coil.io.print-str (stdout) "()")) 0)
       (if
         (= tg 1)
-        (do (do (fmt.print-i (stdout) (ival p))) 0)
+        (do (do (coil.fmt.print-i (stdout) (ival p))) 0)
         (if
           (= tg 3)
-          (do (do (io.print-str (stdout) (sym-name (sym-id p)))) 0)
+          (do (do (coil.io.print-str (stdout) (sym-name (sym-id p)))) 0)
           (if
             (= tg 4)
-            (do (do (io.print-str (stdout) (if (= (ival p) 0) "#f" "#t"))) 0)
+            (do (do (coil.io.print-str (stdout) (if (= (ival p) 0) "#f" "#t"))) 0)
             (if
               (= tg 5)
-              (do (do (io.print-str (stdout) "#<procedure>")) 0)
+              (do (do (coil.io.print-str (stdout) "#<procedure>")) 0)
               (if
                 (= tg 6)
-                (do (do (io.print-str (stdout) "#<primitive>")) 0)
+                (do (do (coil.io.print-str (stdout) "#<primitive>")) 0)
                 (if
                   (= tg 2)
                   (do
-                    (do (io.print-str (stdout) "("))
+                    (do (coil.io.print-str (stdout) "("))
                     (print-list p)
-                    (do (io.print-str (stdout) ")"))
+                    (do (coil.io.print-str (stdout) ")"))
                     0)
                   0)))))))))
 
@@ -363,8 +363,8 @@
       [d (cdr p)]
       (if
         (= (tag-of d) 2)
-        (do (do (io.print-str (stdout) " ")) (print-list d) 0)
-        (if (= (tag-of d) 0) 0 (do (do (io.print-str (stdout) " . ")) (print-val d) 0))))))
+        (do (do (coil.io.print-str (stdout) " ")) (print-list d) 0)
+        (if (= (tag-of d) 0) 0 (do (do (coil.io.print-str (stdout) " . ")) (print-val d) 0))))))
 
 (defn
   read-stdin

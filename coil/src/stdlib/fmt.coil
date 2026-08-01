@@ -1,4 +1,4 @@
-(module fmt)
+(module coil.fmt)
 ; Formatting helpers over the IO Writer capability (src/stdlib/io.coil) — all explicit:
 ; every printer TAKES a `(ptr Writer)`, there is no ambient stdout. Builds on io's
 ; print-str / print-int (non-negative) / write-byte, adding the everyday pieces:
@@ -151,28 +151,30 @@
 ; `{{`/`}}` are literal braces. Expands to a sequence of print-* calls. Too few
 ; args for the specs is a compile error (no silent wrong).
 
-;; The printer for a spec, as a FULLY-QUALIFIED head (`io.print-str`/`fmt.print-i`/…).
+;; The printer for a spec, as a canonical hygienic name or an alias-qualified
+;; imported name. Canonical dotted names here are Code values
+;; emitted by the macro, not source-level module qualification.
 ;; The name is spliced into call-head position via `~unquote`, which bypasses the
 ;; macro's call-head hygiene — so qualify it here, otherwise it resolves at the use
 ;; site and breaks wherever the caller didn't import io/fmt (e.g. the ambient
 ;; `print`/`println`, which import nothing).
 (defn fmt--printer [(spec i64)] (-> Code)
-  (if (icmp-eq spec 100) `fmt.print-i
-  (if (icmp-eq spec 115) `io.print-str
-  (if (icmp-eq spec 120) `fmt.print-uhex   ; {x}: full-range hex. print-hex assumed
+  (if (icmp-eq spec 100) `coil.fmt.print-i
+  (if (icmp-eq spec 115) `coil.io.print-str
+  (if (icmp-eq spec 120) `coil.fmt.print-uhex   ; {x}: full-range hex. print-hex assumed
                                            ; non-negative and emitted a garbage byte for
                                            ; a negative i64 (a hash/mask/errno that went
                                            ; negative — exactly what {x} is reached for).
-  (if (icmp-eq spec 99)  `fmt.print-char
-  (if (icmp-eq spec 98)  `fmt.print-bool
-  (if (icmp-eq spec 117) `fmt.print-u
-  (if (icmp-eq spec 102) `fmt.print-f
+  (if (icmp-eq spec 99)  `coil.fmt.print-char
+  (if (icmp-eq spec 98)  `coil.fmt.print-bool
+  (if (icmp-eq spec 117) `coil.fmt.print-u
+  (if (icmp-eq spec 102) `coil.fmt.print-f
     (error "fmt: unknown spec; use {d} {s} {x} {c} {b} {u} {f}")))))))))
 
 ;; flush the accumulated literal bytes as a single print-str (or nothing if empty)
 (defn fmt--flush [(w Code) (lit Code)] (-> Code)
   (if (icmp-eq (code-count lit) 0) `()
-    `((io.print-str ~w ~(bytes->str lit)))))
+    `((coil.io.print-str ~w ~(bytes->str lit)))))
 
 ;; single pass over the format bytes (index i), accumulating literal bytes in `lit`
 ;; and consuming `args` (index ai). Returns a Code list of print-* call forms.

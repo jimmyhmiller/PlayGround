@@ -1,0 +1,6 @@
+(module myproject.scoped_namespace_test)
+
+(import "scoped_namespace_lib.coil" :as thing)
+
+(defn main [] (-> i64)
+  (if (= (thing/answer) 42) 0 1))

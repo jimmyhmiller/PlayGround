@@ -1,0 +1,71 @@
+(module harness-json-test)
+
+(import "alloc.coil" :use *)
+(import "match.coil" :use *)
+(import "str.coil" :use *)
+(import "../src/core/json.coil" :use *)
+(import "../src/core/json_schema.coil" :use *)
+
+(deftest parses-and-serializes-owned-json
+         (let [allocator (malloc-allocator)
+               parsed
+                 (json-parse allocator
+                             "{\"name\":\"coil\\nagent\",\"enabled\":true,\"items\":[1,null]}")]
+           (assert (load (field parsed ok)))
+           (assert (match (json-string-at (load (field parsed value)) "name")
+                     (Some [name] (str-eq name "coil\nagent"))
+                     (None [] false)))
+           (assert-eq (json-array-length (json-get (load (field parsed value)) "items")) 2)
+           (let [encoded (json-stringify allocator (load (field parsed value)))
+                 reparsed (json-parse allocator encoded)]
+             (assert (load (field reparsed ok)))
+             (assert (json-object-has? (load (field reparsed value)) "enabled")))))
+
+(deftest rejects-trailing-and-malformed-json
+         (let [allocator (malloc-allocator)
+               trailing (json-parse allocator "{} garbage")
+               malformed (json-parse allocator "{\"x\":]")]
+           (assert (not (load (field trailing ok))))
+           (assert (not (load (field malformed ok))))))
+
+(deftest validates-the-strict-tool-schema-subset
+         (let [allocator (malloc-allocator)
+               schema-result
+                 (json-parse allocator
+                             "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false}")
+               good-result (json-parse allocator "{\"city\":\"Oslo\"}")
+               missing-result (json-parse allocator "{}")
+               extra-result (json-parse allocator "{\"city\":\"Oslo\",\"unit\":\"C\"}")]
+           (assert (load (field schema-result ok)))
+           (let [good
+                   (json-schema-validate allocator
+                                         (load (field schema-result value))
+                                         (load (field good-result value)))
+                 missing
+                   (json-schema-validate allocator
+                                         (load (field schema-result value))
+                                         (load (field missing-result value)))
+                 extra
+                   (json-schema-validate allocator
+                                         (load (field schema-result value))
+                                         (load (field extra-result value)))]
+             (assert (load (field good ok)))
+             (assert (not (load (field missing ok))))
+             (assert (not (load (field extra ok)))))))
+
+(deftest validates-any-of-without-bypassing-ordinary-schemas
+         (let [allocator (malloc-allocator)
+               string-result (json-parse allocator "{\"type\":\"string\"}")
+               union-result
+                 (json-parse allocator
+                             "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}]}")
+               string-schema (load (field string-result value))
+               union-schema (load (field union-result value))
+               string-valid (json-schema-validate allocator string-schema (JsonString "yes"))
+               string-invalid (json-schema-validate allocator string-schema (JsonBool true))
+               union-valid (json-schema-validate allocator union-schema (JsonNull))
+               union-invalid (json-schema-validate allocator union-schema (JsonBool true))]
+           (assert (load (field string-valid ok)))
+           (assert (not (load (field string-invalid ok))))
+           (assert (load (field union-valid ok)))
+           (assert (not (load (field union-invalid ok))))))

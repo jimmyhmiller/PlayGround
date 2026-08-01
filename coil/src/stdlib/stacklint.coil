@@ -1,4 +1,4 @@
-(module stacklint)
+(module coil.stacklint)
 ; A bundled `--debug-checks` lint (mem-8): warn when a function returns a POINTER to a
 ; STACK local — an `alloc-stack` slot, which dangles the moment the frame is popped.
 ; clang warns on the identical C by default; Coil was silent. The driver auto-applies

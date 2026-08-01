@@ -1,4 +1,4 @@
-(module match)
+(module coil.match)
 ; `(match-else scrut (V1 [..] body) … (_ default))` — a `match` with a CATCH-ALL
 ; arm, as a pure-LIBRARY MACRO over the comptime reflection bridge (no compiler
 ; `_` support). It infers the sum from the first explicit arm's variant name

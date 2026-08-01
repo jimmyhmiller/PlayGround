@@ -6,7 +6,7 @@
 ;
 ;   (let [forms (read-all a "(define x 10) (+ x 1)")]   ; -> ArrayList<(ptr Sexp)>
 ;     (sexp-count (al-get [(ptr Sexp)] (load forms) 1)))   ; => 3
-(module sexp)
+(module coil.sexp)
 (import "alloc.coil"     :use *)
 (import "slice.coil"     :use *)
 (import "str.coil"       :use *)

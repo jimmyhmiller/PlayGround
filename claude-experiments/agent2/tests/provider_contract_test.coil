@@ -1,0 +1,158 @@
+(module harness-provider-contract-test)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)
+(import "str.coil" :use *)
+(import "../src/core/json.coil" :use *)
+(import "../src/core/model.coil" :use *)
+(import "../src/core/tool.coil" :use *)
+(import "../src/providers/codex_app_server.coil" :use *)
+(import "../src/providers/deepseek_anthropic.coil" :use *)
+(import "../src/providers/deepseek_openai.coil" :use *)
+(import "../src/providers/openai_responses.coil" :use *)
+
+(defstruct UnusedTool [])
+
+(impl ToolImplementation UnusedTool
+  (execute-tool [(self (ptr UnusedTool))
+                 (call (ptr ToolCall))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (tool-result-empty (load (field call id)) (ToolSucceeded))))
+
+(defn test-tool [(allocator (ptr Allocator))] (-> ToolDefinition)
+  (let [parsed
+          (json-parse allocator
+                      "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false}")
+        definition (alloc-stack ToolDefinition)
+        implementation (box allocator UnusedTool (zeroed UnusedTool))]
+    (store! (field (field definition spec) name) "city_fact")
+    (store! (field (field definition spec) description) "Return one city fact")
+    (store! (field (field definition spec) input-schema) (load (field parsed value)))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (ReadOnly))
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 1000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn test-request [(allocator (ptr Allocator))] (-> (ptr ModelRequest))
+  (let [messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+        (mut registry-value) (tool-registry-new allocator)
+        request (box allocator ModelRequest (zeroed ModelRequest))
+        message (alloc-stack Message)]
+    (store! (field message role) (UserRole))
+    (store! (field message content) "Use the tool twice.")
+    (al-push! [Message] messages (load message))
+    (tool-register! (mut registry-value) (test-tool allocator))
+    (let [registry (box allocator ToolRegistry (load registry-value))]
+      (store! (field request run-id) "test-run")
+      (store! (field request operation-id) "test-operation")
+      (store! (field request model) "test-model")
+      (store! (field request instructions) "Be exact.")
+      (store! (field request messages) messages)
+      (store! (field request tools) registry)
+      (store! (field request tool-choice) (ToolsAuto))
+      (store! (field request parallel-tool-calls) true)
+      (store! (field request reasoning) (ReasoningHigh))
+      (store! (field request max-output-tokens) 512)
+      (store! (field request timeout-ms) 10000)
+      (store! (field (field request continuation) present) false)
+      request)))
+
+(deftest openai-responses-wire-contract
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               wire (openai-request-json allocator request)
+               tool (json-array-get (json-get wire "tools") 0)]
+           (assert (match (json-string-at wire "model")
+                     (Some [value] (str-eq value "test-model"))
+                     (None [] false)))
+           (assert (match (json-bool-value (json-get wire "parallel_tool_calls"))
+                     (Some [value] value)
+                     (None [] false)))
+           (assert (match (json-string-at tool "type")
+                     (Some [value] (str-eq value "function"))
+                     (None [] false)))
+           (assert (match (json-bool-value (json-get tool "strict"))
+                     (Some [value] value)
+                     (None [] false)))))
+
+(deftest openai-parses-parallel-function-calls
+         (let [allocator (malloc-allocator)
+               parsed
+                 (json-parse allocator
+                             "{\"id\":\"resp-1\",\"model\":\"gpt-test\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"a\",\"name\":\"city_fact\",\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"},{\"type\":\"function_call\",\"call_id\":\"b\",\"name\":\"city_fact\",\"arguments\":\"{\\\"city\\\":\\\"Lima\\\"}\"}],\"usage\":{}}")
+               response (openai-parse-response allocator (load (field parsed value)))]
+           (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 2)
+           (let [second (al-get [ToolCall] (load (field response tool-calls)) 1)]
+             (assert (str-eq (load (field second id)) "b"))
+             (assert (match (json-string-at (load (field second arguments)) "city")
+                       (Some [value] (str-eq value "Lima"))
+                       (None [] false))))))
+
+(deftest deepseek-openai-replays-reasoning-content
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               previous-result
+                 (json-parse allocator
+                             "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"reasoning_content\":\"opaque reasoning\",\"tool_calls\":[]}}]}")
+               results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
+               result (alloc-stack ToolResult)]
+           (store! (field result call-id) "call-1")
+           (store! (field result status) (ToolSucceeded))
+           (store! (field result output) (JsonString "ok"))
+           (store! (field result error) "")
+           (al-push! [ToolResult] results (load result))
+           (store! (field (field request continuation) present) true)
+           (store! (field (field request continuation) previous-output)
+                   (load (field previous-result value)))
+           (store! (field (field request continuation) tool-results) results)
+           (let [wire (deepseek-openai-request-json allocator request)
+                 messages (json-get wire "messages")
+                 assistant (json-array-get messages 1)]
+             (assert-eq (json-array-length messages) 3)
+             (assert (match (json-string-at assistant "reasoning_content")
+                       (Some [value] (str-eq value "opaque reasoning"))
+                       (None [] false))))))
+
+(deftest deepseek-anthropic-wire-contract
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               wire (deepseek-anthropic-request-json allocator request)
+               tool (json-array-get (json-get wire "tools") 0)]
+           (assert (match (json-string-at tool "name")
+                     (Some [value] (str-eq value "city_fact"))
+                     (None [] false)))
+           (assert (json-object-has? tool "input_schema"))
+           (assert (not (json-object-has? tool "strict")))
+           (assert (match (json-string-at (json-get wire "tool_choice") "type")
+                     (Some [value] (str-eq value "auto"))
+                     (None [] false)))))
+
+(deftest deepseek-anthropic-parses-parallel-tool-use
+         (let [allocator (malloc-allocator)
+               parsed
+                 (json-parse allocator
+                             "{\"id\":\"msg-1\",\"model\":\"deepseek-v4-flash\",\"content\":[{\"type\":\"tool_use\",\"id\":\"a\",\"name\":\"city_fact\",\"input\":{\"city\":\"Oslo\"}},{\"type\":\"tool_use\",\"id\":\"b\",\"name\":\"city_fact\",\"input\":{\"city\":\"Lima\"}}],\"usage\":{}}")
+               response
+                 (deepseek-anthropic-parse-response allocator
+                                                    (load (field parsed value)))]
+           (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 2)
+           (let [first (al-get [ToolCall] (load (field response tool-calls)) 0)]
+             (assert (str-eq (load (field first id)) "a")))))
+
+(deftest codex-app-server-control-contract
+         (let [allocator (malloc-allocator)
+               steer (codex-steer-request allocator 8 "thread-1" "turn-1" "new direction")
+               interrupt (codex-interrupt-request allocator 9 "thread-1" "turn-1")]
+           (assert (match (json-string-at steer "method")
+                     (Some [value] (str-eq value "turn/steer"))
+                     (None [] false)))
+           (assert (match (json-string-at (json-get steer "params") "expectedTurnId")
+                     (Some [value] (str-eq value "turn-1"))
+                     (None [] false)))
+           (assert (match (json-string-at interrupt "method")
+                     (Some [value] (str-eq value "turn/interrupt"))
+                     (None [] false)))))

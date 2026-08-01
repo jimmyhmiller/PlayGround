@@ -1,0 +1,140 @@
+(module harness-tool)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "../core/json.coil" :use *)
+
+;; Effect classification informs authorization and retry policy. It is deliberately
+;; independent of provider tool formats.
+(defsum ToolEffect
+  (ReadOnly [])
+  (Reversible [])
+  (Destructive []))
+
+(defstruct ToolSpec
+  [(name (slice u8))
+   (description (slice u8))
+   (input-schema Json)
+   (strict bool)
+   (effect ToolEffect)
+   (idempotent bool)
+   (timeout-ms i64)])
+
+(defstruct ToolCall
+  [(id (slice u8))
+   (name (slice u8))
+   (arguments Json)
+   (raw-arguments (slice u8))])
+
+(defsum ToolStatus
+  (ToolSucceeded [])
+  (ToolErrored [])
+  (ToolDenied [])
+  (ToolUnknown []))
+
+(defstruct ToolResult
+  [(call-id (slice u8))
+   (status ToolStatus)
+   (output Json)
+   (error (slice u8))
+   (started-at-ms i64)
+   (finished-at-ms i64)])
+
+(deftrait ToolImplementation [Self]
+  (execute-tool [(self (ptr Self))
+                 (call (ptr ToolCall))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)))
+
+;; A registered tool combines serializable metadata with an erased implementation.
+;; Implementations return data; they do not decide authorization.
+(defstruct ToolDefinition
+  [(spec ToolSpec)
+   (implementation (dyn ToolImplementation))])
+
+(defstruct ToolRegistry
+  [(definitions (ArrayList ToolDefinition))])
+
+(defsum AuthorizationDecision
+  (Authorize [])
+  (Reject [(reason (slice u8))]))
+
+;; Authorization is a separate capability so a CLI, server policy, or interactive
+;; client can make the decision without changing tool implementations.
+(deftrait ToolAuthorizer [Self]
+  (authorize-tool [(self (ptr Self))
+                   (spec (ptr ToolSpec))
+                   (call (ptr ToolCall))]
+                  (-> AuthorizationDecision)))
+
+(defstruct AllowAllAuthorizer [])
+
+(impl ToolAuthorizer AllowAllAuthorizer
+  (authorize-tool [(self (ptr AllowAllAuthorizer))
+                   (spec (ptr ToolSpec))
+                   (call (ptr ToolCall))]
+                  (-> AuthorizationDecision)
+                  (Authorize)))
+
+(defn tool-registry-new [(allocator (ptr Allocator))] (-> ToolRegistry)
+  (let [registry (alloc-stack ToolRegistry)]
+    (store! (field registry definitions) (al-new [ToolDefinition] allocator))
+    (load registry)))
+
+;; Register a tool. Names must be unique; false means an existing name was left
+;; unchanged.
+(defn tool-register! [(registry (mut ToolRegistry)) (definition ToolDefinition)] (-> bool)
+  (let [name (load (field (field definition spec) name))
+        (mut i) 0
+        n (al-len [ToolDefinition] (load (field registry definitions)))
+        (mut unique) true]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [existing (al-get [ToolDefinition] (load (field registry definitions)) (load i))]
+                (if (str-eq (load (field (field existing spec) name)) name)
+                    (do (store! unique false) (break))
+                    (store! i (iadd (load i) 1))))))
+    (if (load unique)
+        (do (al-push! [ToolDefinition] (mut (field registry definitions)) definition) true)
+        false)))
+
+(defn tool-find [(registry ToolRegistry) (name (slice u8))] (-> (Option ToolDefinition))
+  (let [definitions (field registry definitions)
+        (mut i) 0
+        n (al-len [ToolDefinition] (load definitions))
+        (mut found) false
+        (mut result) (zeroed ToolDefinition)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [definition (al-get [ToolDefinition] (load definitions) (load i))]
+                (if (str-eq (load (field (field definition spec) name)) name)
+                    (do (store! result definition) (store! found true) (break))
+                    (store! i (iadd (load i) 1))))))
+    (if (load found) (Some (load result)) (None [ToolDefinition]))))
+
+(defn tool-result-empty [(call-id (slice u8)) (status ToolStatus)] (-> ToolResult)
+  (let [result (alloc-stack ToolResult)]
+    (store! (field result call-id) call-id)
+    (store! (field result status) status)
+    (store! (field result output) (JsonNull))
+    (store! (field result error) "")
+    (store! (field result started-at-ms) 0)
+    (store! (field result finished-at-ms) 0)
+    (load result)))
+
+;; Validate the cross-provider subset required by strict function tools. Provider
+;; adapters may impose additional restrictions and report them separately.
+(defn tool-spec-valid? [(spec ToolSpec)] (-> bool)
+  (let [name (load (field spec name))]
+    (and (icmp-gt (slice-len [u8] name) 0)
+         (and (icmp-le (slice-len [u8] name) 64)
+              (match-else (load (field spec input-schema))
+                          (JsonObject [keys values]
+                                      (match-else (json-string-at (load (field spec input-schema)) "type")
+                                                  (Some [kind] (str-eq kind "object"))
+                                                  (_ false)))
+                          (_ false))))))

@@ -47,11 +47,11 @@
     x
     (VPair [c] (load (field c a)))
     (VNil [] (VNil))
-    (VInt [$g2817] (VNil))
-    (VBool [$g2818] (VNil))
-    (VSym [$g2819] (VNil))
-    (VClos [$g2820] (VNil))
-    (VPrim [$g2821] (VNil))))
+    (VInt [$g2849] (VNil))
+    (VBool [$g2850] (VNil))
+    (VSym [$g2851] (VNil))
+    (VClos [$g2852] (VNil))
+    (VPrim [$g2853] (VNil))))
 
 (defn
   cdr
@@ -61,11 +61,11 @@
     x
     (VPair [c] (load (field c d)))
     (VNil [] (VNil))
-    (VInt [$g2822] (VNil))
-    (VBool [$g2823] (VNil))
-    (VSym [$g2824] (VNil))
-    (VClos [$g2825] (VNil))
-    (VPrim [$g2826] (VNil))))
+    (VInt [$g2854] (VNil))
+    (VBool [$g2855] (VNil))
+    (VSym [$g2856] (VNil))
+    (VClos [$g2857] (VNil))
+    (VPrim [$g2858] (VNil))))
 
 (defn
   nullp
@@ -74,12 +74,12 @@
   (match
     x
     (VNil [] true)
-    (VInt [$g2827] false)
-    (VBool [$g2828] false)
-    (VSym [$g2829] false)
-    (VPair [$g2830] false)
-    (VClos [$g2831] false)
-    (VPrim [$g2832] false)))
+    (VInt [$g2859] false)
+    (VBool [$g2860] false)
+    (VSym [$g2861] false)
+    (VPair [$g2862] false)
+    (VClos [$g2863] false)
+    (VPrim [$g2864] false)))
 
 (defn
   truthy
@@ -89,11 +89,11 @@
     x
     (VBool [b] b)
     (VNil [] true)
-    (VInt [$g2833] true)
-    (VSym [$g2834] true)
-    (VPair [$g2835] true)
-    (VClos [$g2836] true)
-    (VPrim [$g2837] true)))
+    (VInt [$g2865] true)
+    (VSym [$g2866] true)
+    (VPair [$g2867] true)
+    (VClos [$g2868] true)
+    (VPrim [$g2869] true)))
 
 (defn
   v=
@@ -107,27 +107,27 @@
         y
         (VInt [b] (= a b))
         (VNil [] false)
-        (VBool [$g2842] false)
-        (VSym [$g2843] false)
-        (VPair [$g2844] false)
-        (VClos [$g2845] false)
-        (VPrim [$g2846] false)))
+        (VBool [$g2874] false)
+        (VSym [$g2875] false)
+        (VPair [$g2876] false)
+        (VClos [$g2877] false)
+        (VPrim [$g2878] false)))
     (VSym
       [a]
       (match
         y
         (VSym [b] (= a b))
         (VNil [] false)
-        (VInt [$g2847] false)
-        (VBool [$g2848] false)
-        (VPair [$g2849] false)
-        (VClos [$g2850] false)
-        (VPrim [$g2851] false)))
+        (VInt [$g2879] false)
+        (VBool [$g2880] false)
+        (VPair [$g2881] false)
+        (VClos [$g2882] false)
+        (VPrim [$g2883] false)))
     (VNil [] (nullp y))
-    (VBool [$g2838] false)
-    (VPair [$g2839] false)
-    (VClos [$g2840] false)
-    (VPrim [$g2841] false)))
+    (VBool [$g2870] false)
+    (VPair [$g2871] false)
+    (VClos [$g2872] false)
+    (VPrim [$g2873] false)))
 
 (defn
   ival
@@ -137,11 +137,11 @@
     x
     (VInt [v] v)
     (VNil [] 0)
-    (VBool [$g2852] 0)
-    (VSym [$g2853] 0)
-    (VPair [$g2854] 0)
-    (VClos [$g2855] 0)
-    (VPrim [$g2856] 0)))
+    (VBool [$g2884] 0)
+    (VSym [$g2885] 0)
+    (VPair [$g2886] 0)
+    (VClos [$g2887] 0)
+    (VPrim [$g2888] 0)))
 
 (defstruct SymTab [(init i64) (names (ptr (ArrayList (slice u8))))])
 
@@ -174,13 +174,13 @@
   (let
     [ns (sym-names) n (al-len [(slice u8)] (load ns)) (mut found) -1]
     (let
-      [(mut $g2857) (isub 0 1)]
+      [(mut $g2889) (isub 0 1)]
       (loop
-        (store! $g2857 (iadd (load $g2857) 1))
+        (store! $g2889 (iadd (load $g2889) 1))
         (if
-          (icmp-lt (load $g2857) n)
+          (icmp-lt (load $g2889) n)
           (let
-            [i (load $g2857)]
+            [i (load $g2889)]
             (if
               (and (< found 0) (str-eq (al-get [(slice u8)] (load ns) i) name))
               (do (store! found i) 0)
@@ -260,11 +260,11 @@
     x
     (VSym [id] id)
     (VNil [] -1)
-    (VInt [$g2858] -1)
-    (VBool [$g2859] -1)
-    (VPair [$g2860] -1)
-    (VClos [$g2861] -1)
-    (VPrim [$g2862] -1)))
+    (VInt [$g2890] -1)
+    (VBool [$g2891] -1)
+    (VPair [$g2892] -1)
+    (VClos [$g2893] -1)
+    (VPrim [$g2894] -1)))
 
 (defn
   defvar!
@@ -335,10 +335,10 @@
       [k]
       (seval (load (field k body)) (bind (load (field k params)) as (load (field k env)))))
     (VNil [] (VNil))
-    (VInt [$g2863] (VNil))
-    (VBool [$g2864] (VNil))
-    (VSym [$g2865] (VNil))
-    (VPair [$g2866] (VNil))))
+    (VInt [$g2895] (VNil))
+    (VBool [$g2896] (VNil))
+    (VSym [$g2897] (VNil))
+    (VPair [$g2898] (VNil))))
 
 (defn
   sexp->val
@@ -386,13 +386,13 @@
   (-> i64)
   (match
     x
-    (VInt [v] (do (do (fmt.print-i (stdout) v)) 0))
-    (VBool [b] (do (do (io.print-str (stdout) (if b "#t" "#f"))) 0))
-    (VNil [] (do (do (io.print-str (stdout) "()")) 0))
-    (VSym [id] (do (do (io.print-str (stdout) (sym-name id))) 0))
-    (VPair [$g2867] (do (do (io.print-str (stdout) "#<obj>")) 0))
-    (VClos [$g2868] (do (do (io.print-str (stdout) "#<obj>")) 0))
-    (VPrim [$g2869] (do (do (io.print-str (stdout) "#<obj>")) 0))))
+    (VInt [v] (do (do (coil.fmt.print-i (stdout) v)) 0))
+    (VBool [b] (do (do (coil.io.print-str (stdout) (if b "#t" "#f"))) 0))
+    (VNil [] (do (do (coil.io.print-str (stdout) "()")) 0))
+    (VSym [id] (do (do (coil.io.print-str (stdout) (sym-name id))) 0))
+    (VPair [$g2899] (do (do (coil.io.print-str (stdout) "#<obj>")) 0))
+    (VClos [$g2900] (do (do (coil.io.print-str (stdout) "#<obj>")) 0))
+    (VPrim [$g2901] (do (do (coil.io.print-str (stdout) "#<obj>")) 0))))
 
 (defn
   main
@@ -413,12 +413,12 @@
         [tgt (sexp->val (forms-nth fs 0))]
         (seval (cadr2 tgt) (VNil))
         (print-val (seval (caddr2 tgt) (VNil)))
-        (do (io.print-str (stdout) "
+        (do (coil.io.print-str (stdout) "
 "))
         (do
-          (io.print-str (stderr) "[arena] pairs+closures allocated=")
-          (fmt.print-i (stderr) (load (galloc)))
-          (io.print-str (stderr) "
+          (coil.io.print-str (stderr) "[arena] pairs+closures allocated=")
+          (coil.fmt.print-i (stderr) (load (galloc)))
+          (coil.io.print-str (stderr) "
 "))
         0))))
 

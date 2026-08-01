@@ -1,4 +1,4 @@
-(module control)
+(module coil.control)
 ; `Option` (None | Some) is the iterator protocol's `next` return type; importing
 ; it here means `for-in (iter …)` works without the user importing result too —
 ; macro hygiene qualifies the None/Some in the template to result's namespace.

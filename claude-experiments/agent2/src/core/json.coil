@@ -1,0 +1,488 @@
+(module harness-json)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+
+;; A deliberately small, owned JSON tree. Numbers retain their source spelling so
+;; identifiers and usage counters never lose precision through an f64 round trip.
+;; Object member order is preserved, which makes request snapshots deterministic.
+(defsum Json
+  (JsonNull [])
+  (JsonBool [(value bool)])
+  (JsonNumber [(raw (slice u8))])
+  (JsonString [(value (slice u8))])
+  (JsonArray [(items (ptr (ArrayList Json)))])
+  (JsonObject [(keys (ptr (ArrayList (slice u8))))
+               (values (ptr (ArrayList Json)))]))
+
+(defstruct JsonParseResult
+  [(ok bool)
+   (value Json)
+   (error (slice u8))
+   (error-pos i64)])
+
+(defstruct JsonParser
+  [(source (slice u8))
+   (position i64)
+   (allocator (ptr Allocator))
+   (ok bool)
+   (error (slice u8))
+   (error-pos i64)])
+
+;; Construct an empty JSON array owned by `allocator`.
+(defn json-array [(allocator (ptr Allocator))] (-> Json)
+  (JsonArray (box allocator (ArrayList Json) (al-new [Json] allocator))))
+
+;; Construct an empty insertion-ordered JSON object owned by `allocator`.
+(defn json-object [(allocator (ptr Allocator))] (-> Json)
+  (JsonObject (box allocator (ArrayList (slice u8)) (al-new [(slice u8)] allocator))
+              (box allocator (ArrayList Json) (al-new [Json] allocator))))
+
+;; Append a value to an array. Returns false when `array` is not an array.
+(defn json-array-push! [(array (mut Json)) (value Json)] (-> bool)
+  (match-else (load array)
+              (JsonArray [items] (do (al-push! [Json] items value) true))
+              (_ false)))
+
+;; Insert or replace an object member. Keys are copied into the object's allocator
+;; indirectly by the owning request arena; callers must keep that arena alive.
+(defn json-object-put! [(object (mut Json)) (key (slice u8)) (value Json)] (-> bool)
+  (match-else (load object)
+              (JsonObject [keys values]
+                          (let [(mut i) 0
+                                n (al-len [(slice u8)] (load keys))
+                                (mut found) false]
+                            (loop (if (icmp-ge (load i) n)
+                                      (break)
+                                      (if (str-eq (al-get [(slice u8)] (load keys) (load i)) key)
+                                          (do
+                                            (al-set! [Json] values (load i) value)
+                                            (store! found true)
+                                            (break))
+                                          (store! i (iadd (load i) 1)))))
+                            (if (load found)
+                                true
+                                (do
+                                  (al-push! [(slice u8)] keys key)
+                                  (al-push! [Json] values value)
+                                  true))))
+              (_ false)))
+
+;; Return an object member or JsonNull when absent/not an object.
+(defn json-get [(value Json) (key (slice u8))] (-> Json)
+  (match-else value
+              (JsonObject [keys values]
+                          (let [(mut i) 0
+                                n (al-len [(slice u8)] (load keys))
+                                (mut result) (JsonNull)]
+                            (loop (if (icmp-ge (load i) n)
+                                      (break)
+                                      (if (str-eq (al-get [(slice u8)] (load keys) (load i)) key)
+                                          (do (store! result (al-get [Json] (load values) (load i))) (break))
+                                          (store! i (iadd (load i) 1)))))
+                            (load result)))
+              (_ (JsonNull))))
+
+(defn json-object-has? [(value Json) (key (slice u8))] (-> bool)
+  (match-else value
+              (JsonObject [keys values]
+                          (let [(mut i) 0
+                                n (al-len [(slice u8)] (load keys))
+                                (mut found) false]
+                            (loop (if (icmp-ge (load i) n)
+                                      (break)
+                                      (if (str-eq (al-get [(slice u8)] (load keys) (load i)) key)
+                                          (do (store! found true) (break))
+                                          (store! i (iadd (load i) 1)))))
+                            (load found)))
+              (_ false)))
+
+(defn json-bool-value [(value Json)] (-> (Option bool))
+  (match-else value
+              (JsonBool [flag] (Some flag))
+              (_ (None [bool]))))
+
+(defn json-has-key? [(value Json) (key (slice u8))] (-> bool)
+  (match-else value
+              (JsonObject [keys values]
+                          (let [(mut i) 0
+                                n (al-len [(slice u8)] (load keys))
+                                (mut found) false]
+                            (loop (if (icmp-ge (load i) n)
+                                      (break)
+                                      (if (str-eq (al-get [(slice u8)] (load keys) (load i)) key)
+                                          (do (store! found true) (break))
+                                          (store! i (iadd (load i) 1)))))
+                            (load found)))
+              (_ false)))
+
+(defn json-object-keys [(value Json)] (-> (Option (ptr (ArrayList (slice u8)))))
+  (match-else value
+              (JsonObject [keys values] (Some keys))
+              (_ (None [(ptr (ArrayList (slice u8)))]))))
+
+(defn json-string-value [(value Json)] (-> (Option (slice u8)))
+  (match-else value
+              (JsonString [text] (Some text))
+              (_ (None [(slice u8)]))))
+
+(defn json-string-at [(value Json) (key (slice u8))] (-> (Option (slice u8)))
+  (json-string-value (json-get value key)))
+
+(defn json-array-items [(value Json)] (-> (Option (ptr (ArrayList Json))))
+  (match-else value
+              (JsonArray [items] (Some items))
+              (_ (None [(ptr (ArrayList Json))]))))
+
+(defn json-array-length [(value Json)] (-> i64)
+  (match-else value
+              (JsonArray [items] (al-len [Json] (load items)))
+              (_ 0)))
+
+(defn json-array-get [(value Json) (index i64)] (-> Json)
+  (match-else value
+              (JsonArray [items]
+                         (if (and (icmp-ge index 0)
+                                  (icmp-lt index (al-len [Json] (load items))))
+                             (al-get [Json] (load items) index)
+                             (JsonNull)))
+              (_ (JsonNull))))
+
+(defn parser-peek [(parser (ptr JsonParser))] (-> i64)
+  (if (icmp-ge (load (field parser position))
+               (slice-len [u8] (load (field parser source))))
+      -1
+      (cast i64
+            (slice-get [u8]
+                       (load (field parser source))
+                       (load (field parser position))))))
+
+(defn parser-advance [(parser (ptr JsonParser))] (-> i64)
+  (let [current (parser-peek parser)]
+    (if (icmp-ge current 0)
+        (store! (field parser position) (iadd (load (field parser position)) 1))
+        0)
+    current))
+
+(defn json-whitespace? [(byte i64)] (-> bool)
+  (or (icmp-eq byte 32)
+      (or (icmp-eq byte 9)
+          (or (icmp-eq byte 10) (icmp-eq byte 13)))))
+
+(defn parser-skip-whitespace [(parser (ptr JsonParser))] (-> i64)
+  (loop (if (json-whitespace? (parser-peek parser))
+            (parser-advance parser)
+            (break)))
+  0)
+
+(defn parser-fail [(parser (ptr JsonParser)) (message (slice u8))] (-> i64)
+  (if (load (field parser ok))
+      (do
+        (store! (field parser ok) false)
+        (store! (field parser error) message)
+        (store! (field parser error-pos) (load (field parser position)))
+        0)
+      0))
+
+(defn json-hex-value [(byte i64)] (-> i64)
+  (cond (and (icmp-ge byte 48) (icmp-le byte 57)) (isub byte 48)
+        (and (icmp-ge byte 65) (icmp-le byte 70)) (iadd 10 (isub byte 65))
+        (and (icmp-ge byte 97) (icmp-le byte 102)) (iadd 10 (isub byte 97))
+        :else -1))
+
+(defn parser-hex4 [(parser (ptr JsonParser))] (-> i64)
+  (let [(mut value) 0
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) 4)
+              (break)
+              (let [digit (json-hex-value (parser-advance parser))]
+                (if (icmp-lt digit 0)
+                    (do (parser-fail parser "invalid unicode escape") (break))
+                    (do
+                      (store! value (iadd (imul (load value) 16) digit))
+                      (store! i (iadd (load i) 1)))))))
+    (load value)))
+
+(defn json-append-codepoint! [(buffer (mut StrBuf)) (codepoint i64)] (-> i64)
+  (cond (icmp-le codepoint 127) (sb-push-byte! (mut buffer) (cast u8 codepoint))
+        (icmp-le codepoint 2047)
+          (do
+            (sb-push-byte! (mut buffer) (cast u8 (ior 192 (ishr codepoint 6))))
+            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand codepoint 63)))))
+        (icmp-le codepoint 65535)
+          (do
+            (sb-push-byte! (mut buffer) (cast u8 (ior 224 (ishr codepoint 12))))
+            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand (ishr codepoint 6) 63))))
+            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand codepoint 63)))))
+        :else
+          (do
+            (sb-push-byte! (mut buffer) (cast u8 (ior 240 (ishr codepoint 18))))
+            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand (ishr codepoint 12) 63))))
+            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand (ishr codepoint 6) 63))))
+            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand codepoint 63))))))
+  0)
+
+(defn parser-string [(parser (ptr JsonParser))] (-> (slice u8))
+  (let [(mut buffer) (sb-new (load (field parser allocator)))]
+    (if (icmp-ne (parser-advance parser) 34)
+        (parser-fail parser "expected string")
+        0)
+    (loop (let [byte (parser-advance parser)]
+            (cond (icmp-lt byte 0) (do (parser-fail parser "unterminated string") (break))
+                  (icmp-eq byte 34) (break)
+                  (icmp-lt byte 32) (do (parser-fail parser "unescaped control byte in string") (break))
+                  (icmp-ne byte 92) (sb-push-byte! (mut buffer) (cast u8 byte))
+                  :else
+                    (let [escaped (parser-advance parser)]
+                      (cond (icmp-eq escaped 34) (sb-push-byte! (mut buffer) (cast u8 34))
+                            (icmp-eq escaped 92) (sb-push-byte! (mut buffer) (cast u8 92))
+                            (icmp-eq escaped 47) (sb-push-byte! (mut buffer) (cast u8 47))
+                            (icmp-eq escaped 98) (sb-push-byte! (mut buffer) (cast u8 8))
+                            (icmp-eq escaped 102) (sb-push-byte! (mut buffer) (cast u8 12))
+                            (icmp-eq escaped 110) (sb-push-byte! (mut buffer) (cast u8 10))
+                            (icmp-eq escaped 114) (sb-push-byte! (mut buffer) (cast u8 13))
+                            (icmp-eq escaped 116) (sb-push-byte! (mut buffer) (cast u8 9))
+                            (icmp-eq escaped 117)
+                              (let [(mut codepoint) (parser-hex4 parser)]
+                                (when (and (icmp-ge (load codepoint) 55296)
+                                           (icmp-le (load codepoint) 56319))
+                                  (if (and (icmp-eq (parser-advance parser) 92)
+                                           (icmp-eq (parser-advance parser) 117))
+                                      (let [low (parser-hex4 parser)]
+                                        (if (and (icmp-ge low 56320) (icmp-le low 57343))
+                                            (store! codepoint
+                                                    (iadd 65536
+                                                          (iadd (imul (isub (load codepoint) 55296) 1024)
+                                                                (isub low 56320))))
+                                            (parser-fail parser "invalid low surrogate")))
+                                      (parser-fail parser "missing low surrogate"))
+                                  0)
+                                (when (and (icmp-ge (load codepoint) 56320)
+                                           (icmp-le (load codepoint) 57343))
+                                  (parser-fail parser "unexpected low surrogate")
+                                  0)
+                                (when (load (field parser ok))
+                                  (json-append-codepoint! (mut buffer) (load codepoint))
+                                  0)
+                                0)
+                            :else (parser-fail parser "invalid string escape"))))))
+    (sb-finish! (mut buffer))))
+
+(defn json-digit? [(byte i64)] (-> bool)
+  (and (icmp-ge byte 48) (icmp-le byte 57)))
+
+(defn parser-number [(parser (ptr JsonParser))] (-> Json)
+  (let [start (load (field parser position))]
+    (when (icmp-eq (parser-peek parser) 45) (parser-advance parser) 0)
+    (if (icmp-eq (parser-peek parser) 48)
+        (parser-advance parser)
+        (if (and (icmp-ge (parser-peek parser) 49)
+                 (icmp-le (parser-peek parser) 57))
+            (loop (if (json-digit? (parser-peek parser))
+                      (parser-advance parser)
+                      (break)))
+            (parser-fail parser "invalid number")))
+    (when (icmp-eq (parser-peek parser) 46)
+      (parser-advance parser)
+      (if (json-digit? (parser-peek parser))
+          (loop (if (json-digit? (parser-peek parser))
+                    (parser-advance parser)
+                    (break)))
+          (parser-fail parser "fraction requires a digit"))
+      0)
+    (when (or (icmp-eq (parser-peek parser) 101)
+              (icmp-eq (parser-peek parser) 69))
+      (parser-advance parser)
+      (when (or (icmp-eq (parser-peek parser) 43)
+                (icmp-eq (parser-peek parser) 45))
+        (parser-advance parser)
+        0)
+      (if (json-digit? (parser-peek parser))
+          (loop (if (json-digit? (parser-peek parser))
+                    (parser-advance parser)
+                    (break)))
+          (parser-fail parser "exponent requires a digit"))
+      0)
+    (JsonNumber (subslice [u8]
+                          (load (field parser source))
+                          start
+                          (load (field parser position))))))
+
+(defn parser-literal [(parser (ptr JsonParser)) (text (slice u8))] (-> bool)
+  (let [(mut i) 0
+        n (slice-len [u8] text)
+        (mut equal) true]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (parser-advance parser)
+                           (cast i64 (slice-get [u8] text (load i))))
+                  (store! i (iadd (load i) 1))
+                  (do (store! equal false) (break)))))
+    (if (load equal)
+        true
+        (do (parser-fail parser "invalid literal") false))))
+
+(defn parser-value [(parser (ptr JsonParser))] (-> Json)
+  (parser-skip-whitespace parser)
+  (let [byte (parser-peek parser)]
+    (cond (icmp-eq byte 34) (JsonString (parser-string parser))
+          (icmp-eq byte 91) (parser-array parser)
+          (icmp-eq byte 123) (parser-object parser)
+          (icmp-eq byte 110) (do (parser-literal parser "null") (JsonNull))
+          (icmp-eq byte 116) (do (parser-literal parser "true") (JsonBool true))
+          (icmp-eq byte 102) (do (parser-literal parser "false") (JsonBool false))
+          (or (icmp-eq byte 45) (json-digit? byte)) (parser-number parser)
+          :else (do (parser-fail parser "expected JSON value") (JsonNull)))))
+
+(defn parser-array [(parser (ptr JsonParser))] (-> Json)
+  (parser-advance parser)
+  (let [(mut result) (json-array (load (field parser allocator)))]
+    (parser-skip-whitespace parser)
+    (if (icmp-eq (parser-peek parser) 93)
+        (parser-advance parser)
+        (loop (json-array-push! (mut result) (parser-value parser))
+          (parser-skip-whitespace parser)
+          (let [next (parser-advance parser)]
+            (cond (icmp-eq next 93) (break)
+                  (icmp-eq next 44) (parser-skip-whitespace parser)
+                  :else (do (parser-fail parser "expected ',' or ']' in array") (break))))))
+    (load result)))
+
+;; Construct an integer JSON number without converting through floating point.
+(defn json-integer [(allocator (ptr Allocator)) (number i64)] (-> Json)
+  (if (icmp-eq number 0)
+      (JsonNumber "0")
+      (let [(mut reversed) (sb-new allocator)
+            (mut output) (sb-new allocator)
+            negative (icmp-lt number 0)
+            (mut value) (if (icmp-lt number 0) (isub 0 number) number)]
+        (loop (if (icmp-eq (load value) 0)
+                  (break)
+                  (do
+                    (sb-push-byte! (mut reversed)
+                                   (cast u8 (iadd 48 (irem (load value) 10))))
+                    (store! value (idiv (load value) 10)))))
+        (when negative (sb-push-byte! (mut output) (cast u8 45)) 0)
+        (let [(mut i) (al-len [u8] (load (field reversed bytes)))]
+          (loop (if (icmp-le (load i) 0)
+                    (break)
+                    (do
+                      (store! i (isub (load i) 1))
+                      (sb-push-byte! (mut output)
+                                     (al-get [u8]
+                                             (load (field reversed bytes))
+                                             (load i)))))))
+        (sb-free! (mut reversed))
+        (JsonNumber (sb-finish! (mut output))))))
+
+(defn parser-object [(parser (ptr JsonParser))] (-> Json)
+  (parser-advance parser)
+  (let [(mut result) (json-object (load (field parser allocator)))]
+    (parser-skip-whitespace parser)
+    (if (icmp-eq (parser-peek parser) 125)
+        (parser-advance parser)
+        (loop (if (icmp-ne (parser-peek parser) 34)
+                  (do (parser-fail parser "expected object key") (break))
+                  (let [key (parser-string parser)]
+                    (parser-skip-whitespace parser)
+                    (if (icmp-ne (parser-advance parser) 58)
+                        (do (parser-fail parser "expected ':' after object key") (break))
+                        (json-object-put! (mut result) key (parser-value parser)))))
+          (parser-skip-whitespace parser)
+          (let [next (parser-advance parser)]
+            (cond (icmp-eq next 125) (break)
+                  (icmp-eq next 44) (parser-skip-whitespace parser)
+                  :else (do (parser-fail parser "expected ',' or '}' in object") (break))))))
+    (load result)))
+
+;; Parse exactly one JSON value. Trailing non-whitespace bytes are rejected.
+(defn json-parse [(allocator (ptr Allocator)) (source (slice u8))] (-> JsonParseResult)
+  (let [parser (alloc-stack JsonParser)
+        result (alloc-stack JsonParseResult)]
+    (store! (field parser source) source)
+    (store! (field parser position) 0)
+    (store! (field parser allocator) allocator)
+    (store! (field parser ok) true)
+    (store! (field parser error) "")
+    (store! (field parser error-pos) 0)
+    (let [value (parser-value parser)]
+      (parser-skip-whitespace parser)
+      (when (and (load (field parser ok))
+                 (icmp-ne (parser-peek parser) -1))
+        (parser-fail parser "trailing bytes after JSON value")
+        0)
+      (store! (field result ok) (load (field parser ok)))
+      (store! (field result value) value)
+      (store! (field result error) (load (field parser error)))
+      (store! (field result error-pos) (load (field parser error-pos)))
+      (load result))))
+
+(defn json-write-string! [(buffer (mut StrBuf)) (text (slice u8))] (-> i64)
+  (sb-push-byte! (mut buffer) (cast u8 34))
+  (let [(mut i) 0
+        n (slice-len [u8] text)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] text (load i)))]
+                (cond (icmp-eq byte 34) (sb-push-str! (mut buffer) "\\\"")
+                      (icmp-eq byte 92) (sb-push-str! (mut buffer) "\\\\")
+                      (icmp-eq byte 8) (sb-push-str! (mut buffer) "\\b")
+                      (icmp-eq byte 12) (sb-push-str! (mut buffer) "\\f")
+                      (icmp-eq byte 10) (sb-push-str! (mut buffer) "\\n")
+                      (icmp-eq byte 13) (sb-push-str! (mut buffer) "\\r")
+                      (icmp-eq byte 9) (sb-push-str! (mut buffer) "\\t")
+                      (icmp-lt byte 32)
+                        (do
+                          (sb-push-str! (mut buffer) "\\u00")
+                          (let [high (idiv byte 16)
+                                low (irem byte 16)]
+                            (sb-push-byte! (mut buffer) (cast u8 (if (icmp-lt high 10) (iadd 48 high) (iadd 87 high))))
+                            (sb-push-byte! (mut buffer) (cast u8 (if (icmp-lt low 10) (iadd 48 low) (iadd 87 low))))))
+                      :else (sb-push-byte! (mut buffer) (cast u8 byte)))
+                (store! i (iadd (load i) 1))))))
+  (sb-push-byte! (mut buffer) (cast u8 34))
+  0)
+
+(defn json-write! [(buffer (mut StrBuf)) (value Json)] (-> i64)
+  (match value
+    (JsonNull [] (sb-push-str! (mut buffer) "null"))
+    (JsonBool [flag] (sb-push-str! (mut buffer) (if flag "true" "false")))
+    (JsonNumber [raw] (sb-push-str! (mut buffer) raw))
+    (JsonString [text] (json-write-string! (mut buffer) text))
+    (JsonArray [items]
+               (do
+                 (sb-push-byte! (mut buffer) (cast u8 91))
+                 (let [(mut i) 0
+                       n (al-len [Json] (load items))]
+                   (loop (if (icmp-ge (load i) n)
+                             (break)
+                             (do
+                               (when (icmp-gt (load i) 0) (sb-push-byte! (mut buffer) (cast u8 44)) 0)
+                               (json-write! (mut buffer) (al-get [Json] (load items) (load i)))
+                               (store! i (iadd (load i) 1))))))
+                 (sb-push-byte! (mut buffer) (cast u8 93))))
+    (JsonObject [keys values]
+                (do
+                  (sb-push-byte! (mut buffer) (cast u8 123))
+                  (let [(mut i) 0
+                        n (al-len [(slice u8)] (load keys))]
+                    (loop (if (icmp-ge (load i) n)
+                              (break)
+                              (do
+                                (when (icmp-gt (load i) 0) (sb-push-byte! (mut buffer) (cast u8 44)) 0)
+                                (json-write-string! (mut buffer) (al-get [(slice u8)] (load keys) (load i)))
+                                (sb-push-byte! (mut buffer) (cast u8 58))
+                                (json-write! (mut buffer) (al-get [Json] (load values) (load i)))
+                                (store! i (iadd (load i) 1))))))
+                  (sb-push-byte! (mut buffer) (cast u8 125)))))
+  0)
+
+;; Serialize a JSON tree into an owned byte slice allocated by `allocator`.
+(defn json-stringify [(allocator (ptr Allocator)) (value Json)] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (json-write! (mut buffer) value)
+    (sb-finish! (mut buffer))))

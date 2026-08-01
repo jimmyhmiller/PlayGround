@@ -114,6 +114,25 @@
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
+; `(dyn Trait)` is currently parsed as the source-generated nominal `Trait-dyn`.
+; Resolve that nominal THROUGH the originating trait rather than as an ordinary
+; exported type: `(export Trait)` is the public contract, while the vtable and fat
+; pointer structs emitted by `defdyn` remain implementation details.  Keeping this
+; bridge here also makes nested uses such as `(Option (dyn Trait))` follow the normal
+; recursive type qualifier.
+(defn dyn-type-name? [(s (slice u8))] (-> bool)
+  (let [n (slice-len s)]
+    (and (icmp-ge n 4)
+         (str-eq (subslice [u8] s (isub n 4) n) "-dyn"))))
+
+(defn qualify-dyn-type [(c (ptr Ctx)) (name (slice u8))] (-> (Result (slice u8) Diag))
+  (let [a (load (field c a))
+        n (slice-len name)
+        trait-name (subslice [u8] name 0 (isub n 4))]
+    (match (resolve c trait-name 2)
+      (Err [d] (Err [(slice u8) Diag] d))
+      (Ok [trait-qual] (Ok [(slice u8) Diag] (sconcat a trait-qual "-dyn"))))))
+
 ; Index of the first `::` in a symbol, or -1 (byte 58 = ':'). A `Trait::method`
 ; qualified trait-method call (gen-6) carries the qualifier this way — the checker
 ; splits it in synth-call, so resolve leaves the head bare and exempts it from the
@@ -835,7 +854,7 @@
       (TStruct [nm]
                (if (set-contains tps nm)
                    (Ok [i64 Diag] 0)
-                   (match (resolve c nm 1)
+                   (match (if (dyn-type-name? nm) (qualify-dyn-type c nm) (resolve c nm 1))
                      (Err [d] (Err [i64 Diag] d))
                      (Ok [nn]
                          (do (type-res-record (load (field c m)) nm nn) (store! typ (TStruct nn)) (Ok [i64 Diag] 0))))))

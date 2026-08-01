@@ -171,25 +171,25 @@
   (-> Code)
   (if
     (icmp-eq spec 100)
-    (quasiquote fmt.print-i)
+    (quasiquote coil.fmt.print-i)
     (if
       (icmp-eq spec 115)
-      (quasiquote io.print-str)
+      (quasiquote coil.io.print-str)
       (if
         (icmp-eq spec 120)
-        (quasiquote fmt.print-uhex)
+        (quasiquote coil.fmt.print-uhex)
         (if
           (icmp-eq spec 99)
-          (quasiquote fmt.print-char)
+          (quasiquote coil.fmt.print-char)
           (if
             (icmp-eq spec 98)
-            (quasiquote fmt.print-bool)
+            (quasiquote coil.fmt.print-bool)
             (if
               (icmp-eq spec 117)
-              (quasiquote fmt.print-u)
+              (quasiquote coil.fmt.print-u)
               (if
                 (icmp-eq spec 102)
-                (quasiquote fmt.print-f)
+                (quasiquote coil.fmt.print-f)
                 (error "fmt: unknown spec; use {d} {s} {x} {c} {b} {u} {f}")))))))))
 
 (defn
@@ -199,7 +199,7 @@
   (if
     (icmp-eq (code-count lit) 0)
     (quasiquote ())
-    (quasiquote ((io.print-str (unquote w) (unquote (bytes->str lit)))))))
+    (quasiquote ((coil.io.print-str (unquote w) (unquote (bytes->str lit)))))))
 
 (defn
   fmt--go

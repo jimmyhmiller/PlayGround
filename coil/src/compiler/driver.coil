@@ -77,12 +77,12 @@
                     (do
                       (let [c (sx-at items (load i))]
                         (when (icmp-eq (sx-tag c) 6)
-                              ; a list …
-                              (let [ci (sx-items c)]
-                                (when (and (icmp-ge (sx-len ci) 1)
-                                           (and (icmp-eq (sx-tag (sx-at ci 0)) 2) (str-eq (sx-sval (sx-at ci 0)) "->")))
-                                      (store! end (sx-hi c))
-                                      (store! found true)))))
+                          ; a list …
+                          (let [ci (sx-items c)]
+                            (when (and (icmp-ge (sx-len ci) 1)
+                                       (and (icmp-eq (sx-tag (sx-at ci 0)) 2) (str-eq (sx-sval (sx-at ci 0)) "->")))
+                              (store! end (sx-hi c))
+                              (store! found true)))))
                       (store! i (iadd (load i) 1)))))
           (if (load found)
               (sconcat a (subslice [u8] src lo (load end)) ")")
@@ -104,15 +104,15 @@
                         (do
                           (let [f (sx-at forms (load i))]
                             (when (icmp-eq (sx-tag f) 6)
-                                  (let [items (sx-items f)]
-                                    (when (and (icmp-ge (sx-len items) 2)
-                                               (and (icmp-eq (sx-tag (sx-at items 0)) 2)
-                                                    (str-eq (sx-sval (sx-at items 0)) "module")))
-                                          (ps w "# ")
-                                          (ps w (sx-sval (sx-at items 1)))
-                                          (wb w 10)
-                                          (wb w 10)
-                                          0))))
+                              (let [items (sx-items f)]
+                                (when (and (icmp-ge (sx-len items) 2)
+                                           (and (icmp-eq (sx-tag (sx-at items 0)) 2)
+                                                (str-eq (sx-sval (sx-at items 0)) "module")))
+                                  (ps w "# ")
+                                  (ps w (sx-sval (sx-at items 1)))
+                                  (wb w 10)
+                                  (wb w 10)
+                                  0))))
                           (store! i (iadd (load i) 1)))))
               (store! i 0)
               (loop (if (icmp-ge (load i) n)
@@ -120,39 +120,39 @@
                         (do
                           (let [f (sx-at forms (load i))]
                             (when (icmp-eq (sx-tag f) 6)
-                                  (let [items (sx-items f)]
-                                    (when (icmp-ge (sx-len items) 2)
-                                          (let [h (sx-at items 0)]
-                                            (when (icmp-eq (sx-tag h) 2)
-                                                  (let [kind (doc-kind-of (sx-sval h))]
-                                                    (when (icmp-gt (str-len kind) 0)
-                                                          (let [doc (ct-doc-at a src (sx-lo f))]
-                                                            (when (icmp-gt (str-len doc) 0)
-                                                                  (store! shown (iadd (load shown) 1))
-                                                                  (ps w "## ")
-                                                                  (ps w (sx-sval (sx-at items 1)))
-                                                                  (ps w "  *(")
-                                                                  (ps w kind)
-                                                                  (ps w ")*")
-                                                                  (wb w 10)
-                                                                  (wb w 10)
-                                                                  (ps w "```lisp")
-                                                                  (wb w 10)
-                                                                  (ps w (doc-sig a src f (str-eq (sx-sval h) "defn")))
-                                                                  (wb w 10)
-                                                                  (ps w "```")
-                                                                  (wb w 10)
-                                                                  (wb w 10)
-                                                                  (ps w doc)
-                                                                  (wb w 10)
-                                                                  (wb w 10)
-                                                                  0))))))))))
+                              (let [items (sx-items f)]
+                                (when (icmp-ge (sx-len items) 2)
+                                  (let [h (sx-at items 0)]
+                                    (when (icmp-eq (sx-tag h) 2)
+                                      (let [kind (doc-kind-of (sx-sval h))]
+                                        (when (icmp-gt (str-len kind) 0)
+                                          (let [doc (ct-doc-at a src (sx-lo f))]
+                                            (when (icmp-gt (str-len doc) 0)
+                                              (store! shown (iadd (load shown) 1))
+                                              (ps w "## ")
+                                              (ps w (sx-sval (sx-at items 1)))
+                                              (ps w "  *(")
+                                              (ps w kind)
+                                              (ps w ")*")
+                                              (wb w 10)
+                                              (wb w 10)
+                                              (ps w "```lisp")
+                                              (wb w 10)
+                                              (ps w (doc-sig a src f (str-eq (sx-sval h) "defn")))
+                                              (wb w 10)
+                                              (ps w "```")
+                                              (wb w 10)
+                                              (wb w 10)
+                                              (ps w doc)
+                                              (wb w 10)
+                                              (wb w 10)
+                                              0))))))))))
                           (store! i (iadd (load i) 1)))))
               (when (icmp-eq (load shown) 0)
-                    (ps (stderr) "note: no `;;` doc comments in ")
-                    (ps (stderr) (cstr->slice path))
-                    (ps (stderr) " — a doc is a `;;` block directly above a definition\n")
-                    0))
+                (ps (stderr) "note: no `;;` doc comments in ")
+                (ps (stderr) (cstr->slice path))
+                (ps (stderr) " — a doc is a `;;` block directly above a definition\n")
+                0))
             0)))))
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
@@ -331,7 +331,7 @@
                               (do
                                 (when (str-lt (al-get [(slice u8)] (load c) (load q))
                                               (al-get [(slice u8)] (load c) (load m)))
-                                      (store! m (load q)))
+                                  (store! m (load q)))
                                 (store! q (iadd (load q) 1)))))
                     (let [tp (al-get [(slice u8)] (load c) (load p))
                           tm (al-get [(slice u8)] (load c) (load m))]
@@ -361,7 +361,7 @@
                               (do
                                 (when (str-lt (al-get [(slice u8)] (load keys) (al-get [i64] (load idx) (load q)))
                                               (al-get [(slice u8)] (load keys) (al-get [i64] (load idx) (load m))))
-                                      (store! m (load q)))
+                                  (store! m (load q)))
                                 (store! q (iadd (load q) 1)))))
                     (let [tp (al-get [i64] (load idx) (load p))
                           tm (al-get [i64] (load idx) (load m))]
@@ -602,11 +602,11 @@
 (defn cli-uses [] (-> (ptr (ArrayList (slice u8))))
   (let [b (uses-box)]
     (when (icmp-eq (load (field b init)) 0)
-          (store! (field b lst)
-                  (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] (malloc-allocator))))
-          (store! (load (field b lst)) (al-new [(slice u8)] (malloc-allocator)))
-          (store! (field b init) 1)
-          0)
+      (store! (field b lst)
+              (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] (malloc-allocator))))
+      (store! (load (field b lst)) (al-new [(slice u8)] (malloc-allocator)))
+      (store! (field b init) 1)
+      0)
     (load (field b lst))))
 (defn cli-use-add [(p (slice u8))] (-> i64)
   (al-push! (cli-uses) p)
@@ -1056,14 +1056,14 @@
 (defn wait-report [(st i64) (what (slice u8))] (-> i64)
   (let [sig (wait-signal st)]
     (unless (icmp-eq sig 0)
-            (let [w (stderr)
-                  nm (signal-name sig)]
-              (ps w what)
-              (ps w " terminated by signal ")
-              (dump-dec w sig)
-              (unless (icmp-eq (slice-len [u8] nm) 0) (ps w " (") (ps w nm) (ps w ")") 0)
-              (wb w 10)
-              0))))
+      (let [w (stderr)
+            nm (signal-name sig)]
+        (ps w what)
+        (ps w " terminated by signal ")
+        (dump-dec w sig)
+        (unless (icmp-eq (slice-len [u8] nm) 0) (ps w " (") (ps w nm) (ps w ")") 0)
+        (wb w 10)
+        0))))
 
 ; ---- argv scanning ----------------------------------------------------------
 ; Every subcommand used to read the filename as literally argv[2], so
@@ -1217,8 +1217,8 @@
               (do
                 (when (and (str-eq (cstr->slice (load (index argv (load i)))) "--target")
                            (icmp-lt (iadd (load i) 1) (cast i64 argc)))
-                      (store! r (load (index argv (iadd (load i) 1))))
-                      (break))
+                  (store! r (load (index argv (iadd (load i) 1))))
+                  (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -1287,15 +1287,15 @@
   ; ELF has no debug map / dSYM: the DWARF is linked into the executable itself and
   ; debuggers read it directly, so on a Linux host there is nothing to gather.
   (unless (me-host-linux?)
-          (let [(mut db) (sb-new a)]
-            (sb-push-str! (mut db) "dsymutil ")
-            (sb-push-str! (mut db) out)
-            (let [drc (cast i64 (system (slice->cstr a (sb-str (load db)))))]
-              (when (icmp-ne drc 0)
-                    (ps (stderr) "warning: dsymutil failed; debug info stays in ")
-                    (ps (stderr) out)
-                    (ps (stderr) ".o\n")
-                    0)))))
+    (let [(mut db) (sb-new a)]
+      (sb-push-str! (mut db) "dsymutil ")
+      (sb-push-str! (mut db) out)
+      (let [drc (cast i64 (system (slice->cstr a (sb-str (load db)))))]
+        (when (icmp-ne drc 0)
+          (ps (stderr) "warning: dsymutil failed; debug info stays in ")
+          (ps (stderr) out)
+          (ps (stderr) ".o\n")
+          0)))))
 
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
 ; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the
@@ -1389,31 +1389,31 @@
     ; compile-check path instead — the full front-end, no object, located errors, exit 0
     ; on success — and `exit` before the pipeline/link machinery ever runs. (diag-12)
     (when (str-eq (cstr->slice (load outp)) "/dev/null")
-          (ps (stderr) "note: -o /dev/null: compile-check only, no object written\n")
-          (set-target-arch! (load trip))
-          (set-meta-link-flags! (filter-meta-link-flags a (load flags)))
-          (exit (cast i32
-                      (when (icmp-eq (run-dump-on-big-stack a
-                                                            (read-src a file)
-                                                            (cwd-slice a)
-                                                            (cstr->slice file)
-                                                            (fnptr-of check-src-program))
-                                     0)
-                            1)))
-          0)
+      (ps (stderr) "note: -o /dev/null: compile-check only, no object written\n")
+      (set-target-arch! (load trip))
+      (set-meta-link-flags! (filter-meta-link-flags a (load flags)))
+      (exit (cast i32
+                  (when (icmp-eq (run-dump-on-big-stack a
+                                                        (read-src a file)
+                                                        (cwd-slice a)
+                                                        (cstr->slice file)
+                                                        (fnptr-of check-src-program))
+                                 0)
+                    1)))
+      0)
     ; --sanitize=address needs the LLVM backend (the native arm64 backend emits
     ; Mach-O directly, with no instrumentation pass) — reject the combination loudly
     ; rather than silently produce an UNinstrumented binary. When accepted, the
     ; program is instrument-LINKED with -fsanitize=address; the meta-link filter keeps
     ; that flag off the compiler's own metaprogram dylib (mem-7).
     (when (sanitize-address?)
-          (if (icmp-ne (load backend) 1)
-              (do
-                (ps (stderr)
-                    "error: --sanitize=address requires the LLVM backend (not --backend arm64, -g, or the LLVM-free compiler)\n")
-                (exit 1)
-                0)
-              (al-push! (mut flags) "-fsanitize=address")))
+      (if (icmp-ne (load backend) 1)
+          (do
+            (ps (stderr)
+                "error: --sanitize=address requires the LLVM backend (not --backend arm64, -g, or the LLVM-free compiler)\n")
+            (exit 1)
+            0)
+          (al-push! (mut flags) "-fsanitize=address")))
     (let [out-slice (cstr->slice (load outp))
           obj-slice (obj-path a out-slice)]
       ; the native wasm backend emits a FINAL module (no link step), so it writes
@@ -1464,10 +1464,10 @@
                         ; Mach-O-toolchain flag: on an ELF host it is not passed (cross-LINKING
                         ; there needs a cross toolchain the driver does not orchestrate).
                         (when (and (native-cross-target? (load trip)) (not (me-host-linux?)))
-                              (sb-push-str! (mut cmdsb) "-arch ")
-                              (sb-push-str! (mut cmdsb) (triple-arch (load trip)))
-                              (sb-push-str! (mut cmdsb) " ")
-                              0)
+                          (sb-push-str! (mut cmdsb) "-arch ")
+                          (sb-push-str! (mut cmdsb) (triple-arch (load trip)))
+                          (sb-push-str! (mut cmdsb) " ")
+                          0)
                         (sb-push-str! (mut cmdsb) obj-slice)
                         (sb-push-str! (mut cmdsb) " -o ")
                         (sb-push-str! (mut cmdsb) out-slice)
@@ -1502,7 +1502,7 @@
                           (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10))
                           ; -g on a native executable: gather the .dSYM (the .o is kept).
                           (when (and (load wantg) (and (not (wasm-target? (load trip))) (icmp-eq (load libmode) 0)))
-                                (run-dsymutil a out-slice))
+                            (run-dsymutil a out-slice))
                           (match ehdr
                             (Some [h] (cheader-program a (read-src a file) (dirname (cstr->slice file)) (Some h)))
                             (None [] 0))))))))))))
@@ -1554,8 +1554,8 @@
               (break)
               (do
                 (when (str-eq (load (field (al-elem [StructDef] ss (load i)) name)) name)
-                      (store! r (al-elem [StructDef] ss (load i)))
-                      (break))
+                  (store! r (al-elem [StructDef] ss (load i)))
+                  (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -1575,25 +1575,25 @@
                                  (hm-put! [(slice u8) i64] seen name 1)
                                  (let [sd (ch-find-struct p name)]
                                    (unless (icmp-eq (cast i64 sd) 0)
-                                           (let [fs (load (field sd fields))
-                                                 n (al-len [Field] fs)
-                                                 (mut i) 0]
-                                             (loop (if (icmp-ge (load i) n)
-                                                       (break)
-                                                       (do
-                                                         (match-else (load (field (al-elem [Field] fs (load i)) ty))
-                                                                     (TPtr [_] 0)
-                                                                     (TArray [elem _]
-                                                                             (ch-collect a (load elem) p order seen))
-                                                                     (_ (ch-collect a
-                                                                                    (load (field (al-elem [Field]
-                                                                                                          fs
-                                                                                                          (load i))
-                                                                                                 ty))
-                                                                                    p
-                                                                                    order
-                                                                                    seen)))
-                                                         (store! i (iadd (load i) 1))))))))
+                                     (let [fs (load (field sd fields))
+                                           n (al-len [Field] fs)
+                                           (mut i) 0]
+                                       (loop (if (icmp-ge (load i) n)
+                                                 (break)
+                                                 (do
+                                                   (match-else (load (field (al-elem [Field] fs (load i)) ty))
+                                                               (TPtr [_] 0)
+                                                               (TArray [elem _]
+                                                                       (ch-collect a (load elem) p order seen))
+                                                               (_ (ch-collect a
+                                                                              (load (field (al-elem [Field]
+                                                                                                    fs
+                                                                                                    (load i))
+                                                                                           ty))
+                                                                              p
+                                                                              order
+                                                                              seen)))
+                                                   (store! i (iadd (load i) 1))))))))
                                  (al-push! [(slice u8)] order name)
                                  0))))
               (TPtr [inner] (ch-collect a (load inner) p order seen))
@@ -1755,8 +1755,8 @@
               (break)
               (do
                 (when (str-eq (load (field (al-elem [Func] fs (load i)) name)) name)
-                      (store! r (al-elem [Func] fs (load i)))
-                      (break))
+                  (store! r (al-elem [Func] fs (load i)))
+                  (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -1806,7 +1806,7 @@
 ; ============================ Coil.toml manifest ============================
 ; `coil build` / `coil run` with no source file read ./Coil.toml and expand it
 ; into the flags the CLI already accepts. Deliberately
-; tiny: a line-based reader for [package]/[dependencies]/[build]/[link]/[run].
+; tiny: a line-based reader for the project sections below.
 
 (defn m-ws? [(c u8)] (-> bool)
   (or (icmp-eq c (cast u8 32)) (or (icmp-eq c (cast u8 9)) (or (icmp-eq c (cast u8 10)) (icmp-eq c (cast u8 13))))))
@@ -1838,9 +1838,9 @@
               (break)
               (do
                 (when (icmp-eq (slice-get [u8] text (load i)) (cast u8 10))
-                      (al-push! [(slice u8)] out (subslice [u8] text (load start) (load i)))
-                      (store! start (iadd (load i) 1))
-                      0)
+                  (al-push! [(slice u8)] out (subslice [u8] text (load start) (load i)))
+                  (store! start (iadd (load i) 1))
+                  0)
                 (store! i (iadd (load i) 1)))))
     (when (icmp-lt (load start) n) (al-push! [(slice u8)] out (subslice [u8] text (load start) n)))
     out))
@@ -1868,7 +1868,12 @@
 (defn m-known-section? [(s (slice u8))] (-> bool)
   (or (str-eq s "package")
       (or (str-eq s "dependencies")
-          (or (str-eq s "build") (or (str-eq s "link") (or (str-eq s "cc") (str-eq s "run")))))))
+          (or (str-eq s "build")
+              (or (str-eq s "link")
+                  (or (str-eq s "cc")
+                      (or (str-eq s "run")
+                          (or (str-eq s "test")
+                              (or (str-eq s "lint") (str-eq s "native-dependencies"))))))))))
 (defn m-err [(a (ptr Allocator)) (lineno i64) (msg (slice u8))] (-> i64)
   (let [w (stderr)]
     (ps w "error: Coil.toml:")
@@ -1888,6 +1893,26 @@
    (sha (slice u8))
    (resolved (slice u8))
    (line i64)])
+
+(defstruct ManifestNativeDep [(name (slice u8)) (pkg (slice u8)) (line i64)])
+
+(defn m-parse-native-dep [(a (ptr Allocator))
+                          (dst (ptr (ArrayList ManifestNativeDep)))
+                          (name (slice u8))
+                          (val (slice u8))
+                          (ln i64)] (-> i64)
+  (match (m-dep-field val "pkg-config")
+    (Some [pkg]
+          (do
+            (unless (and (m-dep-name? name) (m-shell-value? pkg))
+              (m-err a ln "invalid native dependency name or pkg-config package"))
+            (let [d (alloc-stack ManifestNativeDep)]
+              (store! (field d name) name)
+              (store! (field d pkg) pkg)
+              (store! (field d line) ln)
+              (al-push! [ManifestNativeDep] dst (load d)))
+            0))
+    (None [] (m-err a ln "native dependency must specify { pkg-config = \"package\" }"))))
 
 (defn m-dep-name? [(s (slice u8))] (-> bool)
   (let [n (slice-len s)
@@ -1938,11 +1963,12 @@
 ; structural.
 (defn m-dep-field [(val (slice u8)) (wanted (slice u8))] (-> (Option (slice u8)))
   (let [n (slice-len val)
-        inner (if (and (icmp-ge n 2)
-                       (and (icmp-eq (cast i64 (slice-get val 0)) 123)
-                            (icmp-eq (cast i64 (slice-get val (isub n 1))) 125)))
-                  (subslice val 1 (isub n 1))
-                  val)
+        inner
+          (if (and (icmp-ge n 2)
+                   (and (icmp-eq (cast i64 (slice-get val 0)) 123)
+                        (icmp-eq (cast i64 (slice-get val (isub n 1))) 125)))
+              (subslice val 1 (isub n 1))
+              val)
         m (slice-len inner)
         (mut start) 0
         (mut j) 0
@@ -1953,9 +1979,9 @@
                   (let [piece (m-trim (subslice inner (load start) (load j)))
                         eq (m-index piece (cast u8 61))]
                     (when (icmp-ge eq 0)
-                          (let [key (m-trim (subslice piece 0 eq))
-                                fieldval (m-unquote (m-trim (subslice piece (iadd eq 1) (slice-len piece))))]
-                            (when (str-eq key wanted) (store! out (Some fieldval)))))
+                      (let [key (m-trim (subslice piece 0 eq))
+                            fieldval (m-unquote (m-trim (subslice piece (iadd eq 1) (slice-len piece))))]
+                        (when (str-eq key wanted) (store! out (Some fieldval)))))
                     (store! start (iadd (load j) 1))
                     (store! j (iadd (load j) 1)))
                   (store! j (iadd (load j) 1)))))
@@ -1976,7 +2002,7 @@
                         (m-err a ln "dependency fields must use key = \"value\"")
                         (let [key (m-trim (subslice piece 0 eq))]
                           (unless (or (str-eq key "path") (or (str-eq key "git") (str-eq key "sha")))
-                                  (m-err a ln (cat3-d a "unknown dependency field '" (cat3-d a key "'"))))))
+                            (m-err a ln (cat3-d a "unknown dependency field '" (cat3-d a key "'"))))))
                     (store! start (iadd (load j) 1))
                     (store! j (iadd (load j) 1)))
                   (store! j (iadd (load j) 1)))))
@@ -1988,19 +2014,20 @@
                    (val (slice u8))
                    (ln i64)] (-> i64)
   (unless (m-dep-name? name)
-          (m-err a ln "dependency names may contain only letters, digits, '-' and '_'"))
+    (m-err a ln "dependency names may contain only letters, digits, '-' and '_'"))
   (let [nd (al-len [ManifestDep] (load deps))
         (mut di) 0]
     (loop (if (icmp-ge (load di) nd)
               (break)
               (let [old (al-get [ManifestDep] (load deps) (load di))]
                 (when (str-eq (load (field old name)) name)
-                      (m-err a ln (cat3-d a "duplicate dependency '" (cat3-d a name "'"))))
+                  (m-err a ln (cat3-d a "duplicate dependency '" (cat3-d a name "'"))))
                 (store! di (iadd (load di) 1))))))
   (let [n (slice-len val)
-        table (and (icmp-ge n 2)
-                   (and (icmp-eq (cast i64 (slice-get val 0)) 123)
-                        (icmp-eq (cast i64 (slice-get val (isub n 1))) 125)))
+        table
+          (and (icmp-ge n 2)
+               (and (icmp-eq (cast i64 (slice-get val 0)) 123)
+                    (icmp-eq (cast i64 (slice-get val (isub n 1))) 125)))
         (mut path) ""
         (mut git) ""
         (mut sha) ""]
@@ -2017,11 +2044,11 @@
           has-sha (icmp-gt (slice-len (load sha)) 0)]
       (unless (or (and has-path (and (not has-git) (not has-sha)))
                   (and (not has-path) (and has-git has-sha)))
-              (m-err a ln "dependency must specify either path, or git together with sha"))
+        (m-err a ln "dependency must specify either path, or git together with sha"))
       (when (and has-sha (not (m-sha? (load sha))))
-            (m-err a ln "git dependency sha must be a full 40- or 64-digit hexadecimal object id"))
+        (m-err a ln "git dependency sha must be a full 40- or 64-digit hexadecimal object id"))
       (unless (and (m-shell-value? (load path)) (and (m-shell-value? (load git)) (m-shell-value? (load sha))))
-              (m-err a ln "dependency values cannot contain quotes or newlines"))
+        (m-err a ln "dependency values cannot contain quotes or newlines"))
       (let [d (alloc-stack ManifestDep)]
         (store! (field d name) name)
         (store! (field d path) (load path))
@@ -2039,12 +2066,21 @@
    (target (slice u8))
    (has-target bool)
    (debug bool)
+   (source-roots (ptr (ArrayList (slice u8))))
+   (exclude (ptr (ArrayList (slice u8))))
    (frameworks (ptr (ArrayList (slice u8))))
    (libs (ptr (ArrayList (slice u8))))
    (flags (ptr (ArrayList (slice u8))))
+   (search-paths (ptr (ArrayList (slice u8))))
+   (objects (ptr (ArrayList (slice u8))))
    (rargs (ptr (ArrayList (slice u8))))
    (sources (ptr (ArrayList (slice u8))))
+   (include-dirs (ptr (ArrayList (slice u8))))
    (ccflags (ptr (ArrayList (slice u8))))
+   (test-roots (ptr (ArrayList (slice u8))))
+   (test-suffixes (ptr (ArrayList (slice u8))))
+   (lint-rules (ptr (ArrayList (slice u8))))
+   (native-deps (ptr (ArrayList ManifestNativeDep)))
    (deps (ptr (ArrayList ManifestDep)))])
 
 (defn parse-manifest [(a (ptr Allocator)) (text (slice u8))] (-> (ptr Manifest))
@@ -2055,12 +2091,21 @@
     (store! (field m target) "")
     (store! (field m has-target) false)
     (store! (field m debug) false)
+    (store! (field m source-roots) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m exclude) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
     (store! (field m frameworks) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
     (store! (field m libs) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
     (store! (field m flags) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m search-paths) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m objects) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
     (store! (field m rargs) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
     (store! (field m sources) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m include-dirs) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
     (store! (field m ccflags) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m test-roots) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m test-suffixes) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m lint-rules) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m native-deps) (box a (ArrayList ManifestNativeDep) (al-new [ManifestNativeDep] a)))
     (store! (field m deps) (box a (ArrayList ManifestDep) (al-new [ManifestDep] a)))
     (let [lines (m-lines a text)
           (mut section) ""
@@ -2070,63 +2115,86 @@
                 (break)
                 (let [line (m-trim (al-get [(slice u8)] (load lines) (load i)))]
                   (unless (or (icmp-eq (slice-len [u8] line) 0) (icmp-eq (slice-get [u8] line 0) (cast u8 35)))
-                          ; blank/#
-                          (if (icmp-eq (slice-get [u8] line 0) (cast u8 91))  ; [section]
-                              (let [sec (m-trim (subslice [u8] line 1 (isub (slice-len [u8] line) 1)))]
-                                (unless (m-known-section? sec)
-                                        (m-err a
-                                               (iadd (load i) 1)
-                                               (cat3-d a
-                                                       "unknown section ["
-                                                       (cat3-d a sec "] (known: package, dependencies, build, link, cc, run)"))))
-                                (store! section sec)
-                                0)
-                              (let [eq (m-index line (cast u8 61))]  ; key = value
-                                (unless (icmp-lt eq 0)
-                                        (let [key (m-trim (subslice [u8] line 0 eq))
-                                              val (m-trim (subslice [u8] line (iadd eq 1) (slice-len [u8] line)))
-                                              ln (iadd (load i) 1)]
-                                          (cond (str-eq (load section) "package")
-                                                  (if (str-eq key "name")
-                                                      (do (store! (field m name) (m-unquote val)) 0)
-                                                      (if (str-eq key "entry")
-                                                          (do (store! (field m entry) (m-unquote val)) 0)
-                                                          (m-bad-key a ln (load section) key)))
-                                                (str-eq (load section) "dependencies")
-                                                  (m-parse-dep a (load (field m deps)) key val ln)
-                                                (str-eq (load section) "build")
-                                                  (cond (str-eq key "out") (do (store! (field m out) (m-unquote val)) 0)
-                                                        (str-eq key "target")
-                                                          (do
-                                                            (store! (field m target) (m-unquote val))
-                                                            (store! (field m has-target) true)
-                                                            0)
-                                                        (str-eq key "debug") (do (store! (field m debug) (str-eq val "true")) 0)
-                                                        :else (m-bad-key a ln (load section) key))
-                                                (str-eq (load section) "link")
-                                                  (cond (str-eq key "frameworks")
-                                                          (do (m-parse-array a val (load (field m frameworks))) 0)
-                                                        (str-eq key "libs") (do (m-parse-array a val (load (field m libs))) 0)
-                                                        (str-eq key "flags") (do (m-parse-array a val (load (field m flags))) 0)
-                                                        :else (m-bad-key a ln (load section) key))
-                                                (str-eq (load section) "cc")
-                                                  (if (str-eq key "sources")
-                                                      (do (m-parse-array a val (load (field m sources))) 0)
-                                                      (if (str-eq key "flags")
-                                                          (do (m-parse-array a val (load (field m ccflags))) 0)
-                                                          (m-bad-key a ln (load section) key)))
-                                                (str-eq (load section) "run")
-                                                  (if (str-eq key "args")
-                                                      (do (m-parse-array a val (load (field m rargs))) 0)
-                                                      (m-bad-key a ln (load section) key))
-                                                :else
-                                                  (m-err a
-                                                         ln
-                                                         (cat3-d a
-                                                                 "key '"
-                                                                 (cat3-d a
-                                                                         key
-                                                                         "' appears before any [section] header")))))))))
+                    ; blank/#
+                    (if (icmp-eq (slice-get [u8] line 0) (cast u8 91))  ; [section]
+                        (let [sec (m-trim (subslice [u8] line 1 (isub (slice-len [u8] line) 1)))]
+                          (unless (m-known-section? sec)
+                            (m-err a
+                                   (iadd (load i) 1)
+                                   (cat3-d a
+                                           "unknown section ["
+                                           (cat3-d a
+                                                   sec
+                                                   "] (known: package, dependencies, native-dependencies, build, link, cc, run, test, lint)"))))
+                          (store! section sec)
+                          0)
+                        (let [eq (m-index line (cast u8 61))]  ; key = value
+                          (unless (icmp-lt eq 0)
+                            (let [key (m-trim (subslice [u8] line 0 eq))
+                                  val (m-trim (subslice [u8] line (iadd eq 1) (slice-len [u8] line)))
+                                  ln (iadd (load i) 1)]
+                              (cond (str-eq (load section) "package")
+                                      (if (str-eq key "name")
+                                          (do (store! (field m name) (m-unquote val)) 0)
+                                          (if (str-eq key "entry")
+                                              (do (store! (field m entry) (m-unquote val)) 0)
+                                              (if (str-eq key "source-roots")
+                                                  (do (m-parse-array a val (load (field m source-roots))) 0)
+                                                  (if (str-eq key "exclude")
+                                                      (do (m-parse-array a val (load (field m exclude))) 0)
+                                                      (m-bad-key a ln (load section) key)))))
+                                    (str-eq (load section) "dependencies")
+                                      (m-parse-dep a (load (field m deps)) key val ln)
+                                    (str-eq (load section) "native-dependencies")
+                                      (m-parse-native-dep a (load (field m native-deps)) key val ln)
+                                    (str-eq (load section) "build")
+                                      (cond (str-eq key "out") (do (store! (field m out) (m-unquote val)) 0)
+                                            (str-eq key "target")
+                                              (do
+                                                (store! (field m target) (m-unquote val))
+                                                (store! (field m has-target) true)
+                                                0)
+                                            (str-eq key "debug") (do (store! (field m debug) (str-eq val "true")) 0)
+                                            :else (m-bad-key a ln (load section) key))
+                                    (str-eq (load section) "link")
+                                      (cond (str-eq key "frameworks")
+                                              (do (m-parse-array a val (load (field m frameworks))) 0)
+                                            (str-eq key "libs") (do (m-parse-array a val (load (field m libs))) 0)
+                                            (str-eq key "search-paths")
+                                              (do (m-parse-array a val (load (field m search-paths))) 0)
+                                            (str-eq key "objects") (do (m-parse-array a val (load (field m objects))) 0)
+                                            (str-eq key "flags") (do (m-parse-array a val (load (field m flags))) 0)
+                                            :else (m-bad-key a ln (load section) key))
+                                    (str-eq (load section) "cc")
+                                      (if (str-eq key "sources")
+                                          (do (m-parse-array a val (load (field m sources))) 0)
+                                          (if (str-eq key "flags")
+                                              (do (m-parse-array a val (load (field m ccflags))) 0)
+                                              (if (str-eq key "include-dirs")
+                                                  (do (m-parse-array a val (load (field m include-dirs))) 0)
+                                                  (m-bad-key a ln (load section) key))))
+                                    (str-eq (load section) "run")
+                                      (if (str-eq key "args")
+                                          (do (m-parse-array a val (load (field m rargs))) 0)
+                                          (m-bad-key a ln (load section) key))
+                                    (str-eq (load section) "test")
+                                      (cond (str-eq key "roots")
+                                              (do (m-parse-array a val (load (field m test-roots))) 0)
+                                            (str-eq key "suffixes")
+                                              (do (m-parse-array a val (load (field m test-suffixes))) 0)
+                                            :else (m-bad-key a ln (load section) key))
+                                    (str-eq (load section) "lint")
+                                      (if (str-eq key "rules")
+                                          (do (m-parse-array a val (load (field m lint-rules))) 0)
+                                          (m-bad-key a ln (load section) key))
+                                    :else
+                                      (m-err a
+                                             ln
+                                             (cat3-d a
+                                                     "key '"
+                                                     (cat3-d a
+                                                             key
+                                                             "' appears before any [section] header")))))))))
                   (store! i (iadd (load i) 1)))))
       m)))
 
@@ -2165,10 +2233,13 @@
                     (match (m-realpath a (load (field d path)))
                       (Some [p] (store! (field d resolved) p))
                       (None []
-                        (m-err a
-                               (load (field d line))
-                               (cat3-d a "dependency '" (cat3-d a (load (field d name)) "' path does not exist")))))
-                    (let [cache (cat3-d a ".coil/deps/" (cat3-d a (load (field d name)) (cat3-d a "-" (load (field d sha)))))
+                            (m-err a
+                                   (load (field d line))
+                                   (cat3-d a "dependency '" (cat3-d a (load (field d name)) "' path does not exist")))))
+                    (let [cache
+                            (cat3-d a
+                                    ".coil/deps/"
+                                    (cat3-d a (load (field d name)) (cat3-d a "-" (load (field d sha)))))
                           (mut cmd) (sb-new a)]
                       (sb-push-str! (mut cmd) "mkdir -p '.coil/deps' && if [ -d ")
                       (m-shell-quoted! (mut cmd) (cat3-d a cache "/.git"))
@@ -2187,15 +2258,19 @@
                       (sb-push-str! (mut cmd) "; fi")
                       (let [rc (cast i64 (system (slice->cstr a (sb-str (load cmd)))))]
                         (unless (icmp-eq (wait-code rc) 0)
-                                (m-err a
-                                       (load (field d line))
-                                       (cat3-d a "could not fetch dependency '" (cat3-d a (load (field d name)) "' at requested sha")))))
+                          (m-err a
+                                 (load (field d line))
+                                 (cat3-d a
+                                         "could not fetch dependency '"
+                                         (cat3-d a (load (field d name)) "' at requested sha")))))
                       (match (m-realpath a cache)
                         (Some [p] (store! (field d resolved) p))
                         (None []
-                          (m-err a
-                                 (load (field d line))
-                                 (cat3-d a "dependency cache for '" (cat3-d a (load (field d name)) "' is unavailable")))))))
+                              (m-err a
+                                     (load (field d line))
+                                     (cat3-d a
+                                             "dependency cache for '"
+                                             (cat3-d a (load (field d name)) "' is unavailable")))))))
                 (al-set! [ManifestDep] deps (load i) (load d))
                 (store! i (iadd (load i) 1)))))
     0))
@@ -2248,12 +2323,88 @@
                 (sb-push-str! (mut b) " --link-flag ")
                 (sb-push-str! (mut b) (al-get [(slice u8)] fl (load i)))
                 (store! i (iadd (load i) 1))))))
+  (let [sp (load (field m search-paths))
+        (mut i) 0
+        n (al-len [(slice u8)] sp)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (sb-push-str! (mut b) " --link-flag -L --link-flag ")
+                (sb-push-str! (mut b) (al-get [(slice u8)] sp (load i)))
+                (store! i (iadd (load i) 1))))))
+  (let [ob (load (field m objects))
+        (mut i) 0
+        n (al-len [(slice u8)] ob)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (sb-push-str! (mut b) " --link-flag ")
+                (sb-push-str! (mut b) (al-get [(slice u8)] ob (load i)))
+                (store! i (iadd (load i) 1))))))
+  (let [nd (load (field m native-deps))
+        (mut i) 0
+        n (al-len [ManifestNativeDep] (load nd))]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [d (al-elem [ManifestNativeDep] nd (load i))]
+                (sb-push-str! (mut b) " $(pkg-config --libs-only-l ")
+                (m-shell-quoted! (mut b) (load (field d pkg)))
+                (sb-push-str! (mut b) ") $(pkg-config --libs-only-L --libs-only-other ")
+                (m-shell-quoted! (mut b) (load (field d pkg)))
+                (sb-push-str! (mut b) " | awk '{for(i=1;i<=NF;i++) printf \"--link-flag %s \", $i}')")
+                (store! i (iadd (load i) 1))))))
   0)
+
+(defn m-prepare-native-deps [(a (ptr Allocator)) (m (ptr Manifest))] (-> i64)
+  (let [nd (load (field m native-deps))
+        (mut i) 0
+        n (al-len [ManifestNativeDep] (load nd))]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [d (al-elem [ManifestNativeDep] nd (load i))
+                    (mut cmd) (sb-new a)]
+                (sb-push-str! (mut cmd) "pkg-config --exists ")
+                (m-shell-quoted! (mut cmd) (load (field d pkg)))
+                (let [rc (wait-code (cast i64 (system (slice->cstr a (sb-str (load cmd))))))]
+                  (when (icmp-ne rc 0)
+                    (ps (stderr) "error: native dependency '")
+                    (ps (stderr) (load (field d name)))
+                    (ps (stderr) "' was not found by pkg-config\n")
+                    (exit 1)
+                    0))
+                (store! i (iadd (load i) 1)))))
+    0))
 
 ; `coil build`/`coil run` with no file: read Coil.toml, build the equivalent
 ; `<self> build|run <entry> …` command, and run it (propagating exit).
-; compile each [cc] source (clang -c <src> -o <src>.o <ccflags>) and append the
-; object to the build command's link flags.
+; Native inputs are real build artifacts: never dirty the source tree, reuse an
+; object while its compiler-generated depfile remains current, and stop before the
+; Coil link when the C compiler fails.
+(defn m-native-key [(a (ptr Allocator)) (m (ptr Manifest)) (src (slice u8))] (-> i64)
+  (let [(mut h) (str-hash src)
+        cf (load (field m ccflags))
+        inc (load (field m include-dirs))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) (al-len [(slice u8)] cf))
+              (break)
+              (do
+                (store! h (ixor (load h) (str-hash (al-get [(slice u8)] cf (load i)))))
+                (store! i (iadd (load i) 1)))))
+    (store! i 0)
+    (loop (if (icmp-ge (load i) (al-len [(slice u8)] inc))
+              (break)
+              (do
+                (store! h (ixor (load h) (str-hash (al-get [(slice u8)] inc (load i)))))
+                (store! i (iadd (load i) 1)))))
+    (when (load (field m has-target)) (store! h (ixor (load h) (str-hash (load (field m target))))) 0)
+    (when (load (field m debug)) (store! h (ixor (load h) 2147483647)) 0)
+    (load h)))
+
+(defn d-ends-with? [(s (slice u8)) (suffix (slice u8))] (-> bool)
+  (let [n (slice-len [u8] s)
+        m (slice-len [u8] suffix)]
+    (and (icmp-ge n m) (str-eq (subslice [u8] s (isub n m) n) suffix))))
+
 (defn m-cc-sources [(a (ptr Allocator)) (b (mut StrBuf)) (m (ptr Manifest))] (-> i64)
   (let [srcs (load (field m sources))
         (mut i) 0
@@ -2261,12 +2412,48 @@
     (loop (if (icmp-ge (load i) ns)
               (break)
               (let [src (al-get [(slice u8)] srcs (load i))
-                    obj (cat3-d a src ".o")
+                    dir (cat3-d a ".coil/build/native/" (i64->str a (m-native-key a m src)))
+                    obj (cat3-d a dir "/source.o")
+                    dep (cat3-d a dir "/source.d")
+                    ccv (cat3-d a dir "/compiler-version")
+                    tmpobj (cat3-d a obj (cat3-d a "." (i64->str a (cast i64 (getpid)))))
+                    tmpdep (cat3-d a dep (cat3-d a "." (i64->str a (cast i64 (getpid)))))
                     (mut cc) (sb-new a)]
-                (sb-push-str! (mut cc) "clang -c ")
-                (sb-push-str! (mut cc) src)
+                (let [(mut mk) (sb-new a)]
+                  (sb-push-str! (mut mk) "mkdir -p ")
+                  (m-shell-quoted! (mut mk) dir)
+                  (let [mrc (cast i64 (system (slice->cstr a (sb-str (load mk)))))]
+                    (when (icmp-ne (wait-code mrc) 0)
+                      (ps (stderr) "error: cannot create native build directory\n")
+                      (exit 1)
+                      0)))
+                (sb-push-str! (mut cc) "if [ ! -f ")
+                (m-shell-quoted! (mut cc) obj)
+                (sb-push-str! (mut cc) " ] || [ ! -f ")
+                (m-shell-quoted! (mut cc) dep)
+                (sb-push-str! (mut cc) " ] || ! make -q -f ")
+                (m-shell-quoted! (mut cc) dep)
+                (sb-push-str! (mut cc) " ")
+                (m-shell-quoted! (mut cc) obj)
+                (sb-push-str! (mut cc) " >/dev/null 2>&1 || ! clang --version | head -1 | cmp -s - ")
+                (m-shell-quoted! (mut cc) ccv)
+                (sb-push-str! (mut cc) "; then clang -MMD -MF ")
+                (m-shell-quoted! (mut cc) tmpdep)
+                (sb-push-str! (mut cc) " -MT ")
+                (m-shell-quoted! (mut cc) obj)
+                (sb-push-str! (mut cc) " -c ")
+                (m-shell-quoted! (mut cc) src)
                 (sb-push-str! (mut cc) " -o ")
-                (sb-push-str! (mut cc) obj)
+                (m-shell-quoted! (mut cc) tmpobj)
+                (let [incs (load (field m include-dirs))
+                      (mut j) 0
+                      nj (al-len [(slice u8)] incs)]
+                  (loop (if (icmp-ge (load j) nj)
+                            (break)
+                            (do
+                              (sb-push-str! (mut cc) " -I")
+                              (m-shell-quoted! (mut cc) (al-get [(slice u8)] incs (load j)))
+                              (store! j (iadd (load j) 1))))))
                 (let [cf (load (field m ccflags))
                       (mut k) 0
                       nk (al-len [(slice u8)] cf)]
@@ -2276,7 +2463,32 @@
                               (sb-push-str! (mut cc) " ")
                               (sb-push-str! (mut cc) (al-get [(slice u8)] cf (load k)))
                               (store! k (iadd (load k) 1))))))
-                (system (slice->cstr a (sb-str (load cc))))
+                (let [nd (load (field m native-deps))
+                      (mut k) 0
+                      nk (al-len [ManifestNativeDep] (load nd))]
+                  (loop (if (icmp-ge (load k) nk)
+                            (break)
+                            (let [d (al-elem [ManifestNativeDep] nd (load k))]
+                              (sb-push-str! (mut cc) " $(pkg-config --cflags ")
+                              (m-shell-quoted! (mut cc) (load (field d pkg)))
+                              (sb-push-str! (mut cc) ")")
+                              (store! k (iadd (load k) 1))))))
+                (sb-push-str! (mut cc) " && mv ")
+                (m-shell-quoted! (mut cc) tmpobj)
+                (sb-push-str! (mut cc) " ")
+                (m-shell-quoted! (mut cc) obj)
+                (sb-push-str! (mut cc) " && mv ")
+                (m-shell-quoted! (mut cc) tmpdep)
+                (sb-push-str! (mut cc) " ")
+                (m-shell-quoted! (mut cc) dep)
+                (sb-push-str! (mut cc) " && clang --version | head -1 > ")
+                (m-shell-quoted! (mut cc) ccv)
+                (sb-push-str! (mut cc) "; fi")
+                (let [crc (cast i64 (system (slice->cstr a (sb-str (load cc)))))]
+                  (when (icmp-ne (wait-code crc) 0)
+                    (wait-report crc "C compiler")
+                    (exit (cast i32 (if (icmp-eq (wait-code crc) 0) 1 (wait-code crc))))
+                    0))
                 (sb-push-str! (mut b) " --link-flag ")
                 (sb-push-str! (mut b) obj)
                 (store! i (iadd (load i) 1))))))
@@ -2307,6 +2519,7 @@
               out (if (icmp-gt (slice-len [u8] (load (field m out))) 0) (load (field m out)) (load (field m name)))
               (mut b) (sb-new a)]
           (m-prepare-deps a m)
+          (m-prepare-native-deps a m)
           (m-emit-dep-env a (mut b) m)
           (sb-push-str! (mut b) self)
           (sb-push-str! (mut b) " ")
@@ -2317,35 +2530,36 @@
           (m-emit-link a (mut b) m)
           (m-cc-sources a (mut b) m)
           (when (load (field m has-target))
-                (sb-push-str! (mut b) " --target ")
-                (sb-push-str! (mut b) (load (field m target)))
-                0)
+            (sb-push-str! (mut b) " --target ")
+            (sb-push-str! (mut b) (load (field m target)))
+            0)
+          (when (load (field m debug)) (sb-push-str! (mut b) " -g") 0)
           (m-forward-flags a (mut b) argc argv)
           ; run: forward CLI args after `--`, else the manifest's [run] args.
           (when (str-eq sub "run")
-                (let [(mut i) 2
-                      (mut sawdd) false]
-                  (sb-push-str! (mut b) " --")
-                  (loop (if (icmp-ge (load i) (cast i64 argc))
+            (let [(mut i) 2
+                  (mut sawdd) false]
+              (sb-push-str! (mut b) " --")
+              (loop (if (icmp-ge (load i) (cast i64 argc))
+                        (break)
+                        (do
+                          (if (str-eq (cstr->slice (load (index argv (load i)))) "--")
+                              (do (store! sawdd true) 0)
+                              (do
+                                (sb-push-str! (mut b) " ")
+                                (sb-push-str! (mut b) (cstr->slice (load (index argv (load i)))))
+                                0))
+                          (store! i (iadd (load i) 1)))))
+              (when (not (load sawdd))
+                (let [ra (load (field m rargs))
+                      (mut k) 0
+                      nr (al-len [(slice u8)] ra)]
+                  (loop (if (icmp-ge (load k) nr)
                             (break)
                             (do
-                              (if (str-eq (cstr->slice (load (index argv (load i)))) "--")
-                                  (do (store! sawdd true) 0)
-                                  (do
-                                    (sb-push-str! (mut b) " ")
-                                    (sb-push-str! (mut b) (cstr->slice (load (index argv (load i)))))
-                                    0))
-                              (store! i (iadd (load i) 1)))))
-                  (when (not (load sawdd))
-                        (let [ra (load (field m rargs))
-                              (mut k) 0
-                              nr (al-len [(slice u8)] ra)]
-                          (loop (if (icmp-ge (load k) nr)
-                                    (break)
-                                    (do
-                                      (sb-push-str! (mut b) " ")
-                                      (sb-push-str! (mut b) (al-get [(slice u8)] ra (load k)))
-                                      (store! k (iadd (load k) 1)))))))))
+                              (sb-push-str! (mut b) " ")
+                              (sb-push-str! (mut b) (al-get [(slice u8)] ra (load k)))
+                              (store! k (iadd (load k) 1)))))))))
           (let [rc (cast i64 (system (slice->cstr a (sb-str (load b)))))]
             (wait-report rc "program")
             (wait-code rc))))))
@@ -2354,6 +2568,32 @@
 ; starts with a dash", which made `coil build -o out in.coil` look like a project build.
 (defn manifest-mode? [(argc i32) (argv (ptr (ptr i8)))] (-> bool)
   (icmp-eq (argv-file-idx argc argv 2) 0))
+
+; Start a shell `find` over the project-owned Coil files. Callers append the
+; action (`-print0 | ...`). Defaults intentionally cover only src/ and tests/;
+; generated artifacts under .coil/ never enter formatting or linting.
+(defn m-source-find! [(a (ptr Allocator)) (b (mut StrBuf)) (m (ptr Manifest))] (-> i64)
+  (let [roots (load (field m source-roots))
+        excludes (load (field m exclude))]
+    (sb-push-str! (mut b) "find ")
+    (if (icmp-eq (al-len [(slice u8)] roots) 0)
+        (sb-push-str! (mut b) "src tests")
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) (al-len [(slice u8)] roots))
+                    (break)
+                    (do
+                      (when (icmp-gt (load i) 0) (sb-push-str! (mut b) " ") 0)
+                      (m-shell-quoted! (mut b) (al-get [(slice u8)] roots (load i)))
+                      (store! i (iadd (load i) 1)))))))
+    (sb-push-str! (mut b) " -type f -name '*.coil'")
+    (let [(mut i) 0]
+      (loop (if (icmp-ge (load i) (al-len [(slice u8)] excludes))
+                (break)
+                (do
+                  (sb-push-str! (mut b) " ! -path ")
+                  (m-shell-quoted! (mut b) (al-get [(slice u8)] excludes (load i)))
+                  (store! i (iadd (load i) 1))))))
+    0))
 
 ; The CLI entry, parameterized by the backend hooks the top file injects:
 ;   build-fn     — LLVM `build` (mode 1); a64 build passes a hard-error stub
@@ -2419,17 +2659,42 @@
 (defn test-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [self (cstr->slice (load (index argv 0)))
         fidx (argv-file-idx argc argv 2)]
-    (if (icmp-eq fidx 0)
-        (do
-          (ps (stderr) "usage: coil test <file.coil> [flags]\n")
-          (ps (stderr) "  Discovers every (deftest …) and runs each in a forked child.\n")
-          1)
+    (if (or (icmp-eq fidx 0)
+            (and (icmp-gt (slice-len [u8] (read-file a (slice->cstr a "Coil.toml"))) 0)
+                 (not (d-ends-with? (cstr->slice (load (index argv fidx))) ".coil"))))
+        (project-test-cmd a argc argv)
         (let [file (cstr->slice (load (index argv fidx)))
+              text (read-file a (slice->cstr a "Coil.toml"))
+              project (icmp-gt (slice-len [u8] text) 0)
+              m (if project (parse-manifest a text) (cast (ptr Manifest) 0))
+              (mut norun) false
+              outdir (cat3-d a ".coil/build/test/" (i64->str a (ixor (str-hash file) (cast i64 (getpid)))))
+              out (cat3-d a outdir "/test-runner")
               (mut b) (sb-new a)]
+          (let [(mut mk) (sb-new a)]
+            (sb-push-str! (mut mk) "mkdir -p ")
+            (m-shell-quoted! (mut mk) outdir)
+            (let [rc (cast i64 (system (slice->cstr a (sb-str (load mk)))))]
+              (when (icmp-ne (wait-code rc) 0) (exit 1) 0)))
+          (when project
+            (m-prepare-deps a m)
+            (m-prepare-native-deps a m)
+            (m-emit-dep-env a (mut b) m)
+            0)
           (sb-push-str! (mut b) self)
           (sb-push-str! (mut b) " build ")
           (sb-push-str! (mut b) file)
-          (sb-push-str! (mut b) " -o /tmp/coil-test --use assert.coil")
+          (sb-push-str! (mut b) " -o ")
+          (m-shell-quoted! (mut b) out)
+          (sb-push-str! (mut b) " --use assert.coil")
+          (when project
+            (m-emit-link a (mut b) m)
+            (m-cc-sources a (mut b) m)
+            (when (load (field m has-target))
+              (sb-push-str! (mut b) " --target ")
+              (sb-push-str! (mut b) (load (field m target)))
+              0)
+            0)
           ; forward remaining flags (skip the file positional and stop at `--`).
           (let [(mut i) 2]
             (loop (if (icmp-ge (load i) (cast i64 argc))
@@ -2439,11 +2704,18 @@
                             (break)
                             (if (icmp-eq (load i) fidx)
                                 (do (store! i (iadd (load i) 1)) 0)
-                                (do
-                                  (sb-push-str! (mut b) " ")
-                                  (sb-push-str! (mut b) arg)
-                                  (store! i (iadd (load i) 1))
-                                  0)))))))
+                                (if (str-eq arg "-o")
+                                    (do
+                                      (ps (stderr) "error: coil test owns its output path; -o is not supported\n")
+                                      (exit 2)
+                                      0)
+                                    (if (str-eq arg "--no-run")
+                                        (do (store! norun true) (store! i (iadd (load i) 1)) 0)
+                                        (do
+                                          (sb-push-str! (mut b) " ")
+                                          (sb-push-str! (mut b) arg)
+                                          (store! i (iadd (load i) 1))
+                                          0)))))))))
           (sb-push-str! (mut b) " >/dev/null")
           (let [brc (cast i64 (system (slice->cstr a (sb-str (load b)))))]
             (if (icmp-ne brc 0)
@@ -2451,9 +2723,158 @@
                 (do
                   (wait-report brc "compiler")
                   (let [c (wait-code brc)] (if (icmp-eq c 0) 1 c)))
-                (let [rrc (cast i64 (system (slice->cstr a "exec /tmp/coil-test")))]
-                  (wait-report rrc "test runner")
-                  (wait-code rrc))))))))
+                (if (load norun)
+                    0
+                    (let [(mut run) (sb-new a)]
+                      (sb-push-str! (mut run) "exec ")
+                      (m-shell-quoted! (mut run) out)
+                      (let [rrc (cast i64 (system (slice->cstr a (sb-str (load run)))))]
+                        (wait-report rrc "test runner")
+                        (wait-code rrc))))))))))
+
+; No-argument test mode discovers independent test roots and lets xargs coordinate
+; binaries. Each child comes back through the explicit-file path above, so it gets
+; the same manifest inheritance and per-deftest fork isolation. xargs maps any child
+; failure to 123; present the ordinary test failure status 1 to callers.
+(defn project-test-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [self (cstr->slice (load (index argv 0)))
+        text (read-file a (slice->cstr a "Coil.toml"))]
+    (if (icmp-eq (slice-len [u8] text) 0)
+        (do (ps (stderr) "error: no Coil.toml in the current directory\n") 1)
+        (let [m (parse-manifest a text)
+              roots (load (field m test-roots))
+              suffixes (load (field m test-suffixes))
+              (mut jobs) 1
+              (mut list) false
+              (mut norun) false
+              (mut selector) ""
+              (mut i) 2]
+          (loop (if (icmp-ge (load i) (cast i64 argc))
+                    (break)
+                    (let [arg (cstr->slice (load (index argv (load i))))]
+                      (cond (str-eq arg "--list") (do (store! list true) (store! i (iadd (load i) 1)) 0)
+                            (str-eq arg "--no-run") (do (store! norun true) (store! i (iadd (load i) 1)) 0)
+                            (str-eq arg "--jobs")
+                              (do
+                                (when (icmp-ge (iadd (load i) 1) (cast i64 argc))
+                                  (ps (stderr) "error: --jobs needs a positive count\n")
+                                  (exit 2)
+                                  0)
+                                (match (parse-int (cstr->slice (load (index argv (iadd (load i) 1)))))
+                                  (Some [n]
+                                        (if (icmp-gt n 0)
+                                            (store! jobs n)
+                                            (do (ps (stderr) "error: --jobs needs a positive count\n") (exit 2) 0)))
+                                  (None [] (do (ps (stderr) "error: --jobs needs a positive count\n") (exit 2) 0)))
+                                (store! i (iadd (load i) 2))
+                                0)
+                            (is-flag? arg)
+                              (do
+                                (ps (stderr) "error: unknown project test flag '")
+                                (ps (stderr) arg)
+                                (ps (stderr) "'\n")
+                                (exit 2)
+                                0)
+                            :else (do (store! selector arg) (store! i (iadd (load i) 1)) 0))))
+            (let [(mut cmd) (sb-new a)]
+              (sb-push-str! (mut cmd) "find ")
+              (if (icmp-eq (al-len [(slice u8)] roots) 0)
+                  (m-shell-quoted! (mut cmd) "tests")
+                  (let [(mut r) 0]
+                    (loop (if (icmp-ge (load r) (al-len [(slice u8)] roots))
+                              (break)
+                              (do
+                                (when (icmp-gt (load r) 0) (sb-push-str! (mut cmd) " ") 0)
+                                (m-shell-quoted! (mut cmd) (al-get [(slice u8)] roots (load r)))
+                                (store! r (iadd (load r) 1)))))))
+              (sb-push-str! (mut cmd) " -type f '(' ")
+              (if (icmp-eq (al-len [(slice u8)] suffixes) 0)
+                  (do (sb-push-str! (mut cmd) "-name ") (m-shell-quoted! (mut cmd) "*_test.coil") 0)
+                  (let [(mut s) 0]
+                    (loop (if (icmp-ge (load s) (al-len [(slice u8)] suffixes))
+                              (break)
+                              (do
+                                (when (icmp-gt (load s) 0) (sb-push-str! (mut cmd) " -o ") 0)
+                                (sb-push-str! (mut cmd) "-name ")
+                                (m-shell-quoted! (mut cmd) (cat3-d a "*" (al-get [(slice u8)] suffixes (load s))))
+                                (store! s (iadd (load s) 1)))))))
+              (sb-push-str! (mut cmd) " ')' ")
+              (when (icmp-gt (slice-len [u8] (load selector)) 0)
+                (sb-push-str! (mut cmd) "-path ")
+                (m-shell-quoted! (mut cmd) (cat3-d a "*" (cat3-d a (load selector) "*")))
+                (sb-push-str! (mut cmd) " ")
+                0)
+              (if (load list)
+                  (sb-push-str! (mut cmd) "-print | LC_ALL=C sort")
+                  (do
+                    (sb-push-str! (mut cmd) "-print0 | LC_ALL=C sort -z | xargs -0 -r -n 1 -P ")
+                    (sb-push-str! (mut cmd) (i64->str a (load jobs)))
+                    (sb-push-str! (mut cmd) " ")
+                    (m-shell-quoted! (mut cmd) self)
+                    (sb-push-str! (mut cmd) " test")
+                    (when (load norun) (sb-push-str! (mut cmd) " --no-run") 0)))
+              (let [rc (wait-code (cast i64 (system (slice->cstr a (sb-str (load cmd))))))]
+                (if (load list)
+                    rc
+                    (if (icmp-eq rc 0)
+                        (do (ps (stdout) "all test suites passed\n") 0)
+                        (do (ps (stderr) "one or more test suites failed\n") (if (icmp-eq rc 123) 1 rc)))))))))))
+
+(defn check-one [(a (ptr Allocator)) (path (ptr i8)) (triple (ptr i8))] (-> i64)
+  (set-target-arch! triple)
+  (when (icmp-eq (run-dump-on-big-stack a
+                                        (read-src a path)
+                                        (cwd-slice a)
+                                        (cstr->slice path)
+                                        (fnptr-of check-src-program))
+                 0)
+    1))
+
+(defn project-check-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [self (cstr->slice (load (index argv 0)))
+        text (read-file a (slice->cstr a "Coil.toml"))]
+    (if (icmp-eq (slice-len [u8] text) 0)
+        (do (ps (stderr) "error: no Coil.toml in the current directory\n") 1)
+        (let [m (parse-manifest a text)
+              entry (if (icmp-gt (slice-len [u8] (load (field m entry))) 0) (load (field m entry)) "src/main.coil")
+              tests-only
+                (and (icmp-ge (cast i64 argc) 4)
+                     (and (str-eq (cstr->slice (load (index argv 2))) "--target")
+                          (str-eq (cstr->slice (load (index argv 3))) "tests")))
+              (mut cmd) (sb-new a)]
+          (m-prepare-deps a m)
+          (unless tests-only
+            ; A project check deliberately performs the final project link. That is
+            ; what validates native objects/libraries in addition to instantiating
+            ; the entry graph; its artifact is compiler-owned and never the package
+            ; output named by [build].
+            (sb-push-str! (mut cmd) "mkdir -p '.coil/build/check' && ")
+            (m-shell-quoted! (mut cmd) self)
+            (sb-push-str! (mut cmd) " build -o '.coil/build/check/project' ")
+            (sb-push-str! (mut cmd) " && ")
+            0)
+          (m-shell-quoted! (mut cmd) self)
+          (sb-push-str! (mut cmd) " test --no-run")
+          (wait-code (cast i64 (system (slice->cstr a (sb-str (load cmd))))))))))
+
+(defn verify-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [self (cstr->slice (load (index argv 0)))
+        text (read-file a (slice->cstr a "Coil.toml"))]
+    (if (icmp-eq (slice-len [u8] text) 0)
+        (do (ps (stderr) "error: no Coil.toml in the current directory\n") 1)
+        (do
+          ; Parsing first makes manifest validation a distinct, early verification phase.
+          (parse-manifest a text)
+          (let [(mut cmd) (sb-new a)]
+            (m-shell-quoted! (mut cmd) self)
+            (sb-push-str! (mut cmd) " fmt --check && ")
+            (m-shell-quoted! (mut cmd) self)
+            (sb-push-str! (mut cmd) " lint && ")
+            (m-shell-quoted! (mut cmd) self)
+            (sb-push-str! (mut cmd) " check && ")
+            (m-shell-quoted! (mut cmd) self)
+            (sb-push-str! (mut cmd) " test")
+            (wait-code (cast i64 (system (slice->cstr a (sb-str (load cmd)))))))))))
 
 ; small local concat (avoid depending on cimport's cat3).
 (defn cat3-d [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
@@ -2464,6 +2885,7 @@
 (extern fopen :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
 (extern fclose :cc c [(ptr i8)] (-> i32))
+(extern getpid :cc c [] (-> i32))
 
 (defn d-write-file [(a (ptr Allocator)) (path (slice u8)) (content (slice u8))] (-> i64)
   (let [f (fopen (slice->cstr a path) (slice->cstr a "wb"))]
@@ -2518,17 +2940,17 @@
               (do
                 (let [arg (cstr->slice (load (index argv (load i))))]
                   (when (is-flag? arg)
-                        (if (str-eq arg "--check")
-                            (do (store! check true) 0)
-                            (if (str-eq arg "--write")
-                                (do (store! write true) 0)
-                                (let [w (stderr)]
-                                  (ps w "error: unknown flag '")
-                                  (ps w arg)
-                                  (ps w "'")
-                                  (wb w 10)
-                                  (exit 2)
-                                  0)))))
+                    (if (str-eq arg "--check")
+                        (do (store! check true) 0)
+                        (if (str-eq arg "--write")
+                            (do (store! write true) 0)
+                            (let [w (stderr)]
+                              (ps w "error: unknown flag '")
+                              (ps w arg)
+                              (ps w "'")
+                              (wb w 10)
+                              (exit 2)
+                              0)))))
                 (store! i (iadd (load i) 1)))))
     ; pass 2: every positional, keeping the worst exit code
     (store! i 2)
@@ -2537,12 +2959,22 @@
               (do
                 (let [arg (cstr->slice (load (index argv (load i))))]
                   (unless (is-flag? arg)
-                          (store! nfiles (iadd (load nfiles) 1))
-                          (let [r (fmt-one a (load (index argv (load i))) (load check) (load write))]
-                            (when (icmp-gt r (load rc)) (store! rc r) 0))))
+                    (store! nfiles (iadd (load nfiles) 1))
+                    (let [r (fmt-one a (load (index argv (load i))) (load check) (load write))]
+                      (when (icmp-gt r (load rc)) (store! rc r) 0))))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-eq (load nfiles) 0)
-        (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>...\n") 2)
+        (let [(mut cmd) (sb-new a)]
+          (let [text (read-file a (slice->cstr a "Coil.toml"))]
+            (if (icmp-eq (slice-len [u8] text) 0)
+                (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>...\n") (exit 2) 0)
+                (m-source-find! a (mut cmd) (parse-manifest a text))))
+          (sb-push-str! (mut cmd) " -print0 2>/dev/null | xargs -0 -r ")
+          (m-shell-quoted! (mut cmd) (cstr->slice (load (index argv 0))))
+          (sb-push-str! (mut cmd) " fmt")
+          (when (load check) (sb-push-str! (mut cmd) " --check") 0)
+          (when (load write) (sb-push-str! (mut cmd) " --write") 0)
+          (wait-code (cast i64 (system (slice->cstr a (sb-str (load cmd)))))))
         (load rc))))
 
 ; ============================ `coil lint` ===================================
@@ -2613,13 +3045,13 @@
                     (if (sug-drops-comment? src lo hi txt)
                         (let [w (stderr)]
                           (when verbose
-                                (ps w "note: ")
-                                (ps w (sug-file-name (load (field sp source))))
-                                (ps w ":")
-                                (ps w (i64->str a (lint-line-of src lo)))
-                                (ps w ": not applying this fix — it would drop a comment; make the change by hand")
-                                (wb w 10)
-                                0)
+                            (ps w "note: ")
+                            (ps w (sug-file-name (load (field sp source))))
+                            (ps w ":")
+                            (ps w (i64->str a (lint-line-of src lo)))
+                            (ps w ": not applying this fix — it would drop a comment; make the change by hand")
+                            (wb w 10)
+                            0)
                           0)
                         (do
                           (store! (field e source) (load (field sp source)))
@@ -2668,13 +3100,13 @@
                              (and (icmp-le (load (field ep hi)) (load floor))
                                   (and (icmp-ge (load (field ep lo)) 0)
                                        (icmp-le (load (field ep hi)) (slice-len [u8] (load out))))))
-                        (store! out
-                                (sconcat3 a
-                                          (subslice [u8] (load out) 0 (load (field ep lo)))
-                                          (load (field ep text))
-                                          (subslice [u8] (load out) (load (field ep hi)) (slice-len [u8] (load out)))))
-                        (store! floor (load (field ep lo)))
-                        0))
+                    (store! out
+                            (sconcat3 a
+                                      (subslice [u8] (load out) 0 (load (field ep lo)))
+                                      (load (field ep text))
+                                      (subslice [u8] (load out) (load (field ep hi)) (slice-len [u8] (load out)))))
+                    (store! floor (load (field ep lo)))
+                    0))
                 (store! i (iadd (load i) 1)))))
     (load out)))
 
@@ -2841,9 +3273,9 @@
                       (str-eq arg "--use")
                         (do
                           (when (icmp-ge (iadd (load i) 1) (cast i64 argc))
-                                (ps (stderr) "error: --use needs a path\n")
-                                (exit 2)
-                                0)
+                            (ps (stderr) "error: --use needs a path\n")
+                            (exit 2)
+                            0)
                           (cli-use-add (cstr->slice (load (index argv (iadd (load i) 1)))))
                           (store! i (iadd (load i) 2))
                           0)
@@ -2861,8 +3293,67 @@
                           (store! i (iadd (load i) 1))
                           0)))))
     (if (icmp-eq (cast i64 (load pathc)) 0)
-        (lint-usage)
+        (project-lint-cmd a argc argv (load fix) (load diff) (load allow-dirty))
         (lint-run a (load pathc) (load fix) (load diff) (load allow-dirty)))))
+
+(defn project-lint-cmd [(a (ptr Allocator))
+                        (argc i32)
+                        (argv (ptr (ptr i8)))
+                        (fix bool)
+                        (diff bool)
+                        (allow-dirty bool)] (-> i64)
+  (let [text (read-file a (slice->cstr a "Coil.toml"))]
+    (if (icmp-eq (slice-len [u8] text) 0)
+        (lint-usage)
+        (let [m (parse-manifest a text)
+              rules (load (field m lint-rules))
+              (mut cmd) (sb-new a)]
+          (m-source-find! a (mut cmd) m)
+          (sb-push-str! (mut cmd) " -print0 2>/dev/null | xargs -0 -r -n 1 ")
+          (m-shell-quoted! (mut cmd) (cstr->slice (load (index argv 0))))
+          (sb-push-str! (mut cmd) " __project-lint-one")
+          (when fix (sb-push-str! (mut cmd) " --fix") 0)
+          (when diff (sb-push-str! (mut cmd) " --diff") 0)
+          (when allow-dirty (sb-push-str! (mut cmd) " --allow-dirty") 0)
+          (let [rc (wait-code (cast i64 (system (slice->cstr a (sb-str (load cmd))))))]
+            (if (icmp-eq rc 123) 1 rc))))))
+
+(defn project-lint-one-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [text (read-file a (slice->cstr a "Coil.toml"))
+        path (cstr->slice (load (index argv (isub (cast i64 argc) 1))))
+        (mut fix) false
+        (mut diff) false
+        (mut allow-dirty) false
+        (mut i) 2]
+    (loop (if (icmp-ge (load i) (isub (cast i64 argc) 1))
+              (break)
+              (let [arg (cstr->slice (load (index argv (load i))))]
+                (when (str-eq arg "--fix") (store! fix true) 0)
+                (when (str-eq arg "--diff") (store! diff true) 0)
+                (when (str-eq arg "--allow-dirty") (store! allow-dirty true) 0)
+                (store! i (iadd (load i) 1)))))
+    (let [m (parse-manifest a text)
+          rules (load (field m lint-rules))
+          suffixes (load (field m test-suffixes))
+          (mut is-test) false
+          (mut r) 0]
+      (loop (if (icmp-ge (load r) (al-len [(slice u8)] rules))
+                (break)
+                (do
+                  (cli-use-add (al-get [(slice u8)] rules (load r)))
+                  (store! r (iadd (load r) 1)))))
+      (if (icmp-eq (al-len [(slice u8)] suffixes) 0)
+          (store! is-test (d-ends-with? path "_test.coil"))
+          (let [(mut s) 0]
+            (loop (if (icmp-ge (load s) (al-len [(slice u8)] suffixes))
+                      (break)
+                      (do
+                        (when (d-ends-with? path (al-get [(slice u8)] suffixes (load s)))
+                          (store! is-test true)
+                          0)
+                        (store! s (iadd (load s) 1)))))))
+      (when (load is-test) (cli-use-add "assert.coil") 0)
+      (lint-run a (slice->cstr a path) (load fix) (load diff) (load allow-dirty)))))
 
 ; The apply loop: analyse, edit, re-analyse — a fixpoint with a fuel guard, the same
 ; shape as macro expansion and the transform loop. Level-1 gate: after a round the
@@ -2919,13 +3410,13 @@
               ; state of the file — phase 2 will say so. After one it means a fix we
               ; applied is at fault, so the round is put back exactly as it was.
               (when (icmp-eq ok 0)
-                    (when (load applied)
-                          (lint-restore a (box-al [LintSaved] a (load saved)))
-                          (ps w "error: a suggested fix produced code that does not compile — round reverted")
-                          (wb w 10)
-                          (store! rc 1)
-                          0)
-                    (break))
+                (when (load applied)
+                  (lint-restore a (box-al [LintSaved] a (load saved)))
+                  (ps w "error: a suggested fix produced code that does not compile — round reverted")
+                  (wb w 10)
+                  (store! rc 1)
+                  0)
+                (break))
               (let [edits (lint-edits a (icmp-eq (load rounds) 0))
                     nedits (al-len [LintEdit] (load edits))]
                 (when (icmp-eq nedits 0) (break))
@@ -2942,24 +3433,24 @@
                                     ftext (sug-file-text sid)
                                     out (lint-apply a ftext edits sid)]
                                 (unless (or (icmp-eq (slice-len [u8] fpath) 0) (str-eq out ftext))
-                                        (if (and (not allow-dirty) (lint-dirty? a fpath))
-                                            (do
-                                              (ps w "error: ")
-                                              (ps w fpath)
-                                              (ps w " has uncommitted changes; commit them or pass --allow-dirty")
-                                              (wb w 10)
-                                              (store! rc 2)
-                                              0)
-                                            (let [sv (alloc-stack LintSaved)]
-                                              (store! (field sv path) fpath)
-                                              (store! (field sv text) ftext)
-                                              (al-push! (mut saved) (load sv))
-                                              (d-write-file a fpath out)
-                                              (ps w "fixed ")
-                                              (ps w fpath)
-                                              (wb w 10)
-                                              (store! wrote true)
-                                              0))))
+                                  (if (and (not allow-dirty) (lint-dirty? a fpath))
+                                      (do
+                                        (ps w "error: ")
+                                        (ps w fpath)
+                                        (ps w " has uncommitted changes; commit them or pass --allow-dirty")
+                                        (wb w 10)
+                                        (store! rc 2)
+                                        0)
+                                      (let [sv (alloc-stack LintSaved)]
+                                        (store! (field sv path) fpath)
+                                        (store! (field sv text) ftext)
+                                        (al-push! (mut saved) (load sv))
+                                        (d-write-file a fpath out)
+                                        (ps w "fixed ")
+                                        (ps w fpath)
+                                        (wb w 10)
+                                        (store! wrote true)
+                                        0))))
                               (store! k (iadd (load k) 1)))))
                   (when (icmp-eq (load rc) 2) (break))
                   (when (not (load wrote)) (break))
@@ -2968,12 +3459,12 @@
                   ; Fuel exhaustion is a real outcome and is reported, not swallowed: it
                   ; means two rules disagree and keep undoing each other.
                   (when (icmp-ge (load rounds) (lint-round-limit))
-                        (ps w "error: --fix did not settle after ")
-                        (ps w (i64->str a (lint-round-limit)))
-                        (ps w " rounds — two rules are probably undoing each other")
-                        (wb w 10)
-                        (store! rc 1)
-                        (break)))))))
+                    (ps w "error: --fix did not settle after ")
+                    (ps w (i64->str a (lint-round-limit)))
+                    (ps w " rounds — two rules are probably undoing each other")
+                    (wb w 10)
+                    (store! rc 1)
+                    (break)))))))
     (set-diag-quiet false)
     (load rc)))
 
@@ -3055,17 +3546,17 @@
     ; `emit-obj -o /dev/null`: no writable object destination — route to compile-check
     ; rather than abending in codegen. (diag-12)
     (when (and (icmp-ne (cast i64 (load outp)) 0) (str-eq (cstr->slice (load outp)) "/dev/null"))
-          (ps (stderr) "note: -o /dev/null: compile-check only, no object written\n")
-          (set-target-arch! (load trip))
-          (exit (cast i32
-                      (when (icmp-eq (run-dump-on-big-stack a
-                                                            (read-src a file)
-                                                            (cwd-slice a)
-                                                            (cstr->slice file)
-                                                            (fnptr-of check-src-program))
-                                     0)
-                            1)))
-          0)
+      (ps (stderr) "note: -o /dev/null: compile-check only, no object written\n")
+      (set-target-arch! (load trip))
+      (exit (cast i32
+                  (when (icmp-eq (run-dump-on-big-stack a
+                                                        (read-src a file)
+                                                        (cwd-slice a)
+                                                        (cstr->slice file)
+                                                        (fnptr-of check-src-program))
+                                 0)
+                    1)))
+      0)
     (let [out-slice (if (icmp-eq (cast i64 (load outp)) 0) (obj-path a (cstr->slice file)) (cstr->slice (load outp)))
           obj-cstr (slice->cstr a out-slice)
           ctx (alloc-stack DumpCtx)]
@@ -3159,8 +3650,8 @@
               (break)
               (do
                 (when (repl-name-eq? (load (field (al-elem [Func] fs (load i)) name)) nm)
-                      (store! r (al-elem [Func] fs (load i)))
-                      (break))
+                  (store! r (al-elem [Func] fs (load i)))
+                  (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -3172,60 +3663,60 @@
 (defn repl-probe-nid [(cp (ptr Program))] (-> i64)
   (let [fp (repl-func-find cp "__repl_probe")]
     (unless (icmp-eq (cast i64 fp) 0)
-            (let [body (load (field fp body))]
-              (unless (icmp-eq (al-len [Expr] (load body)) 0)
-                      (match (load (field (al-elem [Expr] body 0) kind))
-                             (EDo [dbody]
-                                  (unless (icmp-eq (al-len [Expr] (load dbody)) 0)
-                                          (load (field (al-elem [Expr] dbody 0) nid))))
-                             (EInt [$g8653] 0)
-                             (EStr [$g8654] 0)
-                             (ECStr [$g8655] 0)
-                             (EVar [$g8656] 0)
-                             (EZeroed [$g8657] 0)
-                             (EBorrow [$g8658 $g8659] 0)
-                             (ELet [$g8660 $g8661] 0)
-                             (EBin [$g8662 $g8663 $g8664] 0)
-                             (ENot [$g8665] 0)
-                             (EFloat [$g8666] 0)
-                             (EBool [$g8667] 0)
-                             (ECmp [$g8668 $g8669 $g8670] 0)
-                             (EIf [$g8671 $g8672 $g8673] 0)
-                             (ECall [$g8674 $g8675 $g8676] 0)
-                             (EAlloc [$g8677 $g8678] 0)
-                             (EField [$g8679 $g8680] 0)
-                             (ELoad [$g8681] 0)
-                             (EStore [$g8682 $g8683] 0)
-                             (EIndex [$g8684 $g8685] 0)
-                             (ECast [$g8686 $g8687] 0)
-                             (ESizeOf [$g8688] 0)
-                             (EAlignOf [$g8689] 0)
-                             (EOffsetOf [$g8690 $g8691] 0)
-                             (EBitGet [$g8692 $g8693] 0)
-                             (EBitSet [$g8694 $g8695 $g8696] 0)
-                             (EFree [$g8697] 0)
-                             (EErase [$g8698 $g8699] 0)
-                             (EMatch [$g8700 $g8701] 0)
-                             (EFnPtrOf [$g8702] 0)
-                             (ECallPtr [$g8703 $g8704] 0)
-                             (ELoop [$g8705 $g8706] 0)
-                             (EBreak [$g8707 $g8708] 0)
-                             (EContinue [$g8709] 0)
-                             (ELlvmIr [$g8710 $g8711 $g8712] 0)
-                             (ETypeQuery [$g8713 $g8714] 0)
-                             (EFieldMeta [$g8715 $g8716 $g8717] 0)
-                             (EFieldIndex [$g8718 $g8719] 0)
-                             (EQuote [$g8720] 0)
-                             (ECodeOp [$g8721 $g8722] 0)
-                             (EQuasi [$g8723] 0)
-                             (EComptime [$g8724] 0)
-                             (EAscribe [$g8725 $g8726] 0)
-                             (ESpillRef [$g8727] 0)
-                             (EConstruct [$g8728 $g8729 $g8730] 0)
-                             (ETraitCall [$g8731 $g8732 $g8733 $g8734] 0)
-                             (EDynDispatch [$g8735 $g8736 $g8737 $g8738 $g8739 $g8740 $g8741 $g8742] 0)
-                             (EMakeDyn [$g8743 $g8744 $g8745 $g8746] 0)
-                             (EStaticRef [$g8747] 0)))))))
+      (let [body (load (field fp body))]
+        (unless (icmp-eq (al-len [Expr] (load body)) 0)
+          (match (load (field (al-elem [Expr] body 0) kind))
+            (EDo [dbody]
+                 (unless (icmp-eq (al-len [Expr] (load dbody)) 0)
+                   (load (field (al-elem [Expr] dbody 0) nid))))
+            (EInt [$g8653] 0)
+            (EStr [$g8654] 0)
+            (ECStr [$g8655] 0)
+            (EVar [$g8656] 0)
+            (EZeroed [$g8657] 0)
+            (EBorrow [$g8658 $g8659] 0)
+            (ELet [$g8660 $g8661] 0)
+            (EBin [$g8662 $g8663 $g8664] 0)
+            (ENot [$g8665] 0)
+            (EFloat [$g8666] 0)
+            (EBool [$g8667] 0)
+            (ECmp [$g8668 $g8669 $g8670] 0)
+            (EIf [$g8671 $g8672 $g8673] 0)
+            (ECall [$g8674 $g8675 $g8676] 0)
+            (EAlloc [$g8677 $g8678] 0)
+            (EField [$g8679 $g8680] 0)
+            (ELoad [$g8681] 0)
+            (EStore [$g8682 $g8683] 0)
+            (EIndex [$g8684 $g8685] 0)
+            (ECast [$g8686 $g8687] 0)
+            (ESizeOf [$g8688] 0)
+            (EAlignOf [$g8689] 0)
+            (EOffsetOf [$g8690 $g8691] 0)
+            (EBitGet [$g8692 $g8693] 0)
+            (EBitSet [$g8694 $g8695 $g8696] 0)
+            (EFree [$g8697] 0)
+            (EErase [$g8698 $g8699] 0)
+            (EMatch [$g8700 $g8701] 0)
+            (EFnPtrOf [$g8702] 0)
+            (ECallPtr [$g8703 $g8704] 0)
+            (ELoop [$g8705 $g8706] 0)
+            (EBreak [$g8707 $g8708] 0)
+            (EContinue [$g8709] 0)
+            (ELlvmIr [$g8710 $g8711 $g8712] 0)
+            (ETypeQuery [$g8713 $g8714] 0)
+            (EFieldMeta [$g8715 $g8716 $g8717] 0)
+            (EFieldIndex [$g8718 $g8719] 0)
+            (EQuote [$g8720] 0)
+            (ECodeOp [$g8721 $g8722] 0)
+            (EQuasi [$g8723] 0)
+            (EComptime [$g8724] 0)
+            (EAscribe [$g8725 $g8726] 0)
+            (ESpillRef [$g8727] 0)
+            (EConstruct [$g8728 $g8729 $g8730] 0)
+            (ETraitCall [$g8731 $g8732 $g8733 $g8734] 0)
+            (EDynDispatch [$g8735 $g8736 $g8737 $g8738 $g8739 $g8740 $g8741 $g8742] 0)
+            (EMakeDyn [$g8743 $g8744 $g8745 $g8746] 0)
+            (EStaticRef [$g8747] 0)))))))
 
 ; Strip the internal probe function's context prefix ("in '…__repl_probe': " /
 ; "function '…__repl_probe': ") so a REPL error names only the user's expression.
@@ -3319,7 +3810,8 @@
 ; (slice u8)? — the string type, so it prints as raw bytes.
 (defn repl-slice-u8? [(tp (ptr Type))] (-> bool)
   (if (icmp-eq (type-tag tp) 8)
-      (let [el (t-inner tp)] (and (icmp-eq (type-tag el) 0) (and (icmp-eq (t-int-bits el) 8) (not (t-int-signed el)))))
+      (let [el (t-inner tp)]
+        (and (icmp-eq (type-tag el) 0) (and (icmp-eq (t-int-bits el) 8) (not (t-int-signed el)))))
       false))
 
 ; Write `<preamble><helpers><defs>(defn main [] (-> i64) <body>)`, run it via
@@ -3358,7 +3850,11 @@
                                           "(do (printf c\"%lu\\n\" (cast u64 ")
                                       (sconcat a uinput ")) 0)")))
             (icmp-eq tag 1)  ; float
-              (repl-emit-run a self defs "" (sconcat a "(do (printf c\"%g\\n\" (cast f64 " (sconcat a uinput ")) 0)")))
+              (repl-emit-run a
+                             self
+                             defs
+                             ""
+                             (sconcat a "(do (printf c\"%g\\n\" (cast f64 " (sconcat a uinput ")) 0)")))
             (icmp-eq tag 2)  ; bool
               (repl-emit-run a
                              self
@@ -3478,11 +3974,14 @@ Build & run
   build <file.coil> -o <out> [flags]       build a native executable
   build                                    build the ./Coil.toml project
   check <file.coil> [flags]                typecheck/compile only — no object, exit 0 if it compiles
+  check                                    check every configured project target
+  test  [selector] [--jobs N]              discover and run project test suites
   test  <file.coil> [flags]                run every (deftest …) in a forked child
+  verify                                   fmt, lint, check, build native inputs, and test
   new   <name>                             scaffold Coil.toml + src/main.coil
   repl                                     interactive session
-  fmt   [--check|--write] <file.coil>      format source (default: print to stdout)
-  lint  <file.coil> [--fix|--diff]         run checkers; --fix applies their suggestions
+  fmt   [--check|--write] [files...]       format files or project sources
+  lint  [file.coil] [--fix|--diff]         run checkers on a file or project
 
 Artifacts
   emit-obj <file.coil> [-o <out.o>]        build the object file, no link
@@ -3571,15 +4070,22 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
               0)
           (str-eq sub "test")
             (do
-              (ps w "usage: coil test <file.coil> [flags]\n\n")
+              (ps w "usage: coil test [selector] [--list|--no-run] [--jobs N]\n")
+              (ps w "       coil test <file.coil> [flags]\n\n")
               (ps w "Auto-loads src/stdlib/assert.coil (so `deftest`/`assert`/`assert-eq` need no import),\n")
               (ps w "discovers every (deftest …), and runs each in a FORKED child so one failing or\n")
               (ps w "crashing test never stops the suite. Exit: 0 iff all pass, 1 if any fails.\n\n")
               (ps w (common-flags-text))
               0)
+          (str-eq sub "verify")
+            (do
+              (ps w "usage: coil verify\n\n")
+              (ps w "Validates Coil.toml, checks formatting, runs project lint rules, checks every\n")
+              (ps w "configured target graph, builds native inputs, and runs all tests.\n")
+              0)
           (str-eq sub "lint")
             (do
-              (ps w "usage: coil lint <file.coil> [--use <rules.coil>]... [--fix|--diff] [--allow-dirty]\n\n")
+              (ps w "usage: coil lint [file.coil] [--use <rules.coil>]... [--fix|--diff] [--allow-dirty]\n\n")
               (ps w "  (default)      report what the registered checkers say, plus a `help: try:`\n")
               (ps w "                 line for every fix they propose\n")
               (ps w "  --diff         print the patch those fixes would make; write nothing\n")
@@ -3592,7 +4098,7 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
               0)
           (str-eq sub "fmt")
             (do
-              (ps w "usage: coil fmt [--check|--write] <file.coil>...\n\n")
+              (ps w "usage: coil fmt [--check|--write] [file.coil...]\n\n")
               (ps w "  (default)   print formatted source to stdout\n")
               (ps w "  --write     rewrite each file in place\n")
               (ps w "  --check     exit 1 if any file is not formatted\n\n")
@@ -3600,7 +4106,7 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
               0)
           (str-eq sub "check")
             (do
-              (ps w "usage: coil check <file.coil> [flags]\n\n")
+              (ps w "usage: coil check [<file.coil>] [flags]\n\n")
               (ps w "Runs the full front-end (typecheck + monomorphize) WITHOUT emitting an object\n")
               (ps w "or linking. Exit: 0 if it compiles, 1 with a located diagnostic if not.\n")
               (ps w "`build -o /dev/null` routes here too.\n\n")
@@ -3684,6 +4190,7 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
           ; reject it as an unknown flag or try to build a project.
           (wants-help? argc argv) (sub-usage sub)
           (str-eq sub "__smoke") (smoke a)
+          (str-eq sub "__project-lint-one") (project-lint-one-cmd a argc argv)
           (str-eq sub "guide") (do (ps (stdout) (guide-text)) 0)
           (str-eq sub "doc") (doc-cmd a (need-file argc argv sub))
           (str-eq sub "__normalize")
@@ -3697,6 +4204,7 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
                 (manifest-cmd a "run" argc argv)
                 (run-cmd a argc argv))
           (str-eq sub "test") (test-cmd a argc argv)
+          (str-eq sub "verify") (verify-cmd a argc argv)
           (or (str-eq sub "fmt") (str-eq sub "lint"))
             (if (str-eq sub "lint")
                 (lint-cmd a argc argv)
@@ -3716,16 +4224,10 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
           ; `check <file>`: typecheck/compile through mono, emit NO object. Exit 0 on a
           ; clean compile, 1 with a located diagnostic on failure. (diag-12)
           (str-eq sub "check")
-            (let [path (need-file argc argv sub)]
-              (set-target-arch! (argv-triple argc argv))
-              (when (icmp-eq (run-dump-on-big-stack a
-                                                    (read-src a
-                                                              path)
-                                                    (cwd-slice a)
-                                                    (cstr->slice path)
-                                                    (fnptr-of check-src-program))
-                             0)
-                    1))
+            (let [fidx (argv-file-idx argc argv 2)]
+              (if (icmp-eq fidx 0)
+                  (project-check-cmd a argc argv)
+                  (check-one a (load (index argv fidx)) (argv-triple argc argv))))
           ; `interp <file>`: run through mono, then interpret. main's i64 return is
           ; the process exit code (returned straight from the big-stack pipeline).
           (str-eq sub "interp")
@@ -3916,4 +4418,4 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
               ; `report(emit_ir(...))` returning ExitCode::FAILURE.
               (when (icmp-eq (run-on-big-stack ctx)
                              0)
-                    1)))))  ;; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
+                1)))))  ;; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====)))

@@ -1,4 +1,4 @@
-(module io)
+(module coil.io)
 ; Zig-style IO: a capability is a VALUE (a vtable struct) threaded explicitly,
 ; exactly like the allocator. A `Writer` is `{ write-fn, ctx }`; a function that
 ; does output *takes* a Writer, so IO shows up in its type. There is no ambient

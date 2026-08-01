@@ -3,7 +3,7 @@
 ; feature, like src/stdlib/mmio.coil: the concurrency axis grows by library, not a core hack.
 ; (seq_cst to start; weaker orderings — relaxed/acquire/release — are a friction-driven
 ; follow-up, only if a real program needs the perf.)
-(module atomic)
+(module coil.atomic)
 
 ;; fetch-and-add: atomically `*p += v`, returns the PREVIOUS value.
 (defn atomic-add [(p (ptr i64)) (v i64)] (-> i64)

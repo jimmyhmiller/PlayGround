@@ -1,0 +1,61 @@
+(module stdlib-parsers-test)
+(import "../src/stdlib/json.coil" :as json)
+(import "../src/stdlib/http.coil" :as http)
+(import "../src/stdlib/alloc.coil" :as alloc)
+(import "../src/stdlib/str.coil" :as str)
+(import "../src/stdlib/slice.coil" :as slice)
+
+(defn test-crlf [(b (mut str/StrBuf))] (-> i64)
+  (str/sb-push-byte! (mut b) (cast u8 13))
+  (str/sb-push-byte! (mut b) (cast u8 10)))
+(defn test-http-input [(a (ptr alloc/Allocator)) (short? bool)] (-> (slice u8))
+  (let [(mut b) (str/sb-new a)]
+    (str/sb-push-str! (mut b) (if short? "POST / HTTP/1.1" "POST /items?q=1 HTTP/1.1"))
+    (test-crlf (mut b))
+    (if short? 0 (do (str/sb-push-str! (mut b) "Host: example.test") (test-crlf (mut b))))
+    (str/sb-push-str! (mut b) (if short? "Content-Length: 4" "content-length: 5"))
+    (test-crlf (mut b))
+    (test-crlf (mut b))
+    (str/sb-push-str! (mut b) (if short? "abc" "helloNEXT"))
+    (str/sb-str b)))
+
+(deftest json-flat-tape-and-lookup
+         (let [parsed
+                 (json/parse (alloc/malloc-allocator)
+                             "{\"name\":\"coil\",\"values\":[1,-2.5e3,true,null]}")]
+           (match parsed
+             (Err [e] (assert false))
+             (Ok [doc]
+                 (do
+                   (assert (json/is-object? (json/root doc)))
+                   (assert-eq (json/child-count (json/root doc)) 2)
+                   (let [name-index (json/object-get doc 0 "name")
+                         values-index (json/object-get doc 0 "values")]
+                     (assert (str/str-eq (json/string-text doc (json/token doc name-index)) "coil"))
+                     (assert (json/is-array? (json/token doc values-index)))
+                     (assert (str/str-eq (json/number-text doc
+                                                           (json/token doc (json/array-nth doc values-index 1)))
+                                         "-2.5e3"))))))))
+
+(deftest json-rejects-invalid-input
+         (match (json/parse (alloc/malloc-allocator) "[1,]")
+           (Err [e] (assert (> (json/error-code e) 0)))
+           (Ok [doc] (assert false))))
+
+(deftest http-request-views-and-body
+         (let [input (test-http-input (alloc/malloc-allocator) false)]
+           (match (http/parse-request (alloc/malloc-allocator) input)
+             (Err [e] (assert false))
+             (Ok [req]
+                 (do
+                   (assert (http/method-is req "POST"))
+                   (assert (str/str-eq (http/target req) "/items?q=1"))
+                   (assert (str/str-eq (http/header req "HOST") "example.test"))
+                   (assert (str/str-eq (http/body req) "hello"))
+                   (assert (http/keep-alive? req))
+                   (assert-eq (http/consumed req) (isub (slice/slice-len input) 4)))))))
+
+(deftest http-rejects-short-body
+         (match (http/parse-request (alloc/malloc-allocator) (test-http-input (alloc/malloc-allocator) true))
+           (Err [e] (assert-eq (http/error-code e) 5))
+           (Ok [req] (assert false))))

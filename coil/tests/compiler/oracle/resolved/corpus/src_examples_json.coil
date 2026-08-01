@@ -100,9 +100,9 @@
     [arr
       (let
         [$g1
-          (alloc.unwrap-ptr
+          (coil.alloc.unwrap-ptr
             [(ArrayList Json)]
-            (alloc.create [(ArrayList Json)] (load (field p alc))))]
+            (coil.alloc.create [(ArrayList Json)] (load (field p alc))))]
         (store! $g1 (al-new [Json] (load (field p alc))))
         $g1)]
     (skip-ws p)
@@ -124,9 +124,9 @@
     [obj
       (let
         [$g2
-          (alloc.unwrap-ptr
+          (coil.alloc.unwrap-ptr
             [(HashMap (slice u8) Json)]
-            (alloc.create [(HashMap (slice u8) Json)] (load (field p alc))))]
+            (coil.alloc.create [(HashMap (slice u8) Json)] (load (field p alc))))]
         (store! $g2 (hm-new [(slice u8) Json] (load (field p alc)) (str-keyops)))
         $g2)]
     (skip-ws p)

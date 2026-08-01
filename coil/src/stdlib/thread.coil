@@ -2,7 +2,7 @@
 ; same C-interop callback pattern cinterop proved with qsort: a Coil function handed to
 ; C as a function pointer). PURE LIBRARY, no core feature. Hosted (links libpthread/
 ; libc) — concurrency is a hosted concern; bare-metal concurrency is a separate axis.
-(module thread)
+(module coil.thread)
 
 ;; int pthread_create(pthread_t*, const pthread_attr_t*, void*(*)(void*), void*)
 (extern pthread_create :cc c [(ptr i8) (ptr i8) (fnptr c [(ptr i8)] (ptr i8)) (ptr i8)] (-> i32))

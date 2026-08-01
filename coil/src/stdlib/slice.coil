@@ -1,4 +1,4 @@
-(module slice)
+(module coil.slice)
 ; A `(slice T)` is a fat pointer `{ data: (ptr T), len: i64 }` over contiguous
 ; elements — the everyday view into an array/buffer, and the representation of a
 ; string (`(slice u8)`). The fat-pointer TYPE is the one piece of core support

@@ -1,4 +1,4 @@
-(module alloc)
+(module coil.alloc)
 ; Zig-style allocators: an allocator is a VALUE (a vtable struct) threaded
 ; explicitly. There is no ambient heap -- a function that allocates *takes* an
 ; Allocator, so allocation is visible in its type. Built entirely in Coil; the

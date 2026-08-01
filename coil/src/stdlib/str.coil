@@ -1,4 +1,4 @@
-(module str)
+(module coil.str)
 ; Strings are `(slice u8)` VIEWS (UTF-8 bytes) — see src/stdlib/slice.coil. A `"…"`
 ; literal is one, borrowing static bytes. These are the content operations over
 ; that view: equality, hashing, search, and an allocator-aware concatenation.

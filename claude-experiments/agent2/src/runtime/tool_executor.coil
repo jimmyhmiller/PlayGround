@@ -1,0 +1,261 @@
+(module harness-tool-executor)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)
+(import "thread.coil" :use *)
+(import "../core/event.coil" :use *)
+(import "../core/json.coil" :use *)
+(import "../core/json_schema.coil" :use *)
+(import "../core/tool.coil" :use *)
+(import "../infra/native.coil" :use *)
+
+(defstruct ToolExecutionRequest
+  [(run-id (slice u8))
+   (provider (slice u8))
+   (model (slice u8))
+   (registry (ptr ToolRegistry))
+   (authorizer (dyn ToolAuthorizer))
+   (calls (ptr (ArrayList ToolCall)))
+   (emitter (ptr EventEmitter))
+   (max-parallel i64)])
+
+(defstruct ToolExecutionBatch [(results (ArrayList ToolResult))])
+
+(defstruct ToolJob
+  [(run-id (slice u8))
+   (provider (slice u8))
+   (model (slice u8))
+   (call ToolCall)
+   (definition ToolDefinition)
+   (results-data (ptr ToolResult))
+   (result-index i64)
+   (emitter (ptr EventEmitter))])
+
+(defstruct ActiveThread [(thread Thread) (spawned bool)])
+
+(defn tool-event [(emitter (ptr EventEmitter))
+                  (kind EventKind)
+                  (run-id (slice u8))
+                  (provider (slice u8))
+                  (model (slice u8))
+                  (call ToolCall)
+                  (payload Json)] (-> i64)
+  (emit-event emitter
+              (harness_now_ms)
+              kind
+              run-id
+              (load (field call id))
+              ""
+              provider
+              model
+              payload))
+
+(defn tool-job-run [(opaque (ptr i8))] (-> (ptr i8))
+  (let [job (cast (ptr ToolJob) opaque)
+        call (field job call)
+        definition (field job definition)
+        result-slot
+          (index (load (field job results-data))
+                 (load (field job result-index)))
+        started (harness_now_ms)]
+    (tool-event (load (field job emitter))
+                (ToolCallStarted)
+                (load (field job run-id))
+                (load (field job provider))
+                (load (field job model))
+                (load call)
+                (JsonString (load (field call name))))
+    (let [(mut executed)
+            (execute-tool (load (field definition implementation))
+                          call
+                          (malloc-allocator))
+          finished (harness_now_ms)]
+      (store! (field executed call-id) (load (field call id)))
+      (store! (field executed started-at-ms) started)
+      (store! (field executed finished-at-ms) finished)
+      (store! result-slot (load executed))
+      (match (load (field executed status))
+        (ToolSucceeded []
+                       (tool-event (load (field job emitter))
+                                   (ToolCallCompleted)
+                                   (load (field job run-id))
+                                   (load (field job provider))
+                                   (load (field job model))
+                                   (load call)
+                                   (load (field executed output))))
+        (ToolErrored []
+                     (tool-event (load (field job emitter))
+                                 (ToolCallFailed)
+                                 (load (field job run-id))
+                                 (load (field job provider))
+                                 (load (field job model))
+                                 (load call)
+                                 (JsonString (load (field executed error)))))
+        (ToolDenied [] 0)
+        (ToolUnknown [] 0)))
+    (cast (ptr i8) 0)))
+
+(defn denied-result [(call ToolCall) (reason (slice u8))] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (load (field call id)) (ToolDenied))]
+    (store! (field result error) reason)
+    (store! (field result finished-at-ms) (harness_now_ms))
+    (load result)))
+
+(defn unknown-result [(call ToolCall)] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (load (field call id)) (ToolUnknown))]
+    (store! (field result error) "unknown tool")
+    (store! (field result finished-at-ms) (harness_now_ms))
+    (load result)))
+
+;; Execute all authorized calls, using at most `max-parallel` worker threads. Results
+;; retain input order even though completion events reflect actual completion order.
+;; Handlers receive the process-wide malloc allocator, which is concurrency-safe.
+(defn execute-tools-parallel [(allocator (ptr Allocator)) (request (ptr ToolExecutionRequest))] (-> ToolExecutionBatch)
+  (let [(mut results) (al-new [ToolResult] allocator)
+        (mut jobs) (al-new [ToolJob] allocator)
+        calls (load (field request calls))
+        count (al-len [ToolCall] (load calls))
+        (mut i) 0]
+    (al-reserve! [ToolResult] (mut results) count)
+    (al-reserve! [ToolJob] (mut jobs) count)
+    (loop (if (icmp-ge (load i) count)
+              (break)
+              (let [call (al-get [ToolCall] (load calls) (load i))]
+                (al-push! [ToolResult]
+                          (mut results)
+                          (tool-result-empty (load (field call id)) (ToolErrored)))
+                (tool-event (load (field request emitter))
+                            (ToolCallProposed)
+                            (load (field request run-id))
+                            (load (field request provider))
+                            (load (field request model))
+                            call
+                            (JsonString (load (field call name))))
+                (match (tool-find (load (load (field request registry)))
+                                  (load (field call name)))
+                  (None []
+                        (do
+                          (al-set! [ToolResult] (mut results) (load i) (unknown-result call))
+                          (tool-event (load (field request emitter))
+                                      (ToolCallFailed)
+                                      (load (field request run-id))
+                                      (load (field request provider))
+                                      (load (field request model))
+                                      call
+                                      (JsonString "unknown tool"))))
+                  (Some [definition]
+                        (let [selected definition
+                              validation
+                                (json-schema-validate allocator
+                                                      (load (field (field selected spec) input-schema))
+                                                      (load (field call arguments)))]
+                          (if (not (load (field validation ok)))
+                              (do
+                                (al-set! [ToolResult]
+                                         (mut results)
+                                         (load i)
+                                         (denied-result call
+                                                        "tool arguments do not satisfy input schema"))
+                                (tool-event (load (field request emitter))
+                                            (ToolCallRejected)
+                                            (load (field request run-id))
+                                            (load (field request provider))
+                                            (load (field request model))
+                                            call
+                                            (JsonString "tool arguments do not satisfy input schema")))
+                              (match (authorize-tool (load (field request authorizer))
+                                                     (box allocator
+                                                          ToolSpec
+                                                          (load (field selected spec)))
+                                                     (box allocator ToolCall call))
+                                (Reject [reason]
+                                        (do
+                                          (al-set! [ToolResult] (mut results) (load i) (denied-result call reason))
+                                          (tool-event (load (field request emitter))
+                                                      (ToolCallRejected)
+                                                      (load (field request run-id))
+                                                      (load (field request provider))
+                                                      (load (field request model))
+                                                      call
+                                                      (JsonString reason))))
+                                (Authorize []
+                                           (let [job (alloc-stack ToolJob)]
+                                             (store! (field job run-id) (load (field request run-id)))
+                                             (store! (field job provider) (load (field request provider)))
+                                             (store! (field job model) (load (field request model)))
+                                             (store! (field job call) call)
+                                             (store! (field job definition) selected)
+                                             (store! (field job results-data) (load (field results data)))
+                                             (store! (field job result-index) (load i))
+                                             (store! (field job emitter) (load (field request emitter)))
+                                             (al-push! [ToolJob] (mut jobs) (load job))
+                                             (tool-event (load (field request emitter))
+                                                         (ToolCallAuthorized)
+                                                         (load (field request run-id))
+                                                         (load (field request provider))
+                                                         (load (field request model))
+                                                         call
+                                                         (JsonString (load (field call name)))))))))))
+                (store! i (iadd (load i) 1)))))
+    
+    (let [job-count (al-len [ToolJob] (load jobs))
+          limit
+            (if (icmp-gt (load (field request max-parallel)) 0)
+                (load (field request max-parallel))
+                1)
+          (mut start) 0]
+      (loop (if (icmp-ge (load start) job-count)
+                (break)
+                (let [remaining (isub job-count (load start))
+                      batch-size (if (icmp-lt remaining limit) remaining limit)
+                      (mut active) (al-new [ActiveThread] allocator)
+                      (mut j) 0]
+                  (al-reserve! [ActiveThread] (mut active) batch-size)
+                  (loop (if (icmp-ge (load j) batch-size)
+                            (break)
+                            (do
+                              (al-push! [ActiveThread] (mut active) (zeroed ActiveThread))
+                              (store! j (iadd (load j) 1)))))
+                  (store! j 0)
+                  (loop (if (icmp-ge (load j) batch-size)
+                            (break)
+                            (let [active-slot (index (load (field active data)) (load j))
+                                  job-slot (index (load (field jobs data)) (iadd (load start) (load j)))
+                                  spawn-code
+                                    (thread-spawn (field active-slot thread)
+                                                  (fnptr-of tool-job-run)
+                                                  (cast (ptr i8) job-slot))]
+                              (if (icmp-eq spawn-code 0)
+                                  (store! (field active-slot spawned) true)
+                                  (let [call (field job-slot call)
+                                        result-slot
+                                          (index (load (field job-slot results-data))
+                                                 (load (field job-slot result-index)))
+                                        (mut failed)
+                                          (tool-result-empty (load (field call id))
+                                                             (ToolErrored))]
+                                    (store! (field failed error) "could not spawn tool worker")
+                                    (store! (field failed finished-at-ms) (harness_now_ms))
+                                    (store! result-slot (load failed))
+                                    (tool-event (load (field job-slot emitter))
+                                                (ToolCallFailed)
+                                                (load (field job-slot run-id))
+                                                (load (field job-slot provider))
+                                                (load (field job-slot model))
+                                                (load call)
+                                                (JsonString "could not spawn tool worker"))))
+                              (store! j (iadd (load j) 1)))))
+                  (store! j 0)
+                  (loop (if (icmp-ge (load j) batch-size)
+                            (break)
+                            (let [active-slot (index (load (field active data)) (load j))]
+                              (when (load (field active-slot spawned))
+                                (thread-join (field active-slot thread))
+                                0)
+                              (store! j (iadd (load j) 1)))))
+                  (al-free! [ActiveThread] (mut active))
+                  (store! start (iadd (load start) batch-size))))))
+    (let [batch (alloc-stack ToolExecutionBatch)]
+      (store! (field batch results) (load results))
+      (load batch))))

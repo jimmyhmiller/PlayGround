@@ -5,13 +5,13 @@
   (let
     [w (stdout)]
     (do
-      (io.print-str w "n=")
-      (fmt.print-i w -42)
-      (io.print-str w " hex=")
-      (fmt.print-uhex w 255)
-      (io.print-str w " ok=")
-      (fmt.print-bool w true)
-      (io.print-str w "
+      (coil.io.print-str w "n=")
+      (coil.fmt.print-i w -42)
+      (coil.io.print-str w " hex=")
+      (coil.fmt.print-uhex w 255)
+      (coil.io.print-str w " ok=")
+      (coil.fmt.print-bool w true)
+      (coil.io.print-str w "
 "))
     0))
 

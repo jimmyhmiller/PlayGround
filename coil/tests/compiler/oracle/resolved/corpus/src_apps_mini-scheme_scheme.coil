@@ -3,48 +3,48 @@
   [(x Sexp)]
   (-> (ptr Val))
   (let
-    [$g2977 (gc-sp)]
+    [$g3009 (gc-sp)]
     (do
       (let
         [tg (sx-tag x)]
         (if
           (icmp-eq tg 0)
-          (do (gc-sp-set $g2977) (mk-int (sx-ival x)))
+          (do (gc-sp-set $g3009) (mk-int (sx-ival x)))
           (if
             (icmp-eq tg 2)
-            (let [$g2978 (mk-sym (intern (sx-sval x)))] (gc-sp-set $g2977) $g2978)
+            (let [$g3010 (mk-sym (intern (sx-sval x)))] (gc-sp-set $g3009) $g3010)
             (if
               (or (icmp-eq tg 6) (icmp-eq tg 7))
-              (do (gc-sp-set $g2977) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x))))
-              (do (gc-sp-set $g2977) (mk-int 0)))))))))
+              (do (gc-sp-set $g3009) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x))))
+              (do (gc-sp-set $g3009) (mk-int 0)))))))))
 
 (defn
   sexp-list->val
   [(items (ptr (ArrayList Sexp))) (i i64) (n i64)]
   (-> (ptr Val))
   (let
-    [$g2971 (gc-sp)]
+    [$g3003 (gc-sp)]
     (do
       (if
         (icmp-ge i n)
-        (do (gc-sp-set $g2971) (snil))
+        (do (gc-sp-set $g3003) (snil))
         (let
-          [$g2972
+          [$g3004
             (let
-              [$g2973 (gc-sp)]
+              [$g3005 (gc-sp)]
               (let
-                [$g2974
+                [$g3006
                   (let
-                    [$g2975 (sexp->val (sx-at items i))]
-                    (gc-root $g2975)
+                    [$g3007 (sexp->val (sx-at items i))]
+                    (gc-root $g3007)
                     (let
-                      [$g2976 (sexp-list->val items (+ i 1) n)]
-                      (gc-root $g2976)
-                      (cons $g2975 $g2976)))]
-                (gc-sp-set $g2973)
-                $g2974))]
-          (gc-sp-set $g2971)
-          $g2972)))))
+                      [$g3008 (sexp-list->val items (+ i 1) n)]
+                      (gc-root $g3008)
+                      (cons $g3007 $g3008)))]
+                (gc-sp-set $g3005)
+                $g3006))]
+          (gc-sp-set $g3003)
+          $g3004)))))
 
 (defn cadr [(x (ptr Val))] (-> (ptr Val)) (car (cdr x)))
 
@@ -80,47 +80,47 @@
   [(params (ptr Val)) (args (ptr Val)) (env (ptr Val))]
   (-> (ptr Val))
   (let
-    [$g2960 (gc-sp)]
+    [$g2992 (gc-sp)]
     (do
       (gc-root params)
       (gc-root args)
       (gc-root env)
       (if
         (nullp params)
-        (do (gc-sp-set $g2960) env)
+        (do (gc-sp-set $g2992) env)
         (let
-          [$g2961 (cdr params)]
-          (gc-root $g2961)
+          [$g2993 (cdr params)]
+          (gc-root $g2993)
           (let
-            [$g2962 (cdr args)]
-            (gc-root $g2962)
+            [$g2994 (cdr args)]
+            (gc-root $g2994)
             (let
-              [$g2970
+              [$g3002
                 (let
-                  [$g2963 (gc-sp)]
+                  [$g2995 (gc-sp)]
                   (let
-                    [$g2964
+                    [$g2996
                       (let
-                        [$g2969
+                        [$g3001
                           (let
-                            [$g2965 (gc-sp)]
+                            [$g2997 (gc-sp)]
                             (let
-                              [$g2966
+                              [$g2998
                                 (let
-                                  [$g2967 (car params)]
-                                  (gc-root $g2967)
+                                  [$g2999 (car params)]
+                                  (gc-root $g2999)
                                   (let
-                                    [$g2968 (car args)]
-                                    (gc-root $g2968)
-                                    (cons $g2967 $g2968)))]
-                              (gc-sp-set $g2965)
-                              $g2966))]
-                        (gc-root $g2969)
-                        (cons $g2969 env))]
-                    (gc-sp-set $g2963)
-                    $g2964))]
-              (gc-root $g2970)
-              (do (gc-sp-set $g2960) (extend-env $g2961 $g2962 $g2970)))))))))
+                                    [$g3000 (car args)]
+                                    (gc-root $g3000)
+                                    (cons $g2999 $g3000)))]
+                              (gc-sp-set $g2997)
+                              $g2998))]
+                        (gc-root $g3001)
+                        (cons $g3001 env))]
+                    (gc-sp-set $g2995)
+                    $g2996))]
+              (gc-root $g3002)
+              (do (gc-sp-set $g2992) (extend-env $g2993 $g2994 $g3002)))))))))
 
 (defn
   sum-args
@@ -139,309 +139,309 @@
   [(op i64) (args (ptr Val))]
   (-> (ptr Val))
   (let
-    [$g2913 (gc-sp)]
+    [$g2945 (gc-sp)]
     (do
       (gc-root args)
       (if
         (= op 0)
-        (do (gc-sp-set $g2913) (mk-int (sum-args args)))
+        (do (gc-sp-set $g2945) (mk-int (sum-args args)))
         (if
           (= op 1)
           (do
-            (gc-sp-set $g2913)
+            (gc-sp-set $g2945)
             (mk-int
               (-
                 (let
-                  [$g2914 (gc-sp)]
+                  [$g2946 (gc-sp)]
                   (let
-                    [$g2915 (let [$g2916 (car args)] (gc-root $g2916) (ival $g2916))]
-                    (gc-sp-set $g2914)
-                    $g2915))
+                    [$g2947 (let [$g2948 (car args)] (gc-root $g2948) (ival $g2948))]
+                    (gc-sp-set $g2946)
+                    $g2947))
                 (let
-                  [$g2917 (gc-sp)]
+                  [$g2949 (gc-sp)]
                   (let
-                    [$g2918 (let [$g2919 (cadr args)] (gc-root $g2919) (ival $g2919))]
-                    (gc-sp-set $g2917)
-                    $g2918)))))
+                    [$g2950 (let [$g2951 (cadr args)] (gc-root $g2951) (ival $g2951))]
+                    (gc-sp-set $g2949)
+                    $g2950)))))
           (if
             (= op 2)
-            (do (gc-sp-set $g2913) (mk-int (mul-args args)))
+            (do (gc-sp-set $g2945) (mk-int (mul-args args)))
             (if
               (= op 3)
               (do
-                (gc-sp-set $g2913)
+                (gc-sp-set $g2945)
                 (mk-bool
                   (if
                     (=
                       (let
-                        [$g2920 (gc-sp)]
+                        [$g2952 (gc-sp)]
                         (let
-                          [$g2921 (let [$g2922 (car args)] (gc-root $g2922) (ival $g2922))]
-                          (gc-sp-set $g2920)
-                          $g2921))
+                          [$g2953 (let [$g2954 (car args)] (gc-root $g2954) (ival $g2954))]
+                          (gc-sp-set $g2952)
+                          $g2953))
                       (let
-                        [$g2923 (gc-sp)]
+                        [$g2955 (gc-sp)]
                         (let
-                          [$g2924 (let [$g2925 (cadr args)] (gc-root $g2925) (ival $g2925))]
-                          (gc-sp-set $g2923)
-                          $g2924)))
+                          [$g2956 (let [$g2957 (cadr args)] (gc-root $g2957) (ival $g2957))]
+                          (gc-sp-set $g2955)
+                          $g2956)))
                     1
                     0)))
               (if
                 (= op 4)
                 (do
-                  (gc-sp-set $g2913)
+                  (gc-sp-set $g2945)
                   (mk-bool
                     (if
                       (<
                         (let
-                          [$g2926 (gc-sp)]
+                          [$g2958 (gc-sp)]
                           (let
-                            [$g2927
-                              (let [$g2928 (car args)] (gc-root $g2928) (ival $g2928))]
-                            (gc-sp-set $g2926)
-                            $g2927))
+                            [$g2959
+                              (let [$g2960 (car args)] (gc-root $g2960) (ival $g2960))]
+                            (gc-sp-set $g2958)
+                            $g2959))
                         (let
-                          [$g2929 (gc-sp)]
+                          [$g2961 (gc-sp)]
                           (let
-                            [$g2930
-                              (let [$g2931 (cadr args)] (gc-root $g2931) (ival $g2931))]
-                            (gc-sp-set $g2929)
-                            $g2930)))
+                            [$g2962
+                              (let [$g2963 (cadr args)] (gc-root $g2963) (ival $g2963))]
+                            (gc-sp-set $g2961)
+                            $g2962)))
                       1
                       0)))
                 (if
                   (= op 5)
                   (let
-                    [$g2932
+                    [$g2964
                       (let
-                        [$g2933 (gc-sp)]
+                        [$g2965 (gc-sp)]
                         (let
-                          [$g2934
+                          [$g2966
                             (let
-                              [$g2935 (car args)]
-                              (gc-root $g2935)
+                              [$g2967 (car args)]
+                              (gc-root $g2967)
                               (let
-                                [$g2936 (cadr args)]
-                                (gc-root $g2936)
-                                (cons $g2935 $g2936)))]
-                          (gc-sp-set $g2933)
-                          $g2934))]
-                    (gc-sp-set $g2913)
-                    $g2932)
+                                [$g2968 (cadr args)]
+                                (gc-root $g2968)
+                                (cons $g2967 $g2968)))]
+                          (gc-sp-set $g2965)
+                          $g2966))]
+                    (gc-sp-set $g2945)
+                    $g2964)
                   (if
                     (= op 6)
                     (let
-                      [$g2937 (car args)]
-                      (gc-root $g2937)
-                      (do (gc-sp-set $g2913) (car $g2937)))
+                      [$g2969 (car args)]
+                      (gc-root $g2969)
+                      (do (gc-sp-set $g2945) (car $g2969)))
                     (if
                       (= op 7)
                       (let
-                        [$g2938 (car args)]
-                        (gc-root $g2938)
-                        (do (gc-sp-set $g2913) (cdr $g2938)))
+                        [$g2970 (car args)]
+                        (gc-root $g2970)
+                        (do (gc-sp-set $g2945) (cdr $g2970)))
                       (if
                         (= op 8)
                         (do
-                          (gc-sp-set $g2913)
+                          (gc-sp-set $g2945)
                           (mk-bool
                             (if
                               (let
-                                [$g2939 (gc-sp)]
+                                [$g2971 (gc-sp)]
                                 (let
-                                  [$g2940
+                                  [$g2972
                                     (let
-                                      [$g2941 (car args)]
-                                      (gc-root $g2941)
-                                      (nullp $g2941))]
-                                  (gc-sp-set $g2939)
-                                  $g2940))
+                                      [$g2973 (car args)]
+                                      (gc-root $g2973)
+                                      (nullp $g2973))]
+                                  (gc-sp-set $g2971)
+                                  $g2972))
                               1
                               0)))
                         (if
                           (= op 9)
                           (do
-                            (gc-sp-set $g2913)
+                            (gc-sp-set $g2945)
                             (mk-bool
                               (if
                                 (let
-                                  [$g2942 (gc-sp)]
+                                  [$g2974 (gc-sp)]
                                   (let
-                                    [$g2943
+                                    [$g2975
                                       (let
-                                        [$g2944 (car args)]
-                                        (gc-root $g2944)
-                                        (pairp $g2944))]
-                                    (gc-sp-set $g2942)
-                                    $g2943))
+                                        [$g2976 (car args)]
+                                        (gc-root $g2976)
+                                        (pairp $g2976))]
+                                    (gc-sp-set $g2974)
+                                    $g2975))
                                 1
                                 0)))
                           (if
                             (= op 10)
                             (do
-                              (gc-sp-set $g2913)
+                              (gc-sp-set $g2945)
                               (mk-bool
                                 (if
                                   (and
                                     (let
-                                      [$g2945 (gc-sp)]
+                                      [$g2977 (gc-sp)]
                                       (let
-                                        [$g2946
+                                        [$g2978
                                           (let
-                                            [$g2947 (car args)]
-                                            (gc-root $g2947)
-                                            (symp $g2947))]
-                                        (gc-sp-set $g2945)
-                                        $g2946))
+                                            [$g2979 (car args)]
+                                            (gc-root $g2979)
+                                            (symp $g2979))]
+                                        (gc-sp-set $g2977)
+                                        $g2978))
                                     (and
                                       (let
-                                        [$g2948 (gc-sp)]
+                                        [$g2980 (gc-sp)]
                                         (let
-                                          [$g2949
+                                          [$g2981
                                             (let
-                                              [$g2950 (cadr args)]
-                                              (gc-root $g2950)
-                                              (symp $g2950))]
-                                          (gc-sp-set $g2948)
-                                          $g2949))
+                                              [$g2982 (cadr args)]
+                                              (gc-root $g2982)
+                                              (symp $g2982))]
+                                          (gc-sp-set $g2980)
+                                          $g2981))
                                       (=
                                         (let
-                                          [$g2951 (gc-sp)]
+                                          [$g2983 (gc-sp)]
                                           (let
-                                            [$g2952
+                                            [$g2984
                                               (let
-                                                [$g2953 (car args)]
-                                                (gc-root $g2953)
-                                                (sym-id $g2953))]
-                                            (gc-sp-set $g2951)
-                                            $g2952))
+                                                [$g2985 (car args)]
+                                                (gc-root $g2985)
+                                                (sym-id $g2985))]
+                                            (gc-sp-set $g2983)
+                                            $g2984))
                                         (let
-                                          [$g2954 (gc-sp)]
+                                          [$g2986 (gc-sp)]
                                           (let
-                                            [$g2955
+                                            [$g2987
                                               (let
-                                                [$g2956 (cadr args)]
-                                                (gc-root $g2956)
-                                                (sym-id $g2956))]
-                                            (gc-sp-set $g2954)
-                                            $g2955)))))
+                                                [$g2988 (cadr args)]
+                                                (gc-root $g2988)
+                                                (sym-id $g2988))]
+                                            (gc-sp-set $g2986)
+                                            $g2987)))))
                                   1
                                   0)))
                             (if
                               (= op 11)
                               (do
-                                (gc-sp-set $g2913)
+                                (gc-sp-set $g2945)
                                 (mk-bool
                                   (if
                                     (let
-                                      [$g2957 (gc-sp)]
+                                      [$g2989 (gc-sp)]
                                       (let
-                                        [$g2958
+                                        [$g2990
                                           (let
-                                            [$g2959 (car args)]
-                                            (gc-root $g2959)
-                                            (truthy $g2959))]
-                                        (gc-sp-set $g2957)
-                                        $g2958))
+                                            [$g2991 (car args)]
+                                            (gc-root $g2991)
+                                            (truthy $g2991))]
+                                        (gc-sp-set $g2989)
+                                        $g2990))
                                     0
                                     1)))
-                              (do (gc-sp-set $g2913) (snil)))))))))))))))))
+                              (do (gc-sp-set $g2945) (snil)))))))))))))))))
 
 (defn
   eval-args
   [(exprs (ptr Val)) (env (ptr Val))]
   (-> (ptr Val))
   (let
-    [$g2901 (gc-sp)]
+    [$g2933 (gc-sp)]
     (do
       (gc-root exprs)
       (gc-root env)
       (if
         (nullp exprs)
-        (do (gc-sp-set $g2901) (snil))
+        (do (gc-sp-set $g2933) (snil))
         (let
-          [$g2902
+          [$g2934
             (let
-              [$g2903 (gc-sp)]
+              [$g2935 (gc-sp)]
               (let
-                [$g2904
+                [$g2936
                   (let
-                    [$g2908
+                    [$g2940
                       (let
-                        [$g2905 (gc-sp)]
+                        [$g2937 (gc-sp)]
                         (let
-                          [$g2906
-                            (let [$g2907 (car exprs)] (gc-root $g2907) (seval $g2907 env))]
-                          (gc-sp-set $g2905)
-                          $g2906))]
-                    (gc-root $g2908)
+                          [$g2938
+                            (let [$g2939 (car exprs)] (gc-root $g2939) (seval $g2939 env))]
+                          (gc-sp-set $g2937)
+                          $g2938))]
+                    (gc-root $g2940)
                     (let
-                      [$g2912
+                      [$g2944
                         (let
-                          [$g2909 (gc-sp)]
+                          [$g2941 (gc-sp)]
                           (let
-                            [$g2910
+                            [$g2942
                               (let
-                                [$g2911 (cdr exprs)]
-                                (gc-root $g2911)
-                                (eval-args $g2911 env))]
-                            (gc-sp-set $g2909)
-                            $g2910))]
-                      (gc-root $g2912)
-                      (cons $g2908 $g2912)))]
-                (gc-sp-set $g2903)
-                $g2904))]
-          (gc-sp-set $g2901)
-          $g2902)))))
+                                [$g2943 (cdr exprs)]
+                                (gc-root $g2943)
+                                (eval-args $g2943 env))]
+                            (gc-sp-set $g2941)
+                            $g2942))]
+                      (gc-root $g2944)
+                      (cons $g2940 $g2944)))]
+                (gc-sp-set $g2935)
+                $g2936))]
+          (gc-sp-set $g2933)
+          $g2934)))))
 
 (defn
   eval-seq
   [(exprs (ptr Val)) (env (ptr Val))]
   (-> (ptr Val))
   (let
-    [$g2892 (gc-sp)]
+    [$g2924 (gc-sp)]
     (do
       (gc-root exprs)
       (gc-root env)
       (if
         (let
-          [$g2893 (gc-sp)]
+          [$g2925 (gc-sp)]
           (let
-            [$g2894 (let [$g2895 (cdr exprs)] (gc-root $g2895) (nullp $g2895))]
-            (gc-sp-set $g2893)
-            $g2894))
+            [$g2926 (let [$g2927 (cdr exprs)] (gc-root $g2927) (nullp $g2927))]
+            (gc-sp-set $g2925)
+            $g2926))
         (let
-          [$g2896 (car exprs)]
-          (gc-root $g2896)
-          (do (gc-sp-set $g2892) (seval $g2896 env)))
+          [$g2928 (car exprs)]
+          (gc-root $g2928)
+          (do (gc-sp-set $g2924) (seval $g2928 env)))
         (let
           [ignore
             (let
-              [$g2898 (gc-sp)]
+              [$g2930 (gc-sp)]
               (let
-                [$g2899 (let [$g2900 (car exprs)] (gc-root $g2900) (seval $g2900 env))]
-                (gc-sp-set $g2898)
-                $g2899))]
+                [$g2931 (let [$g2932 (car exprs)] (gc-root $g2932) (seval $g2932 env))]
+                (gc-sp-set $g2930)
+                $g2931))]
           (gc-root ignore)
           (do
             (let
-              [$g2897 (cdr exprs)]
-              (gc-root $g2897)
-              (do (gc-sp-set $g2892) (eval-seq $g2897 env)))))))))
+              [$g2929 (cdr exprs)]
+              (gc-root $g2929)
+              (do (gc-sp-set $g2924) (eval-seq $g2929 env)))))))))
 
 (defn
   apply-fn
   [(fn (ptr Val)) (args (ptr Val))]
   (-> (ptr Val))
   (let
-    [$g2887 (gc-sp)]
+    [$g2919 (gc-sp)]
     (do
       (gc-root fn)
       (gc-root args)
       (if
         (= (tag-of fn) 6)
-        (do (gc-sp-set $g2887) (prim-apply (prim-op fn) args))
+        (do (gc-sp-set $g2919) (prim-apply (prim-op fn) args))
         (if
           (= (tag-of fn) 5)
           (let
@@ -456,25 +456,25 @@
                 (let
                   [cenv
                     (let
-                      [$g2889 (gc-sp)]
+                      [$g2921 (gc-sp)]
                       (let
-                        [$g2890 (let [$g2891 (cdr pbe)] (gc-root $g2891) (cdr $g2891))]
-                        (gc-sp-set $g2889)
-                        $g2890))]
+                        [$g2922 (let [$g2923 (cdr pbe)] (gc-root $g2923) (cdr $g2923))]
+                        (gc-sp-set $g2921)
+                        $g2922))]
                   (gc-root cenv)
                   (do
                     (let
-                      [$g2888 (extend-env params args cenv)]
-                      (gc-root $g2888)
-                      (do (gc-sp-set $g2887) (seval body $g2888))))))))
-          (do (gc-sp-set $g2887) fn))))))
+                      [$g2920 (extend-env params args cenv)]
+                      (gc-root $g2920)
+                      (do (gc-sp-set $g2919) (seval body $g2920))))))))
+          (do (gc-sp-set $g2919) fn))))))
 
 (defn
   seval
   [(expr (ptr Val)) (env (ptr Val))]
   (-> (ptr Val))
   (let
-    [$g2848 (gc-sp)]
+    [$g2880 (gc-sp)]
     (do
       (gc-root expr)
       (gc-root env)
@@ -482,146 +482,24 @@
         [tg (tag-of expr)]
         (if
           (= tg 3)
-          (do (gc-sp-set $g2848) (lookup expr env))
+          (do (gc-sp-set $g2880) (lookup expr env))
           (if
             (not (= tg 2))
-            (do (gc-sp-set $g2848) expr)
+            (do (gc-sp-set $g2880) expr)
             (let
               [head (car expr)]
               (gc-root head)
               (do
                 (if
                   (is-sym head "quote")
-                  (do (gc-sp-set $g2848) (cadr expr))
+                  (do (gc-sp-set $g2880) (cadr expr))
                   (if
                     (is-sym head "if")
                     (if
                       (let
-                        [$g2849 (gc-sp)]
+                        [$g2881 (gc-sp)]
                         (let
-                          [$g2850
-                            (let
-                              [$g2854
-                                (let
-                                  [$g2851 (gc-sp)]
-                                  (let
-                                    [$g2852
-                                      (let
-                                        [$g2853 (cadr expr)]
-                                        (gc-root $g2853)
-                                        (seval $g2853 env))]
-                                    (gc-sp-set $g2851)
-                                    $g2852))]
-                              (gc-root $g2854)
-                              (truthy $g2854))]
-                          (gc-sp-set $g2849)
-                          $g2850))
-                      (let
-                        [$g2855 (caddr expr)]
-                        (gc-root $g2855)
-                        (do (gc-sp-set $g2848) (seval $g2855 env)))
-                      (let
-                        [$g2856 (cadddr expr)]
-                        (gc-root $g2856)
-                        (do (gc-sp-set $g2848) (seval $g2856 env))))
-                    (if
-                      (is-sym head "lambda")
-                      (let
-                        [$g2857
-                          (let
-                            [$g2858 (gc-sp)]
-                            (let
-                              [$g2859
-                                (let
-                                  [$g2867
-                                    (let
-                                      [$g2860 (gc-sp)]
-                                      (let
-                                        [$g2861
-                                          (let
-                                            [$g2862 (cadr expr)]
-                                            (gc-root $g2862)
-                                            (let
-                                              [$g2866
-                                                (let
-                                                  [$g2863 (gc-sp)]
-                                                  (let
-                                                    [$g2864
-                                                      (let
-                                                        [$g2865 (caddr expr)]
-                                                        (gc-root $g2865)
-                                                        (cons $g2865 env))]
-                                                    (gc-sp-set $g2863)
-                                                    $g2864))]
-                                              (gc-root $g2866)
-                                              (cons $g2862 $g2866)))]
-                                        (gc-sp-set $g2860)
-                                        $g2861))]
-                                  (gc-root $g2867)
-                                  (mk-closure $g2867))]
-                              (gc-sp-set $g2858)
-                              $g2859))]
-                        (gc-sp-set $g2848)
-                        $g2857)
-                      (if
-                        (is-sym head "define")
-                        (let
-                          [v
-                            (let
-                              [$g2878 (gc-sp)]
-                              (let
-                                [$g2879
-                                  (let
-                                    [$g2880 (caddr expr)]
-                                    (gc-root $g2880)
-                                    (seval $g2880 env))]
-                                (gc-sp-set $g2878)
-                                $g2879))]
-                          (gc-root v)
-                          (do
-                            (let
-                              [$g2868 (gc-sp)]
-                              (let
-                                [$g2869
-                                  (let
-                                    [$g2877
-                                      (let
-                                        [$g2870 (gc-sp)]
-                                        (let
-                                          [$g2871
-                                            (let
-                                              [$g2875
-                                                (let
-                                                  [$g2872 (gc-sp)]
-                                                  (let
-                                                    [$g2873
-                                                      (let
-                                                        [$g2874 (cadr expr)]
-                                                        (gc-root $g2874)
-                                                        (cons $g2874 v))]
-                                                    (gc-sp-set $g2872)
-                                                    $g2873))]
-                                              (gc-root $g2875)
-                                              (let
-                                                [$g2876 (genv)]
-                                                (gc-root $g2876)
-                                                (cons $g2875 $g2876)))]
-                                          (gc-sp-set $g2870)
-                                          $g2871))]
-                                    (gc-root $g2877)
-                                    (set-genv! $g2877))]
-                                (gc-sp-set $g2868)
-                                $g2869))
-                            (do (gc-sp-set $g2848) (cadr expr))))
-                        (if
-                          (is-sym head "begin")
-                          (let
-                            [$g2881 (cdr expr)]
-                            (gc-root $g2881)
-                            (do (gc-sp-set $g2848) (eval-seq $g2881 env)))
-                          (let
-                            [$g2882 (seval head env)]
-                            (gc-root $g2882)
+                          [$g2882
                             (let
                               [$g2886
                                 (let
@@ -629,62 +507,184 @@
                                   (let
                                     [$g2884
                                       (let
-                                        [$g2885 (cdr expr)]
+                                        [$g2885 (cadr expr)]
                                         (gc-root $g2885)
-                                        (eval-args $g2885 env))]
+                                        (seval $g2885 env))]
                                     (gc-sp-set $g2883)
                                     $g2884))]
                               (gc-root $g2886)
-                              (do (gc-sp-set $g2848) (apply-fn $g2882 $g2886)))))))))))))))))
+                              (truthy $g2886))]
+                          (gc-sp-set $g2881)
+                          $g2882))
+                      (let
+                        [$g2887 (caddr expr)]
+                        (gc-root $g2887)
+                        (do (gc-sp-set $g2880) (seval $g2887 env)))
+                      (let
+                        [$g2888 (cadddr expr)]
+                        (gc-root $g2888)
+                        (do (gc-sp-set $g2880) (seval $g2888 env))))
+                    (if
+                      (is-sym head "lambda")
+                      (let
+                        [$g2889
+                          (let
+                            [$g2890 (gc-sp)]
+                            (let
+                              [$g2891
+                                (let
+                                  [$g2899
+                                    (let
+                                      [$g2892 (gc-sp)]
+                                      (let
+                                        [$g2893
+                                          (let
+                                            [$g2894 (cadr expr)]
+                                            (gc-root $g2894)
+                                            (let
+                                              [$g2898
+                                                (let
+                                                  [$g2895 (gc-sp)]
+                                                  (let
+                                                    [$g2896
+                                                      (let
+                                                        [$g2897 (caddr expr)]
+                                                        (gc-root $g2897)
+                                                        (cons $g2897 env))]
+                                                    (gc-sp-set $g2895)
+                                                    $g2896))]
+                                              (gc-root $g2898)
+                                              (cons $g2894 $g2898)))]
+                                        (gc-sp-set $g2892)
+                                        $g2893))]
+                                  (gc-root $g2899)
+                                  (mk-closure $g2899))]
+                              (gc-sp-set $g2890)
+                              $g2891))]
+                        (gc-sp-set $g2880)
+                        $g2889)
+                      (if
+                        (is-sym head "define")
+                        (let
+                          [v
+                            (let
+                              [$g2910 (gc-sp)]
+                              (let
+                                [$g2911
+                                  (let
+                                    [$g2912 (caddr expr)]
+                                    (gc-root $g2912)
+                                    (seval $g2912 env))]
+                                (gc-sp-set $g2910)
+                                $g2911))]
+                          (gc-root v)
+                          (do
+                            (let
+                              [$g2900 (gc-sp)]
+                              (let
+                                [$g2901
+                                  (let
+                                    [$g2909
+                                      (let
+                                        [$g2902 (gc-sp)]
+                                        (let
+                                          [$g2903
+                                            (let
+                                              [$g2907
+                                                (let
+                                                  [$g2904 (gc-sp)]
+                                                  (let
+                                                    [$g2905
+                                                      (let
+                                                        [$g2906 (cadr expr)]
+                                                        (gc-root $g2906)
+                                                        (cons $g2906 v))]
+                                                    (gc-sp-set $g2904)
+                                                    $g2905))]
+                                              (gc-root $g2907)
+                                              (let
+                                                [$g2908 (genv)]
+                                                (gc-root $g2908)
+                                                (cons $g2907 $g2908)))]
+                                          (gc-sp-set $g2902)
+                                          $g2903))]
+                                    (gc-root $g2909)
+                                    (set-genv! $g2909))]
+                                (gc-sp-set $g2900)
+                                $g2901))
+                            (do (gc-sp-set $g2880) (cadr expr))))
+                        (if
+                          (is-sym head "begin")
+                          (let
+                            [$g2913 (cdr expr)]
+                            (gc-root $g2913)
+                            (do (gc-sp-set $g2880) (eval-seq $g2913 env)))
+                          (let
+                            [$g2914 (seval head env)]
+                            (gc-root $g2914)
+                            (let
+                              [$g2918
+                                (let
+                                  [$g2915 (gc-sp)]
+                                  (let
+                                    [$g2916
+                                      (let
+                                        [$g2917 (cdr expr)]
+                                        (gc-root $g2917)
+                                        (eval-args $g2917 env))]
+                                    (gc-sp-set $g2915)
+                                    $g2916))]
+                              (gc-root $g2918)
+                              (do (gc-sp-set $g2880) (apply-fn $g2914 $g2918)))))))))))))))))
 
 (defn
   def-prim
   [(name (slice u8)) (op i64)]
   (-> i64)
   (let
-    [$g2847 (gc-sp)]
+    [$g2879 (gc-sp)]
     (do
       (let
-        [$g2836 (gc-sp)]
+        [$g2868 (gc-sp)]
         (let
-          [$g2837
+          [$g2869
             (let
-              [$g2846
+              [$g2878
                 (let
-                  [$g2838 (gc-sp)]
+                  [$g2870 (gc-sp)]
                   (let
-                    [$g2839
+                    [$g2871
                       (let
-                        [$g2844
+                        [$g2876
                           (let
-                            [$g2840 (gc-sp)]
+                            [$g2872 (gc-sp)]
                             (let
-                              [$g2841
+                              [$g2873
                                 (let
-                                  [$g2842 (mk-sym (intern name))]
-                                  (gc-root $g2842)
+                                  [$g2874 (mk-sym (intern name))]
+                                  (gc-root $g2874)
                                   (let
-                                    [$g2843 (mk-prim op)]
-                                    (gc-root $g2843)
-                                    (cons $g2842 $g2843)))]
-                              (gc-sp-set $g2840)
-                              $g2841))]
-                        (gc-root $g2844)
-                        (let [$g2845 (genv)] (gc-root $g2845) (cons $g2844 $g2845)))]
-                    (gc-sp-set $g2838)
-                    $g2839))]
-              (gc-root $g2846)
-              (set-genv! $g2846))]
-          (gc-sp-set $g2836)
-          $g2837))
-      (do (gc-sp-set $g2847) 0))))
+                                    [$g2875 (mk-prim op)]
+                                    (gc-root $g2875)
+                                    (cons $g2874 $g2875)))]
+                              (gc-sp-set $g2872)
+                              $g2873))]
+                        (gc-root $g2876)
+                        (let [$g2877 (genv)] (gc-root $g2877) (cons $g2876 $g2877)))]
+                    (gc-sp-set $g2870)
+                    $g2871))]
+              (gc-root $g2878)
+              (set-genv! $g2878))]
+          (gc-sp-set $g2868)
+          $g2869))
+      (do (gc-sp-set $g2879) 0))))
 
 (defn
   setup-prims
   []
   (-> i64)
   (let
-    [$g2835 (gc-sp)]
+    [$g2867 (gc-sp)]
     (do
       (def-prim "+" 0)
       (def-prim "-" 1)
@@ -698,86 +698,86 @@
       (def-prim "pair?" 9)
       (def-prim "eq?" 10)
       (def-prim "not" 11)
-      (do (gc-sp-set $g2835) 0))))
+      (do (gc-sp-set $g2867) 0))))
 
 (defn
   run-forms
   [(fs (ptr (ArrayList Sexp))) (i i64) (n i64)]
   (-> (ptr Val))
   (let
-    [$g2828 (gc-sp)]
+    [$g2860 (gc-sp)]
     (do
       (if
         (icmp-ge i (- n 1))
         (let
-          [$g2829 (sexp->val (forms-nth fs i))]
-          (gc-root $g2829)
+          [$g2861 (sexp->val (forms-nth fs i))]
+          (gc-root $g2861)
           (let
-            [$g2830 (snil)]
-            (gc-root $g2830)
-            (do (gc-sp-set $g2828) (seval $g2829 $g2830))))
+            [$g2862 (snil)]
+            (gc-root $g2862)
+            (do (gc-sp-set $g2860) (seval $g2861 $g2862))))
         (let
           [ignore
             (let
-              [$g2831 (gc-sp)]
+              [$g2863 (gc-sp)]
               (let
-                [$g2832
+                [$g2864
                   (let
-                    [$g2833 (sexp->val (forms-nth fs i))]
-                    (gc-root $g2833)
-                    (let [$g2834 (snil)] (gc-root $g2834) (seval $g2833 $g2834)))]
-                (gc-sp-set $g2831)
-                $g2832))]
+                    [$g2865 (sexp->val (forms-nth fs i))]
+                    (gc-root $g2865)
+                    (let [$g2866 (snil)] (gc-root $g2866) (seval $g2865 $g2866)))]
+                (gc-sp-set $g2863)
+                $g2864))]
           (gc-root ignore)
-          (do (do (gc-sp-set $g2828) (run-forms fs (+ i 1) n))))))))
+          (do (do (gc-sp-set $g2860) (run-forms fs (+ i 1) n))))))))
 
 (defn
   main
   []
   (-> :i64)
   (let
-    [$g2823 (gc-sp)]
+    [$g2855 (gc-sp)]
     (do
       (let
-        [$g2820 (gc-sp)]
+        [$g2852 (gc-sp)]
         (let
-          [$g2821 (let [$g2822 (snil)] (gc-root $g2822) (set-genv! $g2822))]
-          (gc-sp-set $g2820)
-          $g2821))
+          [$g2853 (let [$g2854 (snil)] (gc-root $g2854) (set-genv! $g2854))]
+          (gc-sp-set $g2852)
+          $g2853))
       (setup-prims)
       (let
         [a (malloc-allocator) src (read-stdin a)]
         (let
-          [$g2824
+          [$g2856
             (match
               (read-all a src 0)
-              (Err [d] (do (do (io.print-str (stderr) "parse error
+              (Err [d] (do (do (coil.io.print-str (stderr) "parse error
 ")) 1))
               (Ok
                 [fs]
                 (do
                   (let
-                    [$g2825 (gc-sp)]
+                    [$g2857 (gc-sp)]
                     (let
-                      [$g2826
+                      [$g2858
                         (let
-                          [$g2827 (run-forms fs 0 (forms-count fs))]
-                          (gc-root $g2827)
-                          (print-val $g2827))]
-                      (gc-sp-set $g2825)
-                      $g2826))
-                  (do (io.print-str (stdout) "
+                          [$g2859 (run-forms fs 0 (forms-count fs))]
+                          (gc-root $g2859)
+                          (print-val $g2859))]
+                      (gc-sp-set $g2857)
+                      $g2858))
+                  (do (coil.io.print-str (stdout) "
 "))
                   (do
-                    (io.print-str (stderr) "[gc] peak_live=")
-                    (fmt.print-i (stderr) (gc-peak))
-                    (io.print-str (stderr) "  collections=")
-                    (fmt.print-i (stderr) (gc-collections))
-                    (io.print-str (stderr) "  total_alloc=")
-                    (fmt.print-i (stderr) (gc-total))
-                    (io.print-str (stderr) "
+                    (coil.io.print-str (stderr) "[gc] peak_live=")
+                    (coil.fmt.print-i (stderr) (gc-peak))
+                    (coil.io.print-str (stderr) "  collections=")
+                    (coil.fmt.print-i (stderr) (gc-collections))
+                    (coil.io.print-str (stderr) "  total_alloc=")
+                    (coil.fmt.print-i (stderr) (gc-total))
+                    (coil.io.print-str (stderr) "
 "))
                   0)))]
-          (gc-sp-set $g2823)
-          $g2824)))))
+          (gc-sp-set $g2855)
+          $g2856)))))
 

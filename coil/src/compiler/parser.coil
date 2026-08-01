@@ -2470,6 +2470,98 @@
                (store! (field t methods) (box-al [TraitMethod] a (load methods)))
                (load t))))))
 
+; Dynamic-trait layouts are compiler-owned declarations.  Creating them while the
+; trait itself is parsed makes `(dyn Trait)` available to every later type position,
+; including while the metaprogram context is being assembled (before a source-level
+; `defdyn` call could have expanded).  The names remain an internal lowering detail;
+; resolution exposes them through the originating trait, not as separately exported
+; declarations.
+(defn dyn-vtable-fields [(a (ptr Allocator)) (td (ptr TraitDef))] (-> (ptr (ArrayList Field)))
+  (let [methods (load (field td methods))
+        n (al-len [TraitMethod] (load methods))
+        (mut fields) (al-new [Field] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [mp (index (load (field methods data)) (load i))
+                      ps (load (field mp params))
+                      np (al-len [Param] (load ps))
+                      (mut erased) (al-new [Type] a)
+                      (mut j) 0]
+                  (loop (if (icmp-ge (load j) np)
+                            (break)
+                            (do
+                              (if (icmp-eq (load j) 0)
+                                  (al-push! (mut erased) (TPtr (box-type a (TInt 8 false))))
+                                  (al-push! (mut erased) (load (field (index (load (field ps data)) (load j)) ty))))
+                              (store! j (iadd (load j) 1)))))
+                  (let [fp (alloc-stack Field)]
+                    (store! (field fp name) (load (field mp name)))
+                    (store! (field fp ty)
+                            (TFn "c"
+                                 (box-al [Type] a (load erased))
+                                 (box-type a (load (field mp ret)))))
+                    (al-push! (mut fields) (load fp))))
+                (store! i (iadd (load i) 1)))))
+    (box-al [Field] a (load fields))))
+
+(defn dyn-struct-def [(a (ptr Allocator)) (td (ptr TraitDef)) (vtable bool)] (-> StructDef)
+  (let [name (load (field td name))
+        vtname (sconcat a name "-vtable")
+        (mut fields) (al-new [Field] a)]
+    (if vtable
+        (let [generated (dyn-vtable-fields a td)]
+          (store! fields (load generated)))
+        (let [dataf (alloc-stack Field)
+              vtf (alloc-stack Field)]
+          (store! (field dataf name) "data")
+          (store! (field dataf ty) (TPtr (box-type a (TInt 8 false))))
+          (al-push! (mut fields) (load dataf))
+          (store! (field vtf name) "vtable")
+          (store! (field vtf ty) (TPtr (box-type a (TStruct vtname))))
+          (al-push! (mut fields) (load vtf))))
+    (let [sd (alloc-stack StructDef)]
+      (store! (field sd name) (if vtable vtname (sconcat a name "-dyn")))
+      (store! (field sd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+      (store! (field sd bounds) (box-al [Bound] a (al-new [Bound] a)))
+      (store! (field sd layout) (LC))
+      (store! (field sd fields) (box-al [Field] a (load fields)))
+      (load sd))))
+
+(defn dyn-self-param? [(t (ptr Type)) (self-name (slice u8))] (-> bool)
+  (match-else (load t)
+              (TPtr [p] (match-else (load p) (TStruct [n] (str-eq n self-name)) (_ false)))
+              (_ false)))
+
+(defn trait-object-safe? [(td (ptr TraitDef))] (-> bool)
+  (let [self-name (load (field td self_param))
+        methods (load (field td methods))
+        n (al-len [TraitMethod] (load methods))
+        (mut i) 0
+        (mut safe) true]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [mp (index (load (field methods data)) (load i))
+                      ps (load (field mp params))
+                      np (al-len [Param] (load ps))]
+                  (if (or (icmp-eq np 0)
+                          (not (dyn-self-param? (field (index (load (field ps data)) 0) ty) self-name)))
+                      (store! safe false)
+                      (let [(mut j) 1]
+                        (loop (if (icmp-ge (load j) np)
+                                  (break)
+                                  (do
+                                    (when (type-mentions-name (field (index (load (field ps data)) (load j)) ty) self-name)
+                                          (store! safe false)
+                                          (break))
+                                    (store! j (iadd (load j) 1)))))
+                        (when (type-mentions-name (field mp ret) self-name) (store! safe false) 0))))
+                (when (not (load safe)) (break))
+                (store! i (iadd (load i) 1)))))
+    (load safe)))
+
 ; `(impl Trait Type …)` or the GENERIC form `(impl [T] Trait (ArrayList T) …)`:
 ; an optional leading type-parameter vector, then the
 ; full implementing type. Each method carries the impl's type params as its own
@@ -2813,10 +2905,16 @@
                                               (str-eq head "deftrait")
                                                 (match (parse-deftrait a rest)
                                                   (Ok [t]
-                                                      (do
+                                                      (let [tp (alloc-stack TraitDef)]
+                                                        (store! tp t)
                                                         (al-push! (mut traits) t)
+                                                        (when (trait-object-safe? tp)
+                                                              (al-push! (mut structs) (dyn-struct-def a tp true))
+                                                              (al-push! (mut structs) (dyn-struct-def a tp false))
+                                                              0)
                                                         (Ok [i64 Diag] 0)))
                                                   (Err [d] (Err [i64 Diag] d)))
+                                              (str-eq head "defdyn-marker") (Ok [i64 Diag] 0)
                                               (str-eq head "impl")
                                                 (match (parse-impl a
                                                                    rest

@@ -14,12 +14,18 @@ names), `f65ab9213` (trait methods + the undefined-reference check).
 ## The forms
 
 ```lisp
-(module app)                              ; this file's namespace
+(module myproject.app)                    ; convention: project-prefixed namespace
 (import "src/stdlib/control.coil" :use *)        ; refer ALL of control's exported names
 (import "src/stdlib/slice.coil"   :use [slice-for push])  ; refer just these
 (import "src/stdlib/io.coil"      :as io)        ; qualified access only: (io/print …)
 (export foo Bar)                          ; what THIS module exposes (default: all public)
 ```
+
+Module names are symbols and may be dotted. Project code conventionally owns a
+prefix and declares `myproject`, `myproject.http`, `myproject.db.user`, and so on;
+the compiler does not require this convention. A leading owner scope is supported,
+so `(module @myname.project.thing)` is also a valid module identity. Imports remain
+path-based and `:as` supplies the short name used at call sites.
 
 - `import` alone (`(import "x.coil")`) makes a module's names reachable **only**
   qualified via an alias — it does **not** refer anything. This matches Clojure's

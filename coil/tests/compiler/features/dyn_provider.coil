@@ -1,0 +1,12 @@
+(module dyn_provider)
+
+(export ModelProvider Provider)
+
+(deftrait ModelProvider [Self]
+  (run [(self (ptr Self))] (-> i64)))
+
+(defstruct Provider [(value i64)])
+
+(impl ModelProvider Provider
+  (run [(self (ptr Provider))] (-> i64)
+    (load (field self value))))

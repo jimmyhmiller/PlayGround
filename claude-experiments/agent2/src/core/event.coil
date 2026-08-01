@@ -1,0 +1,106 @@
+(module harness-event)
+
+(import "atomic.coil" :use *)
+(import "../core/json.coil" :use *)
+
+;; Stable semantic lifecycle categories. Additions are expected; existing meanings
+;; must not be repurposed because persisted event streams and UIs depend on them.
+(defsum EventKind
+  (RunStarted [])
+  (RunCompleted [])
+  (RunFailed [])
+  (RunCancelled [])
+  (ModelRequestStarted [])
+  (ModelResponseDelta [])
+  (ModelRequestCompleted [])
+  (ModelRequestFailed [])
+  (ToolCallProposed [])
+  (ToolCallAuthorized [])
+  (ToolCallRejected [])
+  (ToolCallStarted [])
+  (ToolCallCompleted [])
+  (ToolCallFailed [])
+  (CodexNotification []))
+
+;; A structured observation. Payload is provider-neutral JSON; adapters may include
+;; provider-specific data under a namespaced member without changing this envelope.
+(defstruct Event
+  [(version i64)
+   (sequence i64)
+   (timestamp-ms i64)
+   (kind EventKind)
+   (run-id (slice u8))
+   (operation-id (slice u8))
+   (parent-operation-id (slice u8))
+   (provider (slice u8))
+   (model (slice u8))
+   (payload Json)])
+
+;; Event sinks are synchronous capabilities. Implementations must copy data they
+;; retain and be safe for concurrent calls from the parallel tool executor.
+(deftrait EventSink [Self]
+  (publish-event [(self (ptr Self)) (event (ptr Event))] (-> i64)))
+
+(defstruct NoopEventSink [])
+
+(impl EventSink NoopEventSink
+  (publish-event [(self (ptr NoopEventSink)) (event (ptr Event))] (-> i64) 0))
+
+;; An emitter owns global ordering for one run. `next-sequence` is atomic because
+;; model and tool workers may publish concurrently.
+(defstruct EventEmitter
+  [(sink (dyn EventSink))
+   (next-sequence (ptr i64))])
+
+;; Create an emitter over caller-owned sequence storage. The sequence cell must
+;; outlive every worker that uses the emitter.
+(defn event-emitter-new [(sink (dyn EventSink)) (next-sequence (ptr i64))] (-> EventEmitter)
+  (let [emitter (alloc-stack EventEmitter)]
+    (store! (field emitter sink) sink)
+    (store! (field emitter next-sequence) next-sequence)
+    (load emitter)))
+
+;; Publish one event and return its assigned sequence number.
+(defn emit-event [(emitter (ptr EventEmitter))
+                  (timestamp-ms i64)
+                  (kind EventKind)
+                  (run-id (slice u8))
+                  (operation-id (slice u8))
+                  (parent-operation-id (slice u8))
+                  (provider (slice u8))
+                  (model (slice u8))
+                  (payload Json)] (-> i64)
+  (let [sequence (atomic-add (load (field emitter next-sequence)) 1)
+        event (alloc-stack Event)
+        sink (field emitter sink)]
+    (store! (field event version) 1)
+    (store! (field event sequence) sequence)
+    (store! (field event timestamp-ms) timestamp-ms)
+    (store! (field event kind) kind)
+    (store! (field event run-id) run-id)
+    (store! (field event operation-id) operation-id)
+    (store! (field event parent-operation-id) parent-operation-id)
+    (store! (field event provider) provider)
+    (store! (field event model) model)
+    (store! (field event payload) payload)
+    (publish-event (load sink) event)
+    sequence))
+
+;; Stable wire name for an event category.
+(defn event-kind-name [(kind EventKind)] (-> (slice u8))
+  (match kind
+    (RunStarted [] "run.started")
+    (RunCompleted [] "run.completed")
+    (RunFailed [] "run.failed")
+    (RunCancelled [] "run.cancelled")
+    (ModelRequestStarted [] "model.request.started")
+    (ModelResponseDelta [] "model.response.delta")
+    (ModelRequestCompleted [] "model.request.completed")
+    (ModelRequestFailed [] "model.request.failed")
+    (ToolCallProposed [] "tool.call.proposed")
+    (ToolCallAuthorized [] "tool.call.authorized")
+    (ToolCallRejected [] "tool.call.rejected")
+    (ToolCallStarted [] "tool.call.started")
+    (ToolCallCompleted [] "tool.call.completed")
+    (ToolCallFailed [] "tool.call.failed")
+    (CodexNotification [] "codex.notification")))

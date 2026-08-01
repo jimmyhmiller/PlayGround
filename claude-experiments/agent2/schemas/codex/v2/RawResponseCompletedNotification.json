@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RawResponseCompletedNotification",
+  "description": "Internal-only notification containing the exact usage from one upstream Responses API completion.",
+  "type": "object",
+  "required": [
+    "responseId",
+    "threadId",
+    "turnId"
+  ],
+  "properties": {
+    "responseId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    },
+    "usage": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TokenUsageBreakdown"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "TokenUsageBreakdown": {
+      "type": "object",
+      "required": [
+        "cachedInputTokens",
+        "inputTokens",
+        "outputTokens",
+        "reasoningOutputTokens",
+        "totalTokens"
+      ],
+      "properties": {
+        "cacheWriteInputTokens": {
+          "default": 0,
+          "type": "integer",
+          "format": "int64"
+        },
+        "cachedInputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "inputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "outputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reasoningOutputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "totalTokens": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    }
+  }
+}

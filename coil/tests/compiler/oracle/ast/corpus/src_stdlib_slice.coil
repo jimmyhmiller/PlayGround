@@ -109,21 +109,26 @@ ret $ret %d"))
 
 (defn slice-empty? [T] [(s (slice T))] (-> bool) (icmp-eq (slice-len s) 0))
 
-(defn slice-get [T] [(s (slice T)) (i i64)] (-> T) (load (index (slice.slice-data s) i)))
+(defn
+  slice-get
+  [T]
+  [(s (slice T)) (i i64)]
+  (-> T)
+  (load (index (coil.slice.slice-data s) i)))
 
 (defn
   slice-set!
   [T]
   [(s (slice T)) (i i64) (v T)]
   (-> i64)
-  (do (store! (index (slice.slice-data s) i) v) 0))
+  (do (store! (index (coil.slice.slice-data s) i) v) 0))
 
 (defn
   subslice
   [T]
   [(s (slice T)) (lo i64) (hi i64)]
   (-> (slice T))
-  (slice.slice-new (index (slice.slice-data s) lo) (isub hi lo)))
+  (coil.slice.slice-new (index (coil.slice.slice-data s) lo) (isub hi lo)))
 
 (defn
   slice-of

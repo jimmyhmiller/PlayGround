@@ -21,6 +21,9 @@ inside it, so `coil` and every `(import \"…\")` below work from any directory.
     coil build file.coil -o out          # build a native executable
     coil build file.coil --target wasm32-unknown-unknown -o out.wasm
     coil run                             # build+run the ./Coil.toml project
+    coil test                            # discover and run project test suites
+    coil check                           # check every project target graph
+    coil verify                          # fmt + lint + check + native build + test
     coil run -- arg1 arg2                # forward args to the program
     coil build file.coil -lm             # link a library (-l<name>)
     coil repl                            # interactive session
@@ -39,6 +42,41 @@ imported must start with `(module NAME)`. `Coil.toml`:
     remote_math = { git = \"https://example.com/math.git\", sha = \"0123456789abcdef0123456789abcdef01234567\" }
     [link]
     libs = [\"m\"]             # -> -lm
+
+Project tools inherit the same package, native, target, and link configuration as
+`coil build`. A fuller project can declare:
+
+    [package]
+    name = \"app\"
+    entry = \"src/main.coil\"
+    source-roots = [\"src\", \"tests\"]
+    exclude = [\"src/generated/*\"]
+
+    [cc]
+    sources = [\"native/app.c\"]
+    include-dirs = [\"native\"]
+    flags = [\"-std=c11\", \"-Wall\"]
+
+    [link]
+    libs = [\"curl\"]
+    search-paths = []
+    frameworks = []
+    objects = []
+    flags = []
+
+    [native-dependencies]
+    libcurl = { pkg-config = \"libcurl\" }
+
+    [test]
+    roots = [\"tests\"]
+    suffixes = [\"_test.coil\"]
+
+    [lint]
+    rules = [\"tools/project_rules.coil\"]
+
+Native objects and depfiles live under `.coil/build/native/`; sources and headers
+are rebuilt only when their inputs or toolchain configuration change. Test runners
+use collision-free paths under `.coil/build/test/`.
 
 A dependency name is the first component of its import path: the examples above
 are imported as `\"local_math/src/math.coil\"` and
@@ -79,11 +117,22 @@ module declares (the DOM calls you `extern`-declared), then call
 
 ## Modules & imports
 
-    (module app)                         ; every importable file starts with this
+    (module myproject.app)               ; conventional project-prefixed namespace
     (import \"other.coil\" :use *)         ; bring all exported names in, unqualified
     (import \"other.coil\" :use [a b])     ; specific names
-    (import \"other.coil\" :as x)          ; qualified: x.name
+    (import \"other.coil\" :as x)          ; qualified: x/name
     (export foo bar)                     ; optional; omitted = everything visible
+
+Module names may contain dots. By convention, every project owns a prefix and uses
+it for all importable modules: `myproject`, `myproject.http`, `myproject.db.user`,
+and so on. This is a convention, not a compiler requirement; a one-part name remains
+valid. Public/package namespaces may also use a leading owner scope, for example
+`(module @myname.project.thing)`. The complete scoped name is the module identity;
+imports still use file paths, and callers normally choose a short local `:as` alias.
+
+The bundled standard library follows the same rule under `coil.*`: `coil.core`,
+`coil.json`, `coil.http`, `coil.slice`, etc. Bare import filenames such as
+`\"json.coil\"` remain unchanged.
 
 Paths resolve relative to the **importing file's own directory**; bare stdlib
 names (`alloc.coil`, `str.coil`, …) resolve to the bundled library from anywhere.
@@ -189,12 +238,15 @@ definitions are reported rather than silently selected. For a generic target:
       (get [(b (Box T))] (-> T) …))
     (let [b (Box::box 42)] (get b))              ; T inferred = i64
 
-**Trait objects:** `(defdyn Trait)` after the trait reflects its methods into a vtable.
-A `(dyn Trait)` param then accepts a pointer to *any* implementer — the coercion is
-automatic at call/return sites, or explicit with `(make-dyn Trait p)`. The trait's
-methods must take `(self (ptr Self))`. ⚠ `defdyn` lives in the `dyn` module, which —
-unlike every other library listed at the end — is **not** bundled into the compiler;
-you need its source alongside your program.
+**Trait objects:** `(dyn Trait)` is a copyable two-word value containing the concrete
+object pointer and a compiler-generated vtable pointer. It is valid in every ordinary
+type position: fields, sums, locals, parameters, returns, arrays, and generic containers.
+The legacy `dyn` module and `(defdyn Trait)` remain available to request explicit
+object-safety diagnostics, but are not required. A concrete `(ptr Implementer)` coerces automatically wherever a
+`(dyn Trait)` is expected, or explicitly with `(make-dyn Trait p)`. The trait's methods
+must take `(self (ptr Self))`; later parameters and the return type may not mention
+`Self`. Copying the dynamic value does not copy or preserve the concrete object: its
+`data` pointer follows the same validity rules as any other Coil pointer.
 
 ## Numbers, bool, casts
 
@@ -559,6 +611,17 @@ every definition's doc, e.g. to enforce that exported functions are documented.
 
     coil test mytests.coil            ; exit 0 iff all pass
 
+Inside a project, `coil test FILE` inherits `Coil.toml`, including `[cc]`, `[link]`,
+dependencies, and the configured target. With no file, Coil discovers every suite
+under `[test].roots` whose name has a configured suffix (defaults: `tests/` and
+`_test.coil`):
+
+    coil test                         ; all suites
+    coil test provider                ; suites whose paths contain \"provider\"
+    coil test --list                  ; discovered suite paths
+    coil test --jobs 4                ; build/run four suite binaries concurrently
+    coil test --no-run                ; compile and link without executing
+
 A failure prints the offending expression and its `file:line`, recovered at expansion
 time via `code-src`/`code-line`, then aborts.
 
@@ -592,6 +655,7 @@ anywhere, no path or install step:
 `alloc` (allocators), `arraylist`, `hashmap`, `slice`, `str`, `mem`, `io`, `fmt`,
 `print`, `fs` (files), `result` (Option/Result), `control` (case/while/for/…),
 `match`, `try`, `thread`, `atomic`, `simd`, `closure`, `derive`, `mmio`, `sexp`,
+`json` (zero-copy token-tape parser), `http` (zero-copy HTTP/1.x requests),
 `assert` (assert/deftest), `dbgalloc` and `stacklint` (both used by
 `--debug-checks`). The common ones are summarized above; import a module and call
 its functions directly.

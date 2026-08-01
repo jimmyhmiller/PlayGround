@@ -1,0 +1,47 @@
+(module harness-native)
+
+;; This module is the only place that declares the C bridge. Keeping every extern
+;; here avoids duplicate linker declarations and prevents POSIX/libcurl details from
+;; leaking into domain modules.
+
+(defstruct NativeBuffer [(data (ptr u8)) (len i64)])
+
+(defstruct NativeHttpResponse
+  [(transport-code i64)
+   (status-code i64)
+   (body NativeBuffer)
+   (error NativeBuffer)])
+
+(defstruct NativeProcess
+  [(pid i64)
+   (input-fd i64)
+   (output-fd i64)
+   (reader (ptr i8))])
+
+(defstruct NativeProcessResult
+  [(code i64)
+   (process NativeProcess)
+   (error NativeBuffer)])
+
+(extern harness_http_post
+        :cc
+        c
+        [(ptr i8)
+         (ptr (ptr i8))
+         (ptr u8)
+         i64
+         i64
+         (fnptr c [(ptr u8) usize (ptr i8)] usize)
+         (ptr i8)]
+        (-> NativeHttpResponse))
+
+(extern harness_buffer_free :cc c [NativeBuffer] (-> void))
+(extern harness_now_ms :cc c [] (-> i64))
+(extern harness_sleep_ms :cc c [i64] (-> void))
+(extern harness_getenv :cc c [(ptr i8)] (-> (ptr i8)))
+(extern harness_current_dir :cc c [] (-> NativeBuffer))
+(extern harness_write_fd :cc c [i64 (ptr u8) i64] (-> i64))
+(extern harness_codex_spawn :cc c [] (-> NativeProcessResult))
+(extern harness_process_write_line :cc c [(ptr NativeProcess) (ptr u8) i64] (-> i64))
+(extern harness_process_read_line :cc c [(ptr NativeProcess) (ptr NativeBuffer) i64] (-> i64))
+(extern harness_process_close :cc c [(ptr NativeProcess)] (-> i64))

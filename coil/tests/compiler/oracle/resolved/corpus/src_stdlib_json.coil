@@ -1,0 +1,427 @@
+(const JSON-NULL 0)
+
+(const JSON-BOOL 1)
+
+(const JSON-NUMBER 2)
+
+(const JSON-STRING 3)
+
+(const JSON-ARRAY 4)
+
+(const JSON-OBJECT 5)
+
+(defstruct Token [(kind i64) (start i64) (end i64) (aux i64)])
+
+(defstruct Doc [(source (slice u8)) (tokens (arraylist/ArrayList Token))])
+
+(defstruct Error [(offset i64) (code i64)])
+
+(defstruct
+  JsonParser
+  [(source (slice u8)) (pos i64) (status i64) (tokens (arraylist/ArrayList Token))])
+
+(defn
+  json-fail
+  [(p (ptr JsonParser)) (code i64)]
+  (-> i64)
+  (if (icmp-eq (load (field p status)) 0) (store! (field p status) code) 0)
+  0)
+
+(defn
+  json-end?
+  [(p (ptr JsonParser))]
+  (-> bool)
+  (icmp-ge (load (field p pos)) (slice/slice-len (load (field p source)))))
+
+(defn
+  json-peek
+  [(p (ptr JsonParser))]
+  (-> i64)
+  (if
+    (json-end? p)
+    -1
+    (cast i64 (slice/slice-get (load (field p source)) (load (field p pos))))))
+
+(defn
+  json-advance
+  [(p (ptr JsonParser))]
+  (-> i64)
+  (store! (field p pos) (iadd (load (field p pos)) 1))
+  0)
+
+(defn
+  json-ws?
+  [(c i64)]
+  (-> bool)
+  (or (icmp-eq c 32) (or (icmp-eq c 9) (or (icmp-eq c 10) (icmp-eq c 13)))))
+
+(defn
+  json-skip-ws
+  [(p (ptr JsonParser))]
+  (-> i64)
+  (loop (if (json-ws? (json-peek p)) (json-advance p) (break)))
+  0)
+
+(defn json-digit? [(c i64)] (-> bool) (and (icmp-ge c 48) (icmp-le c 57)))
+
+(defn
+  json-hex?
+  [(c i64)]
+  (-> bool)
+  (or
+    (and (icmp-ge c 48) (icmp-le c 57))
+    (or (and (icmp-ge c 97) (icmp-le c 102)) (and (icmp-ge c 65) (icmp-le c 70)))))
+
+(defn
+  json-add-token
+  [(p (ptr JsonParser)) (kind i64) (start i64) (end i64) (aux i64)]
+  (-> i64)
+  (let
+    [(mut t) (zeroed Token) idx (arraylist/al-len (field p tokens))]
+    (store! (field t kind) kind)
+    (store! (field t start) start)
+    (store! (field t end) end)
+    (store! (field t aux) aux)
+    (arraylist/al-push! (mut (field p tokens)) (load t))
+    idx))
+
+(defn
+  json-match-byte
+  [(p (ptr JsonParser)) (want i64)]
+  (-> i64)
+  (if (icmp-eq (json-peek p) want) (json-advance p) (json-fail p 1)))
+
+(defn
+  json-literal
+  [(p (ptr JsonParser)) (lit (slice u8)) (kind i64) (aux i64)]
+  (-> i64)
+  (let
+    [start (load (field p pos)) (mut i) 0]
+    (loop
+      (if
+        (icmp-ge (load i) (slice/slice-len lit))
+        (break)
+        (if
+          (icmp-eq (json-peek p) (cast i64 (slice/slice-get lit (load i))))
+          (do (json-advance p) (store! i (iadd (load i) 1)))
+          (do (json-fail p 2) (break)))))
+    (if
+      (icmp-eq (load (field p status)) 0)
+      (json-add-token p kind start (load (field p pos)) aux)
+      -1)))
+
+(defn
+  parse-string
+  [(p (ptr JsonParser))]
+  (-> i64)
+  (let
+    [quote (load (field p pos))]
+    (json-advance p)
+    (let
+      [start (load (field p pos)) (mut done) false]
+      (loop
+        (let
+          [c (json-peek p)]
+          (if
+            (icmp-eq c -1)
+            (do (json-fail p 3) (break))
+            (if
+              (icmp-eq c 34)
+              (do (store! done true) (break))
+              (if
+                (icmp-lt c 32)
+                (do (json-fail p 4) (break))
+                (if
+                  (icmp-eq c 92)
+                  (do
+                    (json-advance p)
+                    (let
+                      [e (json-peek p)]
+                      (if
+                        (or
+                          (or
+                            (icmp-eq e 34)
+                            (or
+                              (icmp-eq e 92)
+                              (or
+                                (icmp-eq e 47)
+                                (or (icmp-eq e 98) (or (icmp-eq e 102) (icmp-eq e 110))))))
+                          (or (icmp-eq e 114) (icmp-eq e 116)))
+                        (json-advance p)
+                        (if
+                          (icmp-eq e 117)
+                          (do
+                            (json-advance p)
+                            (let
+                              [(mut n) 0]
+                              (loop
+                                (if
+                                  (icmp-ge (load n) 4)
+                                  (break)
+                                  (if
+                                    (json-hex? (json-peek p))
+                                    (do (json-advance p) (store! n (iadd (load n) 1)))
+                                    (do (json-fail p 5) (break)))))))
+                          (json-fail p 5)))))
+                  (json-advance p)))))))
+      (if
+        (and (load done) (icmp-eq (load (field p status)) 0))
+        (let
+          [end (load (field p pos))]
+          (json-advance p)
+          (json-add-token p JSON-STRING start end quote))
+        -1))))
+
+(defn
+  parse-number
+  [(p (ptr JsonParser))]
+  (-> i64)
+  (let
+    [start (load (field p pos))]
+    (if (icmp-eq (json-peek p) 45) (json-advance p) 0)
+    (if
+      (icmp-eq (json-peek p) 48)
+      (json-advance p)
+      (if
+        (and (icmp-ge (json-peek p) 49) (icmp-le (json-peek p) 57))
+        (loop (if (json-digit? (json-peek p)) (json-advance p) (break)))
+        (json-fail p 6)))
+    (if
+      (and (icmp-eq (load (field p status)) 0) (icmp-eq (json-peek p) 46))
+      (do
+        (json-advance p)
+        (if
+          (json-digit? (json-peek p))
+          (loop (if (json-digit? (json-peek p)) (json-advance p) (break)))
+          (json-fail p 6)))
+      0)
+    (if
+      (and
+        (icmp-eq (load (field p status)) 0)
+        (or (icmp-eq (json-peek p) 101) (icmp-eq (json-peek p) 69)))
+      (do
+        (json-advance p)
+        (if (or (icmp-eq (json-peek p) 43) (icmp-eq (json-peek p) 45)) (json-advance p) 0)
+        (if
+          (json-digit? (json-peek p))
+          (loop (if (json-digit? (json-peek p)) (json-advance p) (break)))
+          (json-fail p 6)))
+      0)
+    (if
+      (icmp-eq (load (field p status)) 0)
+      (json-add-token p JSON-NUMBER start (load (field p pos)) 0)
+      -1)))
+
+(defn
+  parse-value
+  [(p (ptr JsonParser))]
+  (-> i64)
+  (json-skip-ws p)
+  (let
+    [c (json-peek p)]
+    (if
+      (icmp-eq c 110)
+      (json-literal p "null" JSON-NULL 0)
+      (if
+        (icmp-eq c 116)
+        (json-literal p "true" JSON-BOOL 1)
+        (if
+          (icmp-eq c 102)
+          (json-literal p "false" JSON-BOOL 0)
+          (if
+            (icmp-eq c 34)
+            (parse-string p)
+            (if
+              (icmp-eq c 91)
+              (parse-container p false)
+              (if
+                (icmp-eq c 123)
+                (parse-container p true)
+                (if
+                  (or (icmp-eq c 45) (json-digit? c))
+                  (parse-number p)
+                  (do (json-fail p 7) -1))))))))))
+
+(defn
+  parse-container
+  [(p (ptr JsonParser)) (is-object? bool)]
+  (-> i64)
+  (let
+    [open
+      (load (field p pos))
+      idx
+      (json-add-token p (if is-object? JSON-OBJECT JSON-ARRAY) open 0 0)
+      close
+      (if is-object? 125 93)
+      (mut count)
+      0]
+    (json-advance p)
+    (json-skip-ws p)
+    (if
+      (icmp-ne (json-peek p) close)
+      (loop
+        (if
+          is-object?
+          (if
+            (icmp-eq (json-peek p) 34)
+            (do (parse-string p) (json-skip-ws p) (json-match-byte p 58))
+            (json-fail p 8))
+          0)
+        (if
+          (icmp-eq (load (field p status)) 0)
+          (do (parse-value p) (store! count (iadd (load count) 1)))
+          0)
+        (json-skip-ws p)
+        (if
+          (icmp-ne (load (field p status)) 0)
+          (break)
+          (if (icmp-eq (json-peek p) 44) (do (json-advance p) (json-skip-ws p)) (break))))
+      0)
+    (if
+      (and (icmp-eq (load (field p status)) 0) (icmp-eq (json-peek p) close))
+      (do
+        (json-advance p)
+        (store!
+          (field (index (load (field (field p tokens) data)) idx) end)
+          (load (field p pos)))
+        (store! (field (index (load (field (field p tokens) data)) idx) aux) (load count)))
+      (json-fail p 9))
+    idx))
+
+(defn
+  parse
+  [(a (ptr alloc/Allocator)) (source (slice u8))]
+  (-> (Result Doc Error))
+  (let
+    [p (alloc-stack JsonParser)]
+    (store! (field p source) source)
+    (store! (field p pos) 0)
+    (store! (field p status) 0)
+    (store! (field p tokens) (arraylist/al-new [Token] a))
+    (parse-value p)
+    (json-skip-ws p)
+    (if
+      (and (icmp-eq (load (field p status)) 0) (json-end? p))
+      (let
+        [(mut d) (zeroed Doc)]
+        (store! (field d source) source)
+        (store! (field d tokens) (load (field p tokens)))
+        (Ok (load d)))
+      (let
+        [(mut e) (zeroed Error)]
+        (if (icmp-eq (load (field p status)) 0) (store! (field p status) 10) 0)
+        (store! (field e offset) (load (field p pos)))
+        (store! (field e code) (load (field p status)))
+        (Err (load e))))))
+
+(defn token-count [(d Doc)] (-> i64) (arraylist/al-len (field d tokens)))
+
+(defn token [(d Doc) (i i64)] (-> Token) (arraylist/al-get (load (field d tokens)) i))
+
+(defn root [(d Doc)] (-> Token) (token d 0))
+
+(defn kind [(t Token)] (-> i64) (load (field t kind)))
+
+(defn is-null? [(t Token)] (-> bool) (icmp-eq (kind t) JSON-NULL))
+
+(defn is-bool? [(t Token)] (-> bool) (icmp-eq (kind t) JSON-BOOL))
+
+(defn is-number? [(t Token)] (-> bool) (icmp-eq (kind t) JSON-NUMBER))
+
+(defn is-string? [(t Token)] (-> bool) (icmp-eq (kind t) JSON-STRING))
+
+(defn is-array? [(t Token)] (-> bool) (icmp-eq (kind t) JSON-ARRAY))
+
+(defn is-object? [(t Token)] (-> bool) (icmp-eq (kind t) JSON-OBJECT))
+
+(defn
+  span
+  [(d Doc) (t Token)]
+  (-> (slice u8))
+  (slice/subslice (load (field d source)) (load (field t start)) (load (field t end))))
+
+(defn bool [(t Token)] (-> bool) (icmp-ne (load (field t aux)) 0))
+
+(defn number-text [(d Doc) (t Token)] (-> (slice u8)) (span d t))
+
+(defn string-text [(d Doc) (t Token)] (-> (slice u8)) (span d t))
+
+(defn child-count [(t Token)] (-> i64) (load (field t aux)))
+
+(defn error-offset [(e Error)] (-> i64) (load (field e offset)))
+
+(defn error-code [(e Error)] (-> i64) (load (field e code)))
+
+(defn
+  json-next-index
+  [(d Doc) (i i64)]
+  (-> i64)
+  (let
+    [t (token d i) k (kind t)]
+    (if
+      (or (icmp-eq k JSON-ARRAY) (icmp-eq k JSON-OBJECT))
+      (let
+        [(mut at)
+          (iadd i 1)
+          (mut n)
+          0
+          total
+          (if (icmp-eq k JSON-OBJECT) (imul (child-count t) 2) (child-count t))]
+        (loop
+          (if
+            (icmp-ge (load n) total)
+            (break)
+            (do (store! at (json-next-index d (load at))) (store! n (iadd (load n) 1)))))
+        (load at))
+      (iadd i 1))))
+
+(defn
+  array-nth
+  [(d Doc) (array-index i64) (n i64)]
+  (-> i64)
+  (let
+    [(mut at) (iadd array-index 1) (mut i) 0]
+    (loop
+      (if
+        (icmp-ge (load i) n)
+        (break)
+        (do (store! at (json-next-index d (load at))) (store! i (iadd (load i) 1)))))
+    (load at)))
+
+(defn
+  object-key
+  [(d Doc) (object-index i64) (n i64)]
+  (-> i64)
+  (let
+    [(mut at) (iadd object-index 1) (mut i) 0]
+    (loop
+      (if
+        (icmp-ge (load i) n)
+        (break)
+        (do (store! at (json-next-index d (iadd (load at) 1))) (store! i (iadd (load i) 1)))))
+    (load at)))
+
+(defn
+  object-value
+  [(d Doc) (object-index i64) (n i64)]
+  (-> i64)
+  (iadd (object-key d object-index n) 1))
+
+(defn
+  object-get
+  [(d Doc) (object-index i64) (key (slice u8))]
+  (-> i64)
+  (let
+    [obj (token d object-index) (mut i) 0 (mut found) -1]
+    (loop
+      (if
+        (icmp-ge (load i) (child-count obj))
+        (break)
+        (let
+          [ki (object-key d object-index (load i))]
+          (if
+            (str/str-eq (string-text d (token d ki)) key)
+            (do (store! found (iadd ki 1)) (break))
+            (store! i (iadd (load i) 1))))))
+    (load found)))
+

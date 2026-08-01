@@ -1,0 +1,97 @@
+(module harness-http)
+
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "mem.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "../infra/native.coil" :use *)
+
+(defstruct HttpChunkSink
+  [(context (ptr i8))
+   (consume (fnptr c [(ptr u8) usize (ptr i8)] usize))])
+
+(defstruct HttpRequest
+  [(url (slice u8))
+   (headers (ptr (ArrayList (slice u8))))
+   (body (slice u8))
+   (timeout-ms i64)
+   (chunks HttpChunkSink)])
+
+(defstruct HttpResponse
+  [(transport-code i64)
+   (status-code i64)
+   (body (slice u8))
+   (error (slice u8))])
+
+(defn discard-http-chunk [(data (ptr u8)) (len usize) (context (ptr i8))] (-> usize)
+  len)
+
+(defn http-owned-copy [(allocator (ptr Allocator)) (buffer NativeBuffer)] (-> (slice u8))
+  (let [len (load (field buffer len))]
+    (if (icmp-le len 0)
+        ""
+        (match (raw-alloc allocator len 1)
+          (None [] "")
+          (Some [raw]
+                (let [destination (cast (ptr u8) raw)]
+                  (mem-copy [u8] destination (load (field buffer data)) len)
+                  (slice-new [u8] destination len)))))))
+
+;; Perform a JSON HTTP POST. Authentication values are supplied as complete header
+;; lines by the provider boundary and are never logged here.
+(defn http-post [(allocator (ptr Allocator)) (request (ptr HttpRequest))] (-> HttpResponse)
+  (let [headers (load (field request headers))
+        count (al-len [(slice u8)] (load headers))
+        pointer-bytes (imul (iadd count 1) (sizeof (ptr i8)))
+        header-pointers
+          (cast (ptr (ptr i8))
+                (unwrap-ptr [i8] (raw-alloc allocator pointer-bytes (alignof (ptr i8)))))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) count)
+              (break)
+              (do
+                (store! (index header-pointers (load i))
+                        (str->cstr allocator
+                                   (al-get [(slice u8)] (load headers) (load i))))
+                (store! i (iadd (load i) 1)))))
+    (store! (index header-pointers count) (cast (ptr i8) 0))
+    (let [url (str->cstr allocator (load (field request url)))
+          chunks (field request chunks)
+          native
+            (harness_http_post url
+                               header-pointers
+                               (slice-data [u8] (load (field request body)))
+                               (slice-len [u8] (load (field request body)))
+                               (load (field request timeout-ms))
+                               (load (field chunks consume))
+                               (load (field chunks context)))
+          result (alloc-stack HttpResponse)]
+      (store! (field result transport-code) (load (field native transport-code)))
+      (store! (field result status-code) (load (field native status-code)))
+      (store! (field result body)
+              (http-owned-copy allocator (load (field native body))))
+      (store! (field result error)
+              (http-owned-copy allocator (load (field native error))))
+      (harness_buffer_free (load (field native body)))
+      (harness_buffer_free (load (field native error)))
+      (store! i 0)
+      (loop (if (icmp-ge (load i) count)
+                (break)
+                (let [header (al-get [(slice u8)] (load headers) (load i))
+                      pointer (load (index header-pointers (load i)))]
+                  (raw-free allocator
+                            (cast (ptr i8) pointer)
+                            (iadd (slice-len [u8] header) 1)
+                            1)
+                  (store! i (iadd (load i) 1)))))
+      (raw-free allocator
+                (cast (ptr i8) url)
+                (iadd (slice-len [u8] (load (field request url))) 1)
+                1)
+      (raw-free allocator
+                (cast (ptr i8) header-pointers)
+                pointer-bytes
+                (alignof (ptr i8)))
+      (load result))))

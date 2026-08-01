@@ -1,4 +1,4 @@
-(module simd)
+(module coil.simd)
 ; SIMD as a *library* -- every operation is a macro over the `(llvm-ir ...)`
 ; primitive, so nothing here is in the compiler. Each op is a raw-IR template;
 ; `$ret`/`$tN` expand to the result/operand LLVM type strings and `$N` to the
