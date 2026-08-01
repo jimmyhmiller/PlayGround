@@ -647,10 +647,11 @@ as a struct field name. When in doubt, prefix your name (`p-call`, `vm-call`).
 
 These modules ship inside the compiler — `(import "NAME.coil" :use *)` works from
 anywhere, no path or install step:
-`alloc` (allocators), `arraylist`, `hashmap`, `slice`, `str`, `mem`, `io`, `fmt`,
-`print`, `fs` (files), `result` (Option/Result), `control` (case/while/for/…),
-`match`, `try`, `thread`, `atomic`, `simd`, `closure`, `derive`, `mmio`, `sexp`,
-`json` (zero-copy token-tape parser), `http` (zero-copy HTTP/1.x requests),
-`assert` (assert/deftest), `dbgalloc` and `stacklint` (both used by
+`coil.alloc` (allocators), `coil.arraylist`, `coil.hashmap`, `coil.slice`, `coil.str`,
+`coil.mem`, `coil.io`, `coil.fmt`, `coil.print`, `coil.fs` (files), `coil.result`
+(Option/Result), `coil.control` (case/while/for/…), `coil.match`, `coil.try`,
+`coil.thread`, `coil.atomic`, `coil.simd`, `coil.closure`, `coil.derive`, `coil.mmio`,
+`coil.sexp`, `coil.json` (zero-copy token-tape parser), `coil.http` (zero-copy HTTP/1.x requests),
+`coil.assert` (assert/deftest), `coil.dbgalloc` and `coil.stacklint` (both used by
 `--debug-checks`). The common ones are summarized above; import a module and call
 its functions directly.

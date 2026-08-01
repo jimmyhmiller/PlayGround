@@ -43,7 +43,7 @@ through module scope:
 |---|---|---|
 | Functions | `app.helper` | `main` is never renamed (the entry point) |
 | Structs / sums | `app.Point`, `app.Some` | variant constructors too |
-| **Macros** | `control.when` | a bare `(when …)` expands only if `when` is a macro visible here |
+| **Macros** | `coil.control.when` | a bare `(when …)` expands only if `when` is a macro visible here |
 | **Trait names** | `coil.core.Eq`, `app.Show` | you can define your own `Eq` without colliding |
 | **Trait methods** | `=`, `show` | name→all declaring traits; a call picks the one in scope |
 | Conventions | `app.fast2` | |
@@ -63,13 +63,13 @@ In order:
    for other positions, left bare for a later pass.
 
 `alias/name` skips straight to M's `:as` aliases (export-checked). A `.`-qualified
-head (`control.for`) is hygiene-generated and trusted as already-resolved.
+head (`coil.control.for`) is hygiene-generated and trusted as already-resolved.
 
 The same scoping is mirrored in three places, by design: the canonical name resolver,
 the decision of which `(head …)` calls are macro calls, and **referential hygiene** — a
 symbol written in a macro template resolves in the *macro's* namespace (own defs + the
 macro's own `:use`d imports), not the use site. This is why `slice-for`'s generated
-`(for …)` becomes `control.for` regardless of who calls `slice-for`, so a library's
+`(for …)` becomes `coil.control.for` regardless of who calls `slice-for`, so a library's
 macros work without the user importing the library's dependencies.
 
 ## coil.core (the prelude)
