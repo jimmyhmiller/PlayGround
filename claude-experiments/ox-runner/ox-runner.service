@@ -1,0 +1,30 @@
+[Unit]
+Description=Ox Alpha headless task runner
+Documentation=file:%h/ox-runner/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/ox-runner/bin/ox-daemon
+WorkingDirectory=%h/ox-runner
+Environment=OX_HOME=%h/ox-runner
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
+Restart=always
+RestartSec=5
+# If it crash-loops, back off rather than hammering the API.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ox-runner
+KillSignal=SIGTERM
+# Signal ONLY the daemon, not the whole cgroup: its TERM handler waits for
+# in-flight agent runs to finish and record themselves. With the default
+# control-group mode a restart SIGKILLs codex mid-task.
+KillMode=mixed
+# Give in-flight agent runs a chance to finish and record themselves.
+TimeoutStopSec=300
+
+[Install]
+WantedBy=default.target

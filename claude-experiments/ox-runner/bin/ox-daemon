@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Watch $OX_HOME/inbox for task markdown files and run them, up to
+# $OX_CONCURRENCY at a time. Designed to be supervised by systemd --user with
+# Restart=always: every failure mode here is either recorded or fatal-and-restart,
+# never a silent stall.
+
+set -uo pipefail
+
+# Resolve through symlinks so `ln -s ~/ox-runner/bin/ox ~/.local/bin/ox` works.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=ox-lib.sh
+. "$SELF_DIR/ox-lib.sh"
+
+OX_LOG_TAG="daemon"
+ox_ensure_dirs
+ox_load_env
+
+# Singleton: a second daemon would double-claim tasks.
+exec 8>"$OX_HOME/.daemon.lock"
+if ! flock -n 8; then
+  ox_die "another ox-daemon already holds $OX_HOME/.daemon.lock"
+fi
+echo $$ >&8
+
+RUNNING=0
+declare -A CHILD_TASK=()
+
+shutdown() {
+  ox_log "shutdown requested; waiting for ${#CHILD_TASK[@]} in-flight run(s)"
+  for pid in "${!CHILD_TASK[@]}"; do
+    wait "$pid" 2>/dev/null
+  done
+  ox_log "stopped"
+  exit 0
+}
+trap shutdown TERM INT
+
+# --- crash recovery ---------------------------------------------------------
+# Anything left in processing/ belongs to a dead run; put it back in the queue.
+# Attempt counts live in state/ so this cannot loop forever.
+recover() {
+  local f n=0
+  shopt -s nullglob
+  for f in "$OX_PROCESSING"/*.md; do
+    mv -f "$f" "$OX_INBOX/$(basename "$f")" && n=$((n + 1))
+  done
+  shopt -u nullglob
+  [ "$n" -gt 0 ] && ox_log "recovered $n orphaned task(s) from processing/ back into inbox/"
+  # Worktrees from dead runs waste disk; prune the ones with no live process.
+  local w m
+  shopt -s nullglob
+  for w in "$OX_WORK"/*; do
+    [ -d "$w" ] || continue
+    rm -rf "$w"
+  done
+  for m in "$OX_PROJECTS"/*; do
+    [ -d "$m/.git" ] && git -C "$m" worktree prune >/dev/null 2>&1
+  done
+  shopt -u nullglob
+  return 0
+}
+
+# A run dir with no meta.json belongs to a run that died before it could record
+# itself. Give it a real record, or it shows as in-flight forever.
+seal_orphan_runs() {
+  local d n=0 repo title
+  shopt -s nullglob
+  for d in "$OX_RUNS"/*; do
+    [ -d "$d" ] && [ ! -f "$d/meta.json" ] || continue
+    repo=""; title=""
+    if [ -f "$d/task.md" ]; then
+      repo="$(sed -n 's/^repo:[[:space:]]*//p' "$d/task.md" | head -1)"
+      title="$(sed -n 's/^title:[[:space:]]*//p' "$d/task.md" | head -1)"
+    fi
+    OX_M_run_id="$(basename "$d")" \
+    OX_M_status="interrupted" \
+    OX_M_reason="the runner died before this run could record itself" \
+    OX_M_retryable="true" \
+    OX_M_repo="$repo" \
+    OX_M_title="$title" \
+    OX_M_finished="$(ox_now)" \
+    OX_M_run_dir="$d" \
+      python3 "$SELF_DIR/ox-meta.py" > "$d/meta.json"
+    printf 'interrupted\n' > "$d/status"
+    ( flock 9; cat "$d/meta.json" >> "$OX_RUNSLOG" ) 9>"$OX_HOME/.runslog.lock"
+    n=$((n + 1))
+  done
+  shopt -u nullglob
+  [ "$n" -gt 0 ] && ox_log "sealed $n interrupted run(s) with no record"
+  return 0
+}
+
+reap() {
+  local pid
+  for pid in "${!CHILD_TASK[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null
+      ox_log "run finished for ${CHILD_TASK[$pid]}"
+      unset 'CHILD_TASK[$pid]'
+      RUNNING=$((RUNNING - 1))
+    fi
+  done
+}
+
+# A file is only claimable once it has stopped changing, so a half-written drop
+# (scp, editor save, rsync) is never picked up mid-write.
+is_settled() {
+  local f="$1" mtime now
+  mtime="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+  now="$(ox_epoch)"
+  [ "$mtime" -gt 0 ] && [ $((now - mtime)) -ge "$OX_SETTLE_SECONDS" ]
+}
+
+next_task() {
+  local f
+  shopt -s nullglob
+  for f in "$OX_INBOX"/*.md; do
+    if is_settled "$f"; then
+      printf '%s' "$f"
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
+ox_log "started (concurrency=$OX_CONCURRENCY poll=${OX_POLL_INTERVAL}s home=$OX_HOME)"
+ox_log "model=$OX_MODEL profile=$OX_PROFILE sandbox=$OX_SANDBOX timeout=${OX_TIMEOUT}s max_attempts=$OX_MAX_ATTEMPTS"
+if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  ox_log "WARNING: OPENROUTER_API_KEY is not set; every run will fail. Fix $OX_ENV."
+fi
+recover
+seal_orphan_runs
+
+while true; do
+  reap
+
+  while [ "$RUNNING" -lt "$OX_CONCURRENCY" ]; do
+    task="$(next_task)" || break
+
+    name="$(basename "$task")"
+    claimed="$OX_PROCESSING/$name"
+    if ! mv -n "$task" "$claimed" 2>/dev/null || [ ! -f "$claimed" ]; then
+      ox_log "could not claim $name; skipping this pass"
+      break
+    fi
+
+    run_id="$(ox_stamp)-$(ox_slug "${name%.md}")"
+    # Collision guard for two tasks claimed in the same second.
+    while [ -e "$OX_RUNS/$run_id" ]; do run_id="$run_id-x"; done
+    mkdir -p "$OX_RUNS/$run_id"
+
+    ox_log "starting run $run_id for $name"
+    "$SELF_DIR/ox-run" "$claimed" "$run_id" >>"$OX_LOGS/runner.log" 2>&1 &
+    pid=$!
+    CHILD_TASK[$pid]="$name ($run_id)"
+    RUNNING=$((RUNNING + 1))
+    printf '%s\n' "$run_id" > "$OX_HOME/.last-run"
+  done
+
+  sleep "$OX_POLL_INTERVAL"
+done

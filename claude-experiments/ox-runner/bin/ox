@@ -1,0 +1,527 @@
+#!/usr/bin/env bash
+# ox - control and monitor the Ox Alpha task runner.
+
+set -uo pipefail
+
+# Resolve through symlinks so `ln -s ~/ox-runner/bin/ox ~/.local/bin/ox` works.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=ox-lib.sh
+. "$SELF_DIR/ox-lib.sh"
+ox_ensure_dirs
+
+SERVICE="ox-runner.service"
+
+C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
+if [ ! -t 1 ]; then
+  C_RESET=""; C_DIM=""; C_BOLD=""; C_GREEN=""; C_RED=""; C_YELLOW=""; C_BLUE=""
+fi
+
+usage() {
+  cat <<EOF
+${C_BOLD}ox${C_RESET} - Ox Alpha headless task runner
+
+${C_BOLD}Queue${C_RESET}
+  ox new <repo> <title...>     Create a task from \$EDITOR and queue it
+  ox submit <file.md>          Queue an existing markdown file
+  ox queue                     Show inbox / in-flight tasks
+  ox cancel <task.md>          Pull a task back out of the inbox
+
+${C_BOLD}Monitor${C_RESET}
+  ox status [N]                Daemon health + last N runs (default 15)
+  ox watch                     Live-refreshing status
+  ox log [run-id|last]         Full agent log for a run
+  ox tail [run-id|last]        Follow a run's log live
+  ox diff [run-id|last]        The patch a run produced
+  ox show [run-id|last]        Everything about one run
+  ox runs [N]                  Raw JSONL records
+  ox stats                     Success rates and timings
+  ox snapshot                  One JSON snapshot of everything
+  ox stream                    A JSON line on every change (for the jim widget)
+
+${C_BOLD}Repos${C_RESET}
+  ox repos                     List registered repos
+  ox repo add <name> <url> [base]
+  ox repo rm <name>
+  ox repo import              Bulk-register from name<TAB>url<TAB>base on stdin
+  ox repo clone [jobs]       Clone every registered repo that is missing
+
+${C_BOLD}Service${C_RESET}
+  ox start | stop | restart    Control the daemon
+  ox logs [-f]                 Daemon journal
+  ox doctor                    Check every moving part
+  ox retry <run-id|task.md>    Requeue a failed task
+  ox failed                    List failed tasks and why
+
+Home: $OX_HOME
+EOF
+}
+
+# ---------------------------------------------------------------- helpers ---
+
+resolve_run() {
+  local want="${1:-last}"
+  if [ "$want" = "last" ] || [ -z "$want" ]; then
+    if [ -s "$OX_HOME/.last-run" ]; then
+      cat "$OX_HOME/.last-run"; return 0
+    fi
+    ls -1t "$OX_RUNS" 2>/dev/null | head -1; return 0
+  fi
+  if [ -d "$OX_RUNS/$want" ]; then printf '%s' "$want"; return 0; fi
+  # Allow a unique prefix or substring.
+  local matches
+  matches="$(ls -1 "$OX_RUNS" 2>/dev/null | grep -F -- "$want")"
+  local n; n="$(printf '%s' "$matches" | grep -c . )"
+  if [ "$n" -eq 1 ]; then printf '%s' "$matches"; return 0; fi
+  if [ "$n" -eq 0 ]; then echo "ox: no run matching '$want'" >&2; return 1; fi
+  echo "ox: '$want' is ambiguous:" >&2; printf '%s\n' "$matches" >&2; return 1
+}
+
+status_color() {
+  case "$1" in
+    success)                 printf '%s' "$C_GREEN" ;;
+    partial|no-changes)      printf '%s' "$C_YELLOW" ;;
+    running)                 printf '%s' "$C_BLUE" ;;
+    *)                       printf '%s' "$C_RED" ;;
+  esac
+}
+
+daemon_state() { systemctl --user is-active "$SERVICE" 2>/dev/null || echo unknown; }
+
+count_files() { ls -1 "$1"/*.md 2>/dev/null | wc -l | tr -d ' '; }
+
+# ------------------------------------------------------------------ status ---
+
+cmd_status() {
+  local n="${1:-15}"
+  local state; state="$(daemon_state)"
+  local scolor="$C_RED"; [ "$state" = "active" ] && scolor="$C_GREEN"
+
+  printf '%sdaemon%s   %s%s%s' "$C_BOLD" "$C_RESET" "$scolor" "$state" "$C_RESET"
+  if [ "$state" != "active" ]; then printf '   %s(ox start)%s' "$C_DIM" "$C_RESET"; fi
+  printf '\n'
+  printf '%squeue%s    %s waiting   %s in flight   %s done   %s failed\n' \
+    "$C_BOLD" "$C_RESET" \
+    "$(count_files "$OX_INBOX")" "$(count_files "$OX_PROCESSING")" \
+    "$(count_files "$OX_DONE")" "$(count_files "$OX_FAILED")"
+  printf '%smodel%s    %s (effort %s, sandbox %s, timeout %ss, up to %s at once)\n\n' \
+    "$C_BOLD" "$C_RESET" "$OX_MODEL" "$OX_EFFORT" "$OX_SANDBOX" "$OX_TIMEOUT" "$OX_CONCURRENCY"
+
+  # In-flight runs have a run dir but no meta.json yet.
+  local live=0 d
+  shopt -s nullglob
+  for d in "$OX_RUNS"/*; do
+    [ -d "$d" ] && [ ! -f "$d/meta.json" ] || continue
+    if [ "$live" -eq 0 ]; then printf '%sIN FLIGHT%s\n' "$C_BOLD" "$C_RESET"; live=1; fi
+    local since=""
+    [ -f "$d/codex.log" ] && since="$(tail -1 "$d/codex.log" 2>/dev/null | cut -c1-90)"
+    printf '  %s%-42s%s %s\n' "$C_BLUE" "$(basename "$d")" "$C_RESET" "${C_DIM}${since}${C_RESET}"
+  done
+  shopt -u nullglob
+  [ "$live" -eq 1 ] && printf '\n'
+
+  if [ ! -s "$OX_RUNSLOG" ]; then
+    printf '%sno completed runs yet%s\n' "$C_DIM" "$C_RESET"; return 0
+  fi
+
+  local color=0; [ -t 1 ] && color=1
+  tail -n "$n" "$OX_RUNSLOG" | OX_COLOR="$color" python3 "$SELF_DIR/ox-format.py" table
+}
+
+cmd_watch() {
+  while true; do
+    clear
+    cmd_status "${1:-12}"
+    printf '\n%srefreshing every 3s - ctrl-c to stop%s\n' "$C_DIM" "$C_RESET"
+    sleep 3
+  done
+}
+
+cmd_stats() {
+  [ -s "$OX_RUNSLOG" ] || { echo "no runs recorded yet"; return 0; }
+  python3 - "$OX_RUNSLOG" <<'PY'
+import json, sys
+from collections import Counter, defaultdict
+
+rows = []
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if line:
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            pass
+
+if not rows:
+    print("no parseable runs")
+    raise SystemExit
+
+status = Counter(r.get("status") for r in rows)
+total = len(rows)
+ok = status.get("success", 0)
+print(f"{total} runs recorded, {ok} clean successes ({ok*100//max(total,1)}%)\n")
+
+print("by status")
+for s, c in status.most_common():
+    print(f"  {s:<16} {c:>4}  {'#' * min(c, 40)}")
+
+per = defaultdict(list)
+for r in rows:
+    per[r.get("repo") or "?"].append(r)
+print("\nby repo")
+for repo, rs in sorted(per.items(), key=lambda kv: -len(kv[1])):
+    good = sum(1 for r in rs if r.get("status") == "success")
+    dur = [r.get("duration_seconds", 0) for r in rs]
+    print(f"  {repo:<20} {len(rs):>3} runs, {good:>3} ok, "
+          f"median {sorted(dur)[len(dur)//2]:>5}s, max {max(dur):>5}s")
+
+durs = sorted(r.get("duration_seconds", 0) for r in rows)
+print(f"\nduration  min {durs[0]}s  median {durs[len(durs)//2]}s  max {durs[-1]}s")
+lines = sum(r.get("insertions", 0) for r in rows), sum(r.get("deletions", 0) for r in rows)
+print(f"changes   +{lines[0]} -{lines[1]} across {sum(r.get('files_changed',0) for r in rows)} file touches")
+retried = [r for r in rows if r.get("attempt", 1) > 1]
+if retried:
+    print(f"retries   {len(retried)} runs were retries")
+PY
+}
+
+# -------------------------------------------------------------------- runs ---
+
+cmd_log()  { local r; r="$(resolve_run "${1:-last}")" || return 1
+             local f="$OX_RUNS/$r/codex.log"
+             [ -f "$f" ] || { echo "ox: no log yet for $r" >&2; return 1; }
+             ${PAGER:-less -R +G} "$f" 2>/dev/null || cat "$f"; }
+
+cmd_tail() { local r; r="$(resolve_run "${1:-last}")" || return 1
+             echo "${C_DIM}following $OX_RUNS/$r/codex.log${C_RESET}" >&2
+             tail -f -n 200 "$OX_RUNS/$r/codex.log"; }
+
+cmd_diff() { local r; r="$(resolve_run "${1:-last}")" || return 1
+             local f="$OX_RUNS/$r/diff.patch"
+             [ -s "$f" ] || { echo "ox: run $r produced no diff" >&2; return 1; }
+             if command -v delta >/dev/null; then delta < "$f"
+             else ${PAGER:-less -R} "$f" 2>/dev/null || cat "$f"; fi; }
+
+cmd_show() {
+  local r; r="$(resolve_run "${1:-last}")" || return 1
+  local d="$OX_RUNS/$r"
+  printf '%srun%s      %s\n' "$C_BOLD" "$C_RESET" "$r"
+  if [ -f "$d/meta.json" ]; then
+    local color=0; [ -t 1 ] && color=1
+    OX_COLOR="$color" python3 "$SELF_DIR/ox-format.py" show "$d/meta.json"
+  else
+    printf '%sstatus%s   %sstill running%s\n' "$C_BOLD" "$C_RESET" "$C_BLUE" "$C_RESET"
+  fi
+  if [ -s "$d/final-message.txt" ]; then
+    printf '\n%sagent summary%s\n' "$C_BOLD" "$C_RESET"
+    sed 's/^/  /' "$d/final-message.txt"
+  fi
+  if [ -s "$d/files.txt" ]; then
+    printf '\n%sfiles%s\n' "$C_BOLD" "$C_RESET"
+    sed 's/^/  /' "$d/files.txt"
+  fi
+  printf '\n%s  ox log %s   ox diff %s   %s%s\n' "$C_DIM" "$r" "$r" "$d" "$C_RESET"
+}
+
+cmd_runs() { tail -n "${1:-20}" "$OX_RUNSLOG"; }
+
+# ------------------------------------------------------------------- queue ---
+
+cmd_queue() {
+  local any=0 f
+  shopt -s nullglob
+  for f in "$OX_PROCESSING"/*.md; do
+    any=1; printf '%s[in flight]%s %s\n' "$C_BLUE" "$C_RESET" "$(basename "$f")"
+  done
+  for f in "$OX_INBOX"/*.md; do
+    any=1
+    local repo; repo="$(grep -m1 '^repo:' "$f" 2>/dev/null | sed 's/^repo:[[:space:]]*//')"
+    printf '%s[waiting]%s   %-40s %s\n' "$C_YELLOW" "$C_RESET" "$(basename "$f")" "${C_DIM}${repo}${C_RESET}"
+  done
+  shopt -u nullglob
+  [ "$any" -eq 0 ] && printf '%squeue is empty%s\n' "$C_DIM" "$C_RESET"
+  return 0
+}
+
+cmd_failed() {
+  local any=0 f
+  shopt -s nullglob
+  for f in "$OX_FAILED"/*.md; do
+    any=1
+    printf '%s%s%s\n' "$C_RED" "$(basename "$f")" "$C_RESET"
+    if [ -f "$f.last-run.json" ]; then
+      python3 "$SELF_DIR/ox-format.py" failed "$f.last-run.json"
+    fi
+  done
+  shopt -u nullglob
+  [ "$any" -eq 0 ] && printf '%sno failed tasks%s\n' "$C_DIM" "$C_RESET"
+  return 0
+}
+
+cmd_submit() {
+  local src="${1:?usage: ox submit <file.md>}"
+  [ -f "$src" ] || { echo "ox: no such file: $src" >&2; return 1; }
+  local body; body="$(mktemp)"
+  if ! python3 "$SELF_DIR/ox-parse-task.py" "$src" "$body" >/dev/null; then
+    rm -f "$body"; echo "ox: refusing to queue an invalid task" >&2; return 1
+  fi
+  rm -f "$body"
+  local name; name="$(basename "$src")"
+  # Never overwrite a queued task of the same name.
+  local dest="$OX_INBOX/$name"
+  if [ -e "$dest" ] || [ -e "$OX_PROCESSING/$name" ]; then
+    dest="$OX_INBOX/${name%.md}-$(ox_stamp).md"
+  fi
+  rm -f "$OX_STATE/$(basename "$dest").json"
+  cp "$src" "$dest.tmp" && mv "$dest.tmp" "$dest"
+  echo "queued $(basename "$dest")"
+}
+
+cmd_new() {
+  local repo="${1:?usage: ox new <repo> <title...>}"; shift
+  local title="$*"
+  [ -n "$title" ] || { echo "ox: give the task a title" >&2; return 1; }
+  if ! ox_repo_lookup "$repo" >/dev/null; then
+    echo "ox: '$repo' is not registered. Known repos:" >&2
+    ox_repo_names >&2
+    return 1
+  fi
+  local base; base="$(ox_repo_lookup "$repo" | cut -f2)"
+  local f; f="$(mktemp --suffix=.md)"
+  cat > "$f" <<EOF
+---
+repo: $repo
+base: ${base:-main}
+title: $title
+---
+
+# $title
+
+<!-- Describe the change. Be specific about files, behaviour and how to verify. -->
+EOF
+  "${EDITOR:-vi}" "$f" || { rm -f "$f"; return 1; }
+  local slug; slug="$(ox_slug "$title")"
+  local named="$(dirname "$f")/${slug:-task}.md"
+  mv "$f" "$named"
+  cmd_submit "$named"
+  rm -f "$named"
+}
+
+cmd_cancel() {
+  local name; name="$(basename "${1:?usage: ox cancel <task.md>}")"
+  if [ -f "$OX_INBOX/$name" ]; then
+    mv "$OX_INBOX/$name" "$OX_HOME/$name"
+    echo "pulled $name out of the queue -> $OX_HOME/$name"
+  elif [ -f "$OX_PROCESSING/$name" ]; then
+    echo "ox: $name is already running; stop the daemon to abort it" >&2; return 1
+  else
+    echo "ox: $name is not queued" >&2; return 1
+  fi
+}
+
+cmd_retry() {
+  local what="${1:?usage: ox retry <run-id|task.md>}"
+  local src=""
+  for cand in "$OX_FAILED/$what" "$OX_FAILED/$what.md" "$OX_DONE/$what" "$OX_DONE/$what.md"; do
+    [ -f "$cand" ] && { src="$cand"; break; }
+  done
+  if [ -z "$src" ]; then
+    local r; r="$(resolve_run "$what")" || return 1
+    [ -f "$OX_RUNS/$r/task.md" ] && src="$OX_RUNS/$r/task.md"
+  fi
+  [ -n "$src" ] || { echo "ox: cannot find a task for '$what'" >&2; return 1; }
+  cmd_submit "$src"
+}
+
+# ------------------------------------------------------------------- repos ---
+
+cmd_repos() {
+  if [ ! -s "$OX_REPOS" ]; then
+    printf '%sno repos registered - ox repo add <name> <git-url> [base]%s\n' "$C_DIM" "$C_RESET"; return 0
+  fi
+  printf '%s%-16s %-52s %-10s %s%s\n' "$C_BOLD" "NAME" "URL" "BASE" "CLONED" "$C_RESET"
+  while IFS=$'\t' read -r name url base; do
+    [ -n "$name" ] || continue
+    local cached="no"
+    [ -d "$(ox_project_path "$name")/.git" ] && cached="yes"
+    printf '%-16s %-52s %-10s %s\n' "$name" "$url" "$base" "$cached"
+  done < "$OX_REPOS"
+}
+
+cmd_repo() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    add)
+      local name="${1:?usage: ox repo add <name> <git-url> [base]}"
+      local url="${2:?usage: ox repo add <name> <git-url> [base]}"
+      local base="${3:-}"
+      case "$name" in *[!a-zA-Z0-9._-]*) echo "ox: repo name must be alphanumeric/dash/dot" >&2; return 1;; esac
+      if ox_repo_lookup "$name" >/dev/null; then
+        echo "ox: '$name' is already registered; remove it first" >&2; return 1
+      fi
+      if [ -z "$base" ]; then
+        echo "detecting default branch..."
+        base="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
+                 | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')"
+        [ -n "$base" ] || { echo "ox: could not reach $url; pass the base branch explicitly" >&2; return 1; }
+      fi
+      printf '%s\t%s\t%s\n' "$name" "$url" "$base" >> "$OX_REPOS"
+      echo "registered $name -> $url (base $base)"
+      local m; m="$(ox_project_path "$name")"
+      if [ -d "$m" ]; then
+        echo "checkout already present at $m"
+      elif [ "${OX_NO_CLONE:-0}" = "1" ]; then
+        echo "registered only; will clone into $m on first run"
+      else
+        echo "cloning into $m ..."
+        mkdir -p "$OX_PROJECTS"
+        if git clone --quiet "$url" "$m"; then
+          echo "cloned to $m"
+        else
+          rm -rf "$m"
+          echo "ox: clone failed - registered anyway, will retry on first run" >&2
+        fi
+      fi
+      ;;
+    import)
+      # name<TAB>url<TAB>base on stdin. Registers without cloning; clones are
+      # done by `ox repo clone` or lazily on a repo's first run.
+      local n=0 skipped=0 name url base
+      while IFS=$'\t' read -r name url base; do
+        [ -n "$name" ] && [ -n "$url" ] || continue
+        if ox_repo_lookup "$name" >/dev/null; then
+          skipped=$((skipped + 1)); continue
+        fi
+        printf '%s\t%s\t%s\n' "$name" "$url" "${base:-main}" >> "$OX_REPOS"
+        n=$((n + 1))
+      done
+      echo "registered $n repo(s), skipped $skipped already known"
+      ;;
+    clone)
+      # Clone every registered repo that is not on disk yet, a few at a time.
+      local jobs="${1:-4}" name m pids=0
+      while read -r name; do
+        [ -n "$name" ] || continue
+        m="$(ox_project_path "$name")"
+        [ -d "$m/.git" ] && continue
+        url="$(ox_repo_lookup "$name" | cut -f1)"
+        echo "cloning $name -> $m"
+        ( git clone --quiet "$url" "$m" 2>/dev/null || { rm -rf "$m"; echo "ox: FAILED to clone $name" >&2; } ) &
+        pids=$((pids + 1))
+        if [ "$pids" -ge "$jobs" ]; then wait -n 2>/dev/null || wait; pids=$((pids - 1)); fi
+      done < <(ox_repo_names)
+      wait
+      echo "done"
+      cmd_repos
+      ;;
+    rm|remove)
+      local name="${1:?usage: ox repo rm <name>}"
+      awk -v n="$name" -F'\t' '$1!=n' "$OX_REPOS" > "$OX_REPOS.tmp"
+      mv "$OX_REPOS.tmp" "$OX_REPOS"
+      echo "unregistered $name (checkout at $(ox_project_path "$name") left in place)"
+      ;;
+    *) echo "usage: ox repo add|rm|import|clone ..." >&2; return 1 ;;
+  esac
+}
+
+# ----------------------------------------------------------------- service ---
+
+cmd_start()   { systemctl --user start "$SERVICE"   && sleep 1 && cmd_status 5; }
+cmd_stop()    { systemctl --user stop "$SERVICE"    && echo "stopped"; }
+cmd_restart() { systemctl --user restart "$SERVICE" && sleep 1 && cmd_status 5; }
+cmd_logs()    { if [ "${1:-}" = "-f" ]; then journalctl --user -u "$SERVICE" -f
+                else journalctl --user -u "$SERVICE" -n "${1:-60}" --no-pager; fi; }
+
+cmd_doctor() {
+  local bad=0
+  local want_repos="${1:-}"
+  check() { # name, command
+    printf '  %-34s' "$1"
+    if eval "$2" >/dev/null 2>&1; then printf '%sok%s\n' "$C_GREEN" "$C_RESET"
+    else printf '%sFAIL%s\n' "$C_RED" "$C_RESET"; bad=$((bad+1)); fi
+  }
+  printf '%sox doctor%s\n' "$C_BOLD" "$C_RESET"
+  check "home layout"            "[ -d '$OX_INBOX' ] && [ -d '$OX_RUNS' ]"
+  check "api key present"        "[ -s '$OX_ENV' ] && grep -q OPENROUTER_API_KEY '$OX_ENV'"
+  check "api key permissions"    "[ \"\$(stat -c %a '$OX_ENV')\" = 600 ]"
+  check "codex installed"        "command -v codex"
+  check "codex ox profile"       "grep -q '\\[profiles.ox\\]' \$HOME/.codex/config.toml"
+  check "openrouter provider"    "grep -q 'model_providers.openrouter' \$HOME/.codex/config.toml"
+  check "git identity"           "git config --global user.email"
+  check "systemd unit installed" "systemctl --user cat $SERVICE"
+  check "daemon running"         "[ \"\$(systemctl --user is-active $SERVICE)\" = active ]"
+  check "linger enabled"         "loginctl show-user \$USER | grep -q Linger=yes"
+
+  printf '  %-34s' "openrouter reachable"
+  ox_load_env
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -m 20 \
+          -H "Authorization: Bearer ${OPENROUTER_API_KEY:-none}" \
+          https://openrouter.ai/api/v1/key 2>/dev/null)"
+  if [ "$code" = "200" ]; then printf '%sok%s\n' "$C_GREEN" "$C_RESET"
+  else printf '%sFAIL (http %s)%s\n' "$C_RED" "$code" "$C_RESET"; bad=$((bad+1)); fi
+
+  printf '  %-34s' "model $OX_MODEL available"
+  if curl -s -m 20 https://openrouter.ai/api/v1/models \
+       | grep -qF "\"$OX_MODEL\""; then printf '%sok%s\n' "$C_GREEN" "$C_RESET"
+  else printf '%sFAIL - model not listed (free window may be over)%s\n' "$C_RED" "$C_RESET"; bad=$((bad+1)); fi
+
+  local nrepos ncloned
+  nrepos="$(ox_repo_names | grep -c . )"
+  ncloned="$(ox_repo_names | while read -r n; do
+               [ -d "$(ox_project_path "$n")/.git" ] && echo x; done | grep -c . )"
+  printf '  %-34s%s registered, %s cloned into %s\n' \
+    "repos" "$nrepos" "$ncloned" "$OX_PROJECTS"
+
+  # Reaching every remote means one SSH round trip per repo, so it is opt-in.
+  if [ "$want_repos" = "--repos" ]; then
+    local name
+    while read -r name; do
+      [ -n "$name" ] || continue
+      printf '  %-34s' "  reach $name"
+      local url; url="$(ox_repo_lookup "$name" | cut -f1)"
+      if git ls-remote --exit-code -h "$url" >/dev/null 2>&1; then
+        printf '%sok%s\n' "$C_GREEN" "$C_RESET"
+      else printf '%sFAIL%s\n' "$C_RED" "$C_RESET"; bad=$((bad+1)); fi
+    done < <(ox_repo_names)
+  else
+    printf '  %-34s%s\n' "remote reachability" "skipped (ox doctor --repos)"
+  fi
+
+  printf '\n'
+  if [ "$bad" -eq 0 ]; then printf '%severything checks out%s\n' "$C_GREEN" "$C_RESET"
+  else printf '%s%s check(s) failed%s\n' "$C_RED" "$bad" "$C_RESET"; return 1; fi
+}
+
+# -------------------------------------------------------------------- main ---
+
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  status)   cmd_status "$@" ;;
+  watch)    cmd_watch "$@" ;;
+  stats)    cmd_stats ;;
+  log)      cmd_log "$@" ;;
+  tail)     cmd_tail "$@" ;;
+  diff)     cmd_diff "$@" ;;
+  show)     cmd_show "$@" ;;
+  runs)     cmd_runs "$@" ;;
+  snapshot) OX_MODEL="$OX_MODEL" OX_CONCURRENCY="$OX_CONCURRENCY" \
+              python3 "$SELF_DIR/ox-snapshot.py" "$@" ;;
+  stream)   OX_MODEL="$OX_MODEL" OX_CONCURRENCY="$OX_CONCURRENCY" \
+              python3 "$SELF_DIR/ox-snapshot.py" --stream "$@" ;;
+  queue|q)  cmd_queue ;;
+  failed)   cmd_failed ;;
+  submit)   cmd_submit "$@" ;;
+  new)      cmd_new "$@" ;;
+  cancel)   cmd_cancel "$@" ;;
+  retry)    cmd_retry "$@" ;;
+  repos)    cmd_repos ;;
+  repo)     cmd_repo "$@" ;;
+  start)    cmd_start ;;
+  stop)     cmd_stop ;;
+  restart)  cmd_restart ;;
+  logs)     cmd_logs "$@" ;;
+  doctor)   cmd_doctor ;;
+  help|-h|--help) usage ;;
+  *)        echo "ox: unknown command '$cmd'" >&2; usage >&2; exit 1 ;;
+esac

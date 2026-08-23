@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+# Execute a single ox task end to end:
+#   parse -> refresh mirror -> worktree -> codex exec -> commit -> push -> record
+#
+# Usage: ox-run <task-file-in-processing> <run-id>
+#
+# Never exits nonzero for an ordinary task failure; a failure is a recorded
+# outcome, not a crash. It exits nonzero only when it cannot record at all.
+
+set -uo pipefail
+
+# Resolve through symlinks so `ln -s ~/ox-runner/bin/ox ~/.local/bin/ox` works.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=ox-lib.sh
+. "$SELF_DIR/ox-lib.sh"
+
+TASK_FILE="${1:?usage: ox-run <task-file> <run-id>}"
+RUN_ID="${2:?usage: ox-run <task-file> <run-id>}"
+
+OX_LOG_TAG="run:$RUN_ID"
+ox_ensure_dirs
+ox_load_env
+
+RUN_DIR="$OX_RUNS/$RUN_ID"
+mkdir -p "$RUN_DIR"
+
+TASK_NAME="$(basename "$TASK_FILE")"
+STATE_FILE="$OX_STATE/$TASK_NAME.json"
+WORKTREE="$OX_WORK/$RUN_ID"
+
+START_EPOCH="$(ox_epoch)"
+START_TIME="$(ox_now)"
+
+# --- outcome accumulators, all recorded even on early exit -------------------
+STATUS="unknown"
+REASON=""
+RETRYABLE="false"
+REPO_NAME=""
+REPO_URL=""
+BASE_REF=""
+BASE_SHA=""
+BRANCH=""
+PUSHED="false"
+COMMITS=0
+FILES_CHANGED=0
+INSERTIONS=0
+DELETIONS=0
+CODEX_EXIT=""
+ATTEMPT=1
+
+attempt_count() {
+  if [ -f "$STATE_FILE" ]; then
+    python3 -c 'import json,sys
+try:
+    print(int(json.load(open(sys.argv[1])).get("attempts", 0)))
+except Exception:
+    print(0)' "$STATE_FILE"
+  else
+    echo 0
+  fi
+}
+
+write_state() {
+  python3 - "$STATE_FILE" "$1" "$RUN_ID" <<'PY'
+import json, sys
+path, attempts, run_id = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {}
+data["attempts"] = attempts
+data.setdefault("runs", []).append(run_id)
+json.dump(data, open(path, "w"), indent=2)
+PY
+}
+
+max_attempts() { echo "${TASK_ATTEMPTS:-$OX_MAX_ATTEMPTS}"; }
+
+cleanup_worktree() {
+  if [ -n "${PROJECT:-}" ] && [ -d "$WORKTREE" ]; then
+    git -C "$PROJECT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 \
+      || rm -rf "$WORKTREE"
+    git -C "$PROJECT" worktree prune >/dev/null 2>&1
+  fi
+}
+
+# Append the structured record and move the task file to its resting place.
+finish() {
+  local dur=$(( $(ox_epoch) - START_EPOCH ))
+  cleanup_worktree
+
+  # Values go through the environment, never through heredoc interpolation, so
+  # no shell value can ever be parsed as a Python expression.
+  OX_M_run_id="$RUN_ID" \
+  OX_M_task="$TASK_NAME" \
+  OX_M_title="${TASK_TITLE:-}" \
+  OX_M_status="$STATUS" \
+  OX_M_reason="$REASON" \
+  OX_M_retryable="$RETRYABLE" \
+  OX_M_attempt="$ATTEMPT" \
+  OX_M_max_attempts="$(max_attempts)" \
+  OX_M_repo="$REPO_NAME" \
+  OX_M_repo_url="$REPO_URL" \
+  OX_M_base="$BASE_REF" \
+  OX_M_base_sha="$BASE_SHA" \
+  OX_M_branch="$BRANCH" \
+  OX_M_pushed="$PUSHED" \
+  OX_M_commits="$COMMITS" \
+  OX_M_files_changed="$FILES_CHANGED" \
+  OX_M_insertions="$INSERTIONS" \
+  OX_M_deletions="$DELETIONS" \
+  OX_M_codex_exit="$CODEX_EXIT" \
+  OX_M_model="${TASK_MODEL:-$OX_MODEL}" \
+  OX_M_effort="${TASK_EFFORT:-$OX_EFFORT}" \
+  OX_M_sandbox="${TASK_SANDBOX:-$OX_SANDBOX}" \
+  OX_M_started="$START_TIME" \
+  OX_M_finished="$(ox_now)" \
+  OX_M_duration_seconds="$dur" \
+  OX_M_run_dir="$RUN_DIR" \
+  python3 "$SELF_DIR/ox-meta.py" >"$RUN_DIR/meta.json"
+
+
+  # A record that fails to write is silent data loss; refuse to let that happen.
+  if [ ! -s "$RUN_DIR/meta.json" ]; then
+    ox_log "ERROR: meta.json generation failed; writing a minimal record"
+    printf '{"run_id":"%s","status":"record-failed","reason":"meta.json generation failed","repo":"%s","run_dir":"%s"}\n' \
+      "$RUN_ID" "$REPO_NAME" "$RUN_DIR" > "$RUN_DIR/meta.json"
+  fi
+
+  printf '%s\n' "$STATUS" > "$RUN_DIR/status"
+
+  # Single-line append under a lock so parallel runs never interleave.
+  (
+    flock 9
+    cat "$RUN_DIR/meta.json" >> "$OX_RUNSLOG"
+  ) 9>"$OX_HOME/.runslog.lock"
+
+  # Where does the task file end up?
+  local dest
+  case "$STATUS" in
+    success)
+      dest="$OX_DONE/$TASK_NAME"
+      ;;
+    *)
+      if [ "$RETRYABLE" = "true" ] && [ "$ATTEMPT" -lt "$(max_attempts)" ]; then
+        dest="$OX_INBOX/$TASK_NAME"
+        ox_log "requeueing for attempt $((ATTEMPT + 1))/$(max_attempts): $REASON"
+      else
+        dest="$OX_FAILED/$TASK_NAME"
+      fi
+      ;;
+  esac
+  mkdir -p "$(dirname "$dest")"
+  mv -f "$TASK_FILE" "$dest" 2>/dev/null || true
+  cp -f "$RUN_DIR/meta.json" "${dest}.last-run.json" 2>/dev/null || true
+
+  ox_log "status=$STATUS branch=${BRANCH:-none} pushed=$PUSHED reason=${REASON:-ok} (${dur}s)"
+  exit 0
+}
+
+fail() {
+  STATUS="$1"; REASON="$2"; RETRYABLE="${3:-false}"
+  finish
+}
+
+# --- 1. parse the task ------------------------------------------------------
+cp -f "$TASK_FILE" "$RUN_DIR/task.md" 2>/dev/null || true
+
+PARSE_OUT="$(python3 "$SELF_DIR/ox-parse-task.py" "$TASK_FILE" "$RUN_DIR/body.md" 2>"$RUN_DIR/parse.err")"
+if [ $? -ne 0 ]; then
+  fail "invalid-task" "$(head -c 500 "$RUN_DIR/parse.err")" "false"
+fi
+eval "$PARSE_OUT"
+
+ATTEMPT=$(( $(attempt_count) + 1 ))
+write_state "$ATTEMPT"
+
+ox_log "task='${TASK_TITLE}' repo='${TASK_REPO}' attempt=$ATTEMPT/$(max_attempts)"
+
+# --- 2. resolve the repo ----------------------------------------------------
+REPO_NAME="$TASK_REPO"
+if ! LOOKUP="$(ox_repo_lookup "$REPO_NAME")"; then
+  fail "unknown-repo" "repo '$REPO_NAME' is not registered; run: ox repo add $REPO_NAME <git-url> [base]" "false"
+fi
+REPO_URL="$(printf '%s' "$LOOKUP" | cut -f1)"
+DEFAULT_BASE="$(printf '%s' "$LOOKUP" | cut -f2)"
+BASE_REF="${TASK_BASE:-${DEFAULT_BASE:-main}}"
+
+PROJECT="$(ox_project_path "$REPO_NAME")"
+
+# --- 3. refresh the mirror cache -------------------------------------------
+if [ ! -d "$PROJECT" ]; then
+  ox_log "cloning $REPO_URL -> $PROJECT"
+  mkdir -p "$OX_PROJECTS"
+  if ! git clone --quiet "$REPO_URL" "$PROJECT" >>"$RUN_DIR/git.log" 2>&1; then
+    rm -rf "$PROJECT"
+    fail "clone-failed" "could not clone $REPO_URL (see git.log)" "true"
+  fi
+fi
+
+# Serialize fetches per repo; two runs on the same repo must not race the cache.
+(
+  flock 9
+  git -C "$PROJECT" fetch --prune --quiet origin
+) 9>"$OX_HOME/.fetch-$REPO_NAME.lock" >>"$RUN_DIR/git.log" 2>&1
+if [ $? -ne 0 ]; then
+  fail "fetch-failed" "could not fetch $REPO_URL (see git.log)" "true"
+fi
+
+# Prefer the remote-tracking ref: the checkout's own branch may be sitting on
+# whatever was last worked on locally, which is not what the task asked for.
+if ! BASE_SHA="$(git -C "$PROJECT" rev-parse --verify "refs/remotes/origin/$BASE_REF" 2>/dev/null)"; then
+  if ! BASE_SHA="$(git -C "$PROJECT" rev-parse --verify "refs/heads/$BASE_REF" 2>/dev/null)"; then
+    if ! BASE_SHA="$(git -C "$PROJECT" rev-parse --verify "$BASE_REF" 2>/dev/null)"; then
+      fail "bad-base" "base ref '$BASE_REF' does not exist in $REPO_NAME" "false"
+    fi
+  fi
+fi
+
+# --- 4. build an isolated worktree -----------------------------------------
+SLUG="$(ox_slug "${TASK_TITLE:-$TASK_NAME}")"
+[ -n "$SLUG" ] || SLUG="task"
+BRANCH="${TASK_BRANCH:-$OX_BRANCH_PREFIX/$SLUG-$(ox_stamp)}"
+
+rm -rf "$WORKTREE"
+if ! git -C "$PROJECT" worktree add --detach --quiet "$WORKTREE" "$BASE_SHA" >>"$RUN_DIR/git.log" 2>&1; then
+  fail "worktree-failed" "could not create worktree at $WORKTREE (see git.log)" "true"
+fi
+
+git -C "$WORKTREE" checkout -q -b "$BRANCH" 2>>"$RUN_DIR/git.log"
+git -C "$WORKTREE" config user.name  "$OX_COMMIT_NAME"
+git -C "$WORKTREE" config user.email "$OX_COMMIT_EMAIL"
+
+# --- 5. build the prompt ----------------------------------------------------
+{
+  cat <<EOF
+You are running fully autonomously inside a headless task runner. There is no
+human to ask; make reasonable decisions and finish the job.
+
+Working directory: $WORKTREE
+Repository:        $REPO_NAME ($REPO_URL)
+Base branch:       $BASE_REF (at $BASE_SHA)
+Your branch:       $BRANCH (already checked out for you)
+
+Rules:
+- Do the work described below, completely. Do not stop half way to ask questions.
+- Stay inside the working directory. Do not touch anything outside it.
+- If the project has an obvious build or test command, run it and make it pass
+  before you finish. If you cannot make it pass, say so explicitly in your final
+  message rather than leaving it silently broken.
+- Commit your work with git, using clear commit messages. Do NOT push; the
+  runner pushes the branch for you.
+- Do not amend, reset, or rewrite the base commit $BASE_SHA.
+- End with a short summary of what you changed and anything you could not do.
+
+--- TASK ---
+EOF
+  cat "$RUN_DIR/body.md"
+} > "$RUN_DIR/prompt.txt"
+
+# --- 6. run codex -----------------------------------------------------------
+CODEX_ARGS=(
+  exec
+  --profile "${TASK_PROFILE:-$OX_PROFILE}"
+  --model "${TASK_MODEL:-$OX_MODEL}"
+  --cd "$WORKTREE"
+  --json
+  --output-last-message "$RUN_DIR/final-message.txt"
+  -c "model_reasoning_effort=\"${TASK_EFFORT:-$OX_EFFORT}\""
+)
+SANDBOX="${TASK_SANDBOX:-$OX_SANDBOX}"
+if [ "$SANDBOX" = "danger-full-access" ]; then
+  CODEX_ARGS+=(--dangerously-bypass-approvals-and-sandbox)
+else
+  CODEX_ARGS+=(--sandbox "$SANDBOX")
+fi
+
+TIMEOUT="${TASK_TIMEOUT:-$OX_TIMEOUT}"
+ox_log "codex exec (model=${TASK_MODEL:-$OX_MODEL} effort=${TASK_EFFORT:-$OX_EFFORT} sandbox=$SANDBOX timeout=${TIMEOUT}s)"
+
+if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  fail "no-api-key" "OPENROUTER_API_KEY is not set; expected it in $OX_ENV" "false"
+fi
+
+set -o pipefail
+timeout -k 30 "$TIMEOUT" codex "${CODEX_ARGS[@]}" - < "$RUN_DIR/prompt.txt" \
+  2>"$RUN_DIR/codex.stderr" \
+  | tee "$RUN_DIR/codex.jsonl" \
+  | python3 "$SELF_DIR/ox-render-log.py" > "$RUN_DIR/codex.log"
+CODEX_EXIT="${PIPESTATUS[0]}"
+
+if [ "$CODEX_EXIT" = "124" ] || [ "$CODEX_EXIT" = "137" ]; then
+  STATUS="timeout"; REASON="codex exceeded ${TIMEOUT}s"; RETRYABLE="true"
+elif [ "$CODEX_EXIT" != "0" ]; then
+  STATUS="codex-error"
+  REASON="codex exited $CODEX_EXIT: $(tail -c 300 "$RUN_DIR/codex.stderr" | tr '\n' ' ')"
+  RETRYABLE="true"
+fi
+
+# --- 7. collect the result --------------------------------------------------
+# Commit anything the agent left uncommitted so no work is ever lost, minus
+# build and cache artifacts that would otherwise pollute the branch.
+JUNK_PATHSPECS=(
+  ':(exclude,glob)**/__pycache__/**'
+  ':(exclude,glob)**/*.pyc'
+  ':(exclude,glob)**/*.pyo'
+  ':(exclude,glob)**/.pytest_cache/**'
+  ':(exclude,glob)**/.mypy_cache/**'
+  ':(exclude,glob)**/.ruff_cache/**'
+  ':(exclude,glob)**/node_modules/**'
+  ':(exclude,glob)**/target/debug/**'
+  ':(exclude,glob)**/target/release/**'
+  ':(exclude,glob)**/.DS_Store'
+  ':(exclude,glob)**/*.o'
+  ':(exclude,glob)**/*.so'
+  ':(exclude,glob)**/*.dylib'
+)
+if [ -n "$(git -C "$WORKTREE" status --porcelain 2>/dev/null)" ]; then
+  ox_log "agent left uncommitted changes; sweeping them into a commit"
+  git -C "$WORKTREE" add -A -- . "${JUNK_PATHSPECS[@]}" >>"$RUN_DIR/git.log" 2>&1
+  if git -C "$WORKTREE" diff --cached --quiet; then
+    ox_log "nothing left after excluding build artifacts; not committing"
+  else
+    git -C "$WORKTREE" commit -q \
+      -m "ox: uncommitted changes from run $RUN_ID" \
+      -m "The agent did not commit these itself." >>"$RUN_DIR/git.log" 2>&1
+  fi
+  # Record what was deliberately left behind so it is never a silent drop.
+  git -C "$WORKTREE" status --porcelain > "$RUN_DIR/left-uncommitted.txt" 2>/dev/null
+  if [ -s "$RUN_DIR/left-uncommitted.txt" ]; then
+    ox_log "left $(wc -l < "$RUN_DIR/left-uncommitted.txt" | tr -d ' ') artifact path(s) uncommitted (see left-uncommitted.txt)"
+  fi
+fi
+
+COMMITS="$(git -C "$WORKTREE" rev-list --count "$BASE_SHA..HEAD" 2>/dev/null || echo 0)"
+git -C "$WORKTREE" diff "$BASE_SHA..HEAD" > "$RUN_DIR/diff.patch" 2>/dev/null
+git -C "$WORKTREE" diff --name-status "$BASE_SHA..HEAD" > "$RUN_DIR/files.txt" 2>/dev/null
+FILES_CHANGED="$(wc -l < "$RUN_DIR/files.txt" | tr -d ' ')"
+read -r INSERTIONS DELETIONS <<<"$(
+  git -C "$WORKTREE" diff --numstat "$BASE_SHA..HEAD" 2>/dev/null \
+    | awk '{a+=$1; d+=$2} END {printf "%d %d", a+0, d+0}'
+)"
+
+if [ "$COMMITS" -eq 0 ]; then
+  # No output at all. If codex itself was fine, this is a genuine empty result.
+  if [ "$STATUS" = "unknown" ]; then
+    STATUS="no-changes"
+    REASON="agent produced no commits"
+    RETRYABLE="true"
+  fi
+  finish
+fi
+
+# --- 8. push ----------------------------------------------------------------
+if [ "${TASK_PUSH:-true}" = "false" ]; then
+  [ "$STATUS" = "unknown" ] && { STATUS="success"; REASON="push disabled by task frontmatter"; }
+  # `push: false` still leaves the work reachable in the checkout.
+  git -C "$PROJECT" update-ref "refs/ox/$RUN_ID" "$(git -C "$WORKTREE" rev-parse HEAD)" >/dev/null 2>&1
+  finish
+fi
+
+push_branch() {
+  git -C "$WORKTREE" push --quiet origin "HEAD:refs/heads/$1" >>"$RUN_DIR/git.log" 2>&1
+}
+
+if push_branch "$BRANCH"; then
+  PUSHED="true"
+else
+  ALT="$BRANCH-$(ox_stamp)"
+  ox_log "push of $BRANCH rejected; retrying as $ALT"
+  if push_branch "$ALT"; then
+    BRANCH="$ALT"
+    PUSHED="true"
+  else
+    if [ "$STATUS" = "unknown" ]; then
+      STATUS="push-failed"
+      REASON="could not push $BRANCH (see git.log); commits kept as refs/ox/$RUN_ID in $PROJECT"
+      RETRYABLE="true"
+    fi
+    # Keep the commits reachable in the checkout so the work is recoverable.
+    git -C "$PROJECT" update-ref "refs/ox/$RUN_ID" "$(git -C "$WORKTREE" rev-parse HEAD)" >/dev/null 2>&1
+    finish
+  fi
+fi
+
+if [ "$STATUS" = "unknown" ]; then
+  STATUS="success"
+elif [ "$STATUS" = "timeout" ] || [ "$STATUS" = "codex-error" ]; then
+  # Partial work got pushed anyway; surface that distinctly and do not retry,
+  # since a retry would duplicate the branch.
+  STATUS="partial"
+  REASON="$REASON (partial work pushed to $BRANCH)"
+  RETRYABLE="false"
+fi
+
+finish
