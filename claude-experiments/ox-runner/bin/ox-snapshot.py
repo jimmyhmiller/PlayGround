@@ -158,8 +158,35 @@ def recent(limit):
     return rows
 
 
+def repos():
+    """Registered projects, for the widget's project selector."""
+    out = []
+    path = os.path.join(OX_HOME, "config", "repos.tsv")
+    try:
+        with open(path) as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 2 and parts[0]:
+                    out.append({
+                        "name": parts[0],
+                        "base": parts[2] if len(parts) > 2 and parts[2] else "main",
+                    })
+    except OSError:
+        pass
+    out.sort(key=lambda r: r["name"].lower())
+    return out
+
+
+# Bump when a field consumers rely on is added. The jim widget compares this
+# and respawns its stream when it is talking to an older `ox stream` process —
+# `install.sh` replaces the script on disk but cannot restart a running stream.
+SCHEMA = 2
+
+
 def snapshot(limit=RECENT_DEFAULT):
     return {
+        "v": SCHEMA,
+        "repos": repos(),
         "daemon": daemon_state(),
         "model": os.environ.get("OX_MODEL", "stealth/ox-alpha"),
         "concurrency": int(os.environ.get("OX_CONCURRENCY", "2") or 2),

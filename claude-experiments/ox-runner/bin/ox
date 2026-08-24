@@ -23,6 +23,8 @@ ${C_BOLD}ox${C_RESET} - Ox Alpha headless task runner
 
 ${C_BOLD}Queue${C_RESET}
   ox new <repo> <title...>     Create a task from \$EDITOR and queue it
+  ox enqueue [--repo N]        Queue task text from stdin; infers the
+                               project when --repo is omitted
   ox submit <file.md>          Queue an existing markdown file
   ox queue                     Show inbox / in-flight tasks
   ox cancel <task.md>          Pull a task back out of the inbox
@@ -505,6 +507,9 @@ case "$cmd" in
   diff)     cmd_diff "$@" ;;
   show)     cmd_show "$@" ;;
   runs)     cmd_runs "$@" ;;
+  enqueue)  ox_load_env
+            OX_MODEL="$OX_MODEL" OX_PROJECTS="$OX_PROJECTS" \
+              python3 "$SELF_DIR/ox-enqueue.py" "$@" ;;
   snapshot) OX_MODEL="$OX_MODEL" OX_CONCURRENCY="$OX_CONCURRENCY" \
               python3 "$SELF_DIR/ox-snapshot.py" "$@" ;;
   stream)   OX_MODEL="$OX_MODEL" OX_CONCURRENCY="$OX_CONCURRENCY" \

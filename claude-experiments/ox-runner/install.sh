@@ -11,7 +11,7 @@ echo "installing ox-runner into $OX_HOME"
 mkdir -p "$OX_HOME"/{bin,inbox,processing,done,failed,runs,state,work,logs,config}
 install -m 755 "$SRC/bin/ox" "$SRC/bin/ox-daemon" "$SRC/bin/ox-run" "$OX_HOME/bin/"
 install -m 644 "$SRC/bin/ox-lib.sh" "$OX_HOME/bin/"
-install -m 755 "$SRC/bin/ox-parse-task.py" "$SRC/bin/ox-render-log.py" "$SRC/bin/ox-format.py" "$SRC/bin/ox-meta.py" "$SRC/bin/ox-snapshot.py" "$OX_HOME/bin/"
+install -m 755 "$SRC/bin/ox-parse-task.py" "$SRC/bin/ox-render-log.py" "$SRC/bin/ox-format.py" "$SRC/bin/ox-meta.py" "$SRC/bin/ox-snapshot.py" "$SRC/bin/ox-enqueue.py" "$OX_HOME/bin/"
 [ -f "$SRC/README.md" ] && install -m 644 "$SRC/README.md" "$OX_HOME/README.md"
 touch "$OX_HOME/config/repos.tsv" "$OX_HOME/runs.jsonl"
 
