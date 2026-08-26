@@ -65,6 +65,11 @@ def use_beta() -> int:
 def dead_fn() -> None:
     """Never referenced anywhere."""
 ''',
+    "pkg/dyn.py": '''\
+from . import beta
+
+hook = getattr(beta, "dead_fn")
+''',
     "data.yml": "rate: 5\n",
     "notes.md": "The go method multiplies by rate.\n",
 }
@@ -235,7 +240,51 @@ def build_checks(s):
         s.is_ok(e)
         assert e["result"]["total"] == 0
         assert e.get("notes"), "a zero at syntactic confidence needs notes"
-    C("A3-2 an honest zero: complete + 0 + caveat notes", a3_zero)
+        tm = e["result"].get("textual_mentions") or {}
+        assert tm.get("count", 0) >= 1, \
+            "the getattr string mention must be disclosed alongside the " \
+            "zero — a bare complete+0 here authorizes a breaking delete"
+    C("A3-2 an honest zero: complete + 0 + dynamic-mention disclosure",
+      a3_zero)
+
+    def a3_delete_impact():
+        e = s.call("impact", {"name": "dead_fn",
+                              "change": {"kind": "delete"}})
+        s.is_ok(e)
+        assert e["result"]["count"] >= 1 and any(
+            "dyn.py" in b.get("path", "") for b in e["result"]["breaks"]), \
+            "impact:delete must surface the getattr string mention as a " \
+            "possible break, not report a clean zero"
+    C("A3-3 impact:delete surfaces textual/dynamic mentions",
+      a3_delete_impact)
+
+    def imp_signature():
+        e = s.call("impact", {"sym": "py:pkg.alpha.Alpha.go", "change": {
+            "kind": "signature",
+            "to": "def go(self, x: int, y: int) -> int: ..."}})
+        s.is_ok(e)
+        assert e["result"]["count"] >= 2, \
+            f"1-arg call sites must break against a 2-arg signature " \
+            f"(got {e['result']['count']})"
+    C("IMP-1 impact:signature flags arity-incompatible call sites",
+      imp_signature)
+
+    def amb_candidates():
+        e = s.call("describe", {"name": "go"})
+        s.is_error(e, "AMBIGUOUS")
+        cands = e["error"].get("candidates") or []
+        assert len(cands) >= 2, \
+            "AMBIGUOUS must list the candidate symbols"
+    C("AMB-1 ambiguous exact names return AMBIGUOUS with candidates",
+      amb_candidates)
+
+    def brief_shape():
+        e = s.call("brief", {"sym": "py:pkg.alpha.Alpha.go"})
+        s.is_ok(e)
+        r = e["result"]
+        assert r.get("definition_body") and "facts" in r and "counts" in r, \
+            "brief must pack definition body, facts, and counts"
+    C("BRIEF-1 brief returns a usable dossier", brief_shape)
 
     # ---------------------------------------------------------- A4 narrowing
     def a4_depth():
@@ -338,6 +387,14 @@ def build_checks(s):
         s.is_ok(e3)
         assert s.read("pkg/alpha.py") == before, "rename round-trip failed"
     C("A7-3 applied/files_changed/diff are truthful", a7_truthful)
+
+    def a7_imports():
+        e = s.call("edit.rename", {"sym": "py:pkg.alpha.Alpha",
+                                   "to": "AlphaX"})
+        s.is_ok(e)
+        assert "from .alpha import AlphaX" in e["result"]["diff"], \
+            "rename must rewrite from-import lines too"
+    C("A7-4 rename rewrites from-import lines", a7_imports)
 
     # ---------------------------------------------------------- A8 collateral
     def a8_same_named():

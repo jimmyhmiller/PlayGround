@@ -285,8 +285,11 @@ class _Indexer(ast.NodeVisitor):
         for alias in node.names:
             self.index["imports"].append(
                 {"path": self.rel, "module": alias.name, "line": node.lineno})
+            # the alias node carries the imported name's own position;
+            # using the statement's col would break col-verified rewrites
             fake = ast.Name(id=alias.name.split(".")[-1], ctx=ast.Load())
-            fake.lineno, fake.col_offset = node.lineno, node.col_offset
+            fake.lineno = getattr(alias, "lineno", node.lineno)
+            fake.col_offset = getattr(alias, "col_offset", node.col_offset)
             self.add_occ(alias.name.split(".")[-1], fake, "import")
 
     def visit_ImportFrom(self, node):
@@ -295,7 +298,8 @@ class _Indexer(ast.NodeVisitor):
             {"path": self.rel, "module": mod, "line": node.lineno})
         for alias in node.names:
             fake = ast.Name(id=alias.name, ctx=ast.Load())
-            fake.lineno, fake.col_offset = node.lineno, node.col_offset
+            fake.lineno = getattr(alias, "lineno", node.lineno)
+            fake.col_offset = getattr(alias, "col_offset", node.col_offset)
             self.add_occ(alias.name, fake, "import")
 
 
@@ -627,6 +631,18 @@ def verb_refs(ws, snap, idx, req):
         result = {"total": total, "symbol": symbol["sym"], "occurrences": out}
     notes = ["matches are by name (syntactic): verify receivers before "
              "destructive action"]
+    # §7.1 L1 blind-spot disclosure: string/comment/config mentions are
+    # outside the symbol graph (possible getattr-style dynamic access) —
+    # a zero here without this count is a green light off a cliff
+    last = symbol["qualname"].split(".")[-1]
+    mentions = _textual_mentions(ws, last, exclude_py=False)
+    result["textual_mentions"] = {"count": len(mentions),
+                                  "sample": mentions[:5]}
+    if mentions:
+        notes.append(f"{len(mentions)} textual mention(s) exist in strings/"
+                     "comments/config outside the symbol graph — possible "
+                     "dynamic access (getattr, config keys): inspect before "
+                     "acting on the occurrence count alone")
     return make_envelope(snap, idx, result, elided=elided, notes=notes)
 
 
@@ -1027,8 +1043,18 @@ def verb_impact(ws, snap, idx, req):
     if kind != "patch":
         symbol = resolve_unique(ws, idx, req)
     if kind == "delete":
-        breaks = [o for o in refs_for(idx, symbol)
+        breaks = [dict(o, reason="reference to deleted symbol")
+                  for o in refs_for(idx, symbol)
                   if o["role"] != "definition"]
+        # string/comment/config mentions can be live dynamic access
+        # (getattr, registries): a delete verdict that omits them is a
+        # confident green light for a breaking action
+        breaks += [dict(m, reason="textual/string mention — possible "
+                                  "dynamic access; not provable at this "
+                                  "level")
+                   for m in _textual_mentions(
+                       ws, symbol["qualname"].split(".")[-1],
+                       exclude_py=False)]
         reason = "reference to deleted symbol"
     elif kind == "signature":
         new_counts = _count_params(change.get("to", ""))

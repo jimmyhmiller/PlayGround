@@ -13,7 +13,10 @@ One CLI, no server, no setup. Every command prints a JSON **envelope**:
 
 Rules of the road:
 - `status: complete` means the result is exhaustive *at the stated confidence*.
-  You may act on "0 refs + complete". You may NOT act destructively on `partial`.
+  You may act on "0 refs + complete" **after checking `textual_mentions`** —
+  string/comment/config mentions are outside the symbol graph and can be live
+  dynamic access (getattr, registries); `refs` and `impact:delete` disclose
+  them. You may NOT act destructively on `partial`.
 - `confidence: syntactic` means name-matched: same-named symbols elsewhere may
   be included. Read `notes`.
 - Errors are structured: `AMBIGUOUS` includes `candidates`; `ANCHOR_MISMATCH`
@@ -39,7 +42,7 @@ quarry.py impact   --root R --name X --json '{"change":{"kind":"signature","to":
 quarry.py impact   --root R --name X --json '{"change":{"kind":"delete"}}'
 quarry.py impact   --root R --name X --json '{"change":{"kind":"rename"}}'   # lists textual mentions a rename will NOT rewrite
 quarry.py impact   --root R --json '{"change":{"kind":"patch","patch":{"format":"files","files":{"p.py":"<new content>"}}}}'  # new mypy diagnostics the patch would introduce
-quarry.py type-of  --root R --json '{"at":{"path":"src/x.py","line":26,"anchor":"tok = self.peek_token()"},"expr":"self.peek_token()"}'  # mypy-inferred type of expr at that point
+quarry.py type-of  --root R --json '{"at":{"path":"src/x.py","line":26,"anchor":"tok = self.peek_token()"},"expr":"self.peek_token()"}'  # mypy-inferred type of expr AFTER the anchored line runs (flow-sensitive)
 quarry.py brief    --root R --name X                       # budgeted dossier
 quarry.py edit.rename --root R --name Config.timeout --to request_timeout   # returns DIFF + conflicts
 quarry.py edit.rename --root R --name X --to Y --mode apply                 # writes to disk
