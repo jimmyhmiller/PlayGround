@@ -101,6 +101,15 @@ class Workspace:
     def exists(self, rel):
         return rel in self.overlay or os.path.exists(os.path.join(self.root, rel))
 
+    def materialize(self, tmpdir):
+        """Write the workspace view (disk + overlay) into tmpdir so batch
+        tools that only read disk (mypy) can see hypothetical worlds."""
+        for rel in self.walk():
+            dst = os.path.join(tmpdir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "w", encoding="utf-8") as f:
+                f.write(self.read(rel))
+
     def snapshot(self):
         h = hashlib.sha256()
         files = self.walk()
@@ -766,6 +775,58 @@ def verb_search(ws, snap, idx, req):
     return env
 
 
+def _have_mypy():
+    try:
+        import mypy  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+_MYPY_LINE = re.compile(r"^(.+?):(\d+):(?:(\d+):)?\s*(error|warning|note):\s*(.*)$")
+
+
+def _mypy_run(ws, files, timeout_s=60):
+    """Run mypy against a materialized view of the workspace.
+
+    Returns (diagnostics, notes_by_location, meta). Raises QuarryError on
+    setup problems; timeouts and crashes come back in meta so callers can
+    degrade honestly instead of guessing.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="quarry-mypy-") as tmp:
+        ws.materialize(tmp)
+        cmd = [sys.executable, "-m", "mypy",
+               "--no-error-summary", "--no-color-output",
+               "--show-column-numbers", "--check-untyped-defs",
+               "--ignore-missing-imports",
+               "--cache-dir", os.path.join(tmp, ".mypy_cache")]
+        cmd += files
+        try:
+            proc = subprocess.run(cmd, cwd=tmp, capture_output=True,
+                                  text=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            return [], {}, {"backend": "mypy", "timeout": True}
+        if proc.returncode not in (0, 1):
+            return [], {}, {"backend": "mypy", "crashed": True,
+                            "stderr": proc.stderr.strip()[:400]}
+        diags, notes = [], {}
+        for line in proc.stdout.splitlines():
+            m = _MYPY_LINE.match(line)
+            if not m:
+                continue
+            path, lineno, col, sev, msg = m.groups()
+            path = path.replace(os.sep, "/")
+            if sev == "note":
+                notes.setdefault((path, int(lineno)), []).append(msg)
+                continue
+            diags.append({"severity": "error" if sev == "error" else "warning",
+                          "path": path, "line": int(lineno),
+                          "col": int(col) if col else None,
+                          "message": msg, "source": "mypy"})
+        return diags, notes, {"backend": "mypy"}
+
+
 def _pyflakes_check(source, rel):
     try:
         from pyflakes.api import check as pf_check
@@ -813,49 +874,134 @@ def verb_check(ws, snap, idx, req):
                           skipped=skipped)
     if paths and scope.get("plus_dependents"):
         files = sorted(set(files) | _dependents(idx, files))
-    diagnostics, have_pyflakes = [], True
+    diagnostics, syntax_broken = [], []
     for rel in files:
-        source = ws.read(rel)
         try:
-            compile(source, rel, "exec")
+            compile(ws.read(rel), rel, "exec")
         except SyntaxError as e:
             diagnostics.append({"severity": "error", "path": rel,
                                 "line": e.lineno or 0,
                                 "message": f"SyntaxError: {e.msg}",
                                 "source": "cpython"})
-            continue
-        pf = _pyflakes_check(source, rel)
-        if pf is None:
-            have_pyflakes = False
+            syntax_broken.append(rel)
+    status, notes, backend = "complete", [], "cpython-parse"
+    if _have_mypy():
+        checkable = [f for f in files if f not in syntax_broken]
+        if checkable:
+            m_diags, _, meta = _mypy_run(
+                ws, checkable, timeout_s=req.get("max_wait_s", 60))
+            if meta.get("timeout"):
+                status = "partial"
+                notes.append(f"mypy exceeded max_wait_s="
+                             f"{req.get('max_wait_s', 60)}: type checking "
+                             "did NOT complete; clean covers syntax only")
+            elif meta.get("crashed"):
+                status = "degraded"
+                notes.append("mypy crashed — type checking did not run: "
+                             + meta.get("stderr", ""))
+            else:
+                backend = "cpython-parse+mypy"
+                diagnostics.extend(m_diags)
+                notes.append("clean covers syntax, name, attribute, and "
+                             "type errors (mypy --check-untyped-defs)")
+    else:
+        have_pyflakes = True
+        for rel in files:
+            if rel in syntax_broken:
+                continue
+            pf = _pyflakes_check(ws.read(rel), rel)
+            if pf is None:
+                have_pyflakes = False
+            else:
+                diagnostics.extend(pf)
+        if have_pyflakes:
+            backend = "cpython-parse+pyflakes"
+            notes.append("clean covers syntax and name errors only — "
+                         "attribute and type errors are NOT detected "
+                         "(pip install mypy for L3 checking)")
         else:
-            diagnostics.extend(pf)
+            status = "degraded"
+            notes.append("neither mypy nor pyflakes installed: only CPython "
+                         "syntax checking ran; clean=true means 'parses', "
+                         "not 'correct'")
     errors = [d for d in diagnostics if d["severity"] == "error"]
     result = {"diagnostics": diagnostics,
-              "checked": {"files": len(files)},
-              "clean": not errors}
-    notes = ["clean covers syntax and name errors only — attribute and type "
-             "errors are NOT detected at this level (needs L3 / mypy)"]
-    status, confidence = "complete", "compiler"
+              "checked": {"files": len(files), "backend": backend},
+              "clean": not errors if status != "partial" else None}
+    if status == "partial":
+        result["clean_syntax_only"] = not errors
     if skipped:
         # requested scope was narrowed: clean must not overpromise
         result["skipped"] = skipped
-        status = "degraded"
+        status = "degraded" if status == "complete" else status
         notes.append(f"{len(skipped)} requested file(s) were not checkable "
                      "(non-Python) and are NOT covered by clean")
-    if not have_pyflakes:
-        status = "degraded"
-        notes.append("pyflakes not installed: only CPython syntax checking "
-                     "ran; name errors are NOT detected. clean=true means "
-                     "'parses', not 'correct'. (pip install pyflakes)")
     return make_envelope(snap, idx, result, status=status,
-                         confidence=confidence, notes=notes)
+                         confidence="compiler", notes=notes)
 
 
 def verb_type_of(ws, snap, idx, req):
-    raise QuarryError("UNSUPPORTED",
-                      "type-of requires level 3 (semantic); this prototype "
-                      "implements python at level 2",
-                      fallback="describe")
+    at = req.get("at")
+    if not at or not at.get("path") or not at.get("line"):
+        raise QuarryError("BAD_REQUEST",
+                          "type-of requires at:{path, line, anchor}")
+    if not _have_mypy():
+        raise QuarryError("UNSUPPORTED",
+                          "type-of needs the mypy backend "
+                          "(pip install mypy)", fallback="describe")
+    if not at["path"].endswith(".py"):
+        raise QuarryError("UNSUPPORTED", "type-of is Python-only here")
+    line_no, _ = verify_anchor(ws, at)
+    expr = req.get("expr") or at.get("anchor")
+    if not expr:
+        raise QuarryError("BAD_REQUEST",
+                          "pass expr (or an anchor that IS the expression)")
+    path = at["path"]
+    lines = ws.read(path).splitlines()
+    target = lines[line_no - 1]
+    indent = re.match(r"[ \t]*", target).group(0)
+    probe = indent + f"reveal_type({expr})"
+    # a probe after return/raise/etc. is unreachable and mypy skips it
+    if re.match(r"(return|raise|break|continue)\b", target.strip()):
+        probe_line = line_no
+        new_lines = lines[:line_no - 1] + [probe] + lines[line_no - 1:]
+    else:
+        probe_line = line_no + 1
+        new_lines = lines[:line_no] + [probe] + lines[line_no:]
+    probed = Workspace(ws.root)
+    probed.overlay = dict(ws.overlay)
+    probed.overlay[path] = "\n".join(new_lines) + "\n"
+    diags, notes_map, meta = _mypy_run(probed, [path],
+                                       timeout_s=req.get("max_wait_s", 60))
+    if meta.get("timeout") or meta.get("crashed"):
+        raise QuarryError("INTERNAL", "mypy did not complete for the probe",
+                          mypy=meta)
+    # errors AT the probe line mean the expression itself is bad there
+    # (undefined name, syntax): mypy still "reveals" Any for those, and
+    # reporting that Any as a type would be confidently wrong
+    probe_errors = [d for d in diags
+                    if d["path"] == path and d["line"] == probe_line]
+    if probe_errors:
+        raise QuarryError(
+            "NOT_FOUND",
+            f"mypy could not type {expr!r} at {path}:{line_no}",
+            mypy_errors=[d["message"] for d in probe_errors][:5])
+    revealed = [n for n in notes_map.get((path, probe_line), [])
+                if n.startswith("Revealed type is")]
+    if not revealed:
+        raise QuarryError(
+            "NOT_FOUND",
+            f"mypy produced no type for {expr!r} at {path}:{line_no} "
+            "(unreachable code, or probe insertion failed)",
+            mypy_errors=[d["message"] for d in diags][:5])
+    m = re.search(r'Revealed type is "(.*)"', revealed[0])
+    return make_envelope(
+        snap, idx,
+        {"expr": expr, "at": {"path": path, "line": line_no},
+         "type": m.group(1) if m else revealed[0]},
+        confidence="compiler",
+        notes=["computed by mypy via a reveal_type probe in a "
+               "hypothetical overlay world"])
 
 
 def _count_params(sig_text):
@@ -876,9 +1022,10 @@ def _count_params(sig_text):
 
 
 def verb_impact(ws, snap, idx, req):
-    symbol = resolve_unique(ws, idx, req)
     change = req.get("change") or {}
     kind = change.get("kind")
+    if kind != "patch":
+        symbol = resolve_unique(ws, idx, req)
     if kind == "delete":
         breaks = [o for o in refs_for(idx, symbol)
                   if o["role"] != "definition"]
@@ -904,9 +1051,45 @@ def verb_impact(ws, snap, idx, req):
         breaks = _textual_mentions(ws, symbol["qualname"].split(".")[-1],
                                    exclude_py=False)
         reason = "textual mention a rename will not rewrite"
+    elif kind == "patch":
+        if not _have_mypy():
+            raise QuarryError("UNSUPPORTED",
+                              "impact:patch needs the mypy backend",
+                              fallback="overlay.create + check")
+        files = _files_from_patch(ws, change.get("patch") or {})
+        affected = sorted(set([p for p in files if p.endswith(".py")])
+                          | _dependents(idx, list(files)))
+        if not affected:
+            raise QuarryError("UNSUPPORTED",
+                              "patch touches no checkable Python files")
+        patched = Workspace(ws.root)
+        patched.overlay = dict(ws.overlay); patched.overlay.update(files)
+        base_d, _, meta_b = _mypy_run(ws, affected)
+        new_d, _, meta_n = _mypy_run(patched, affected)
+        if any(m.get("timeout") or m.get("crashed")
+               for m in (meta_b, meta_n)):
+            raise QuarryError("INTERNAL", "mypy did not complete",
+                              mypy=[meta_b, meta_n])
+        seen_base = {(d["path"], d["message"]) for d in base_d}
+        breaks = [d for d in new_d
+                  if (d["path"], d["message"]) not in seen_base]
+        reason = "new diagnostic introduced by the patch"
+        tests = sorted({b["path"] for b in breaks
+                        if "test" in b["path"].lower()})
+        kept, elided = apply_item_budget(breaks, req.get("budget"),
+                                        req.get("cursor"))
+        for b in kept:
+            b.setdefault("reason", reason)
+        return make_envelope(
+            snap, idx,
+            {"change": "patch", "breaks": kept, "count": len(breaks),
+             "tests_affected": tests, "files_checked": affected},
+            confidence="compiler", elided=elided,
+            notes=["breaks = mypy diagnostics present in the patched world "
+                   "but not the base (compared by path+message)"])
     else:
         raise QuarryError("BAD_REQUEST",
-                          "change.kind must be delete|signature|rename")
+                          "change.kind must be delete|signature|rename|patch")
     tests = sorted({o["path"] for o in breaks
                     if "test" in o.get("path", "").lower()})
     kept, elided = apply_item_budget(breaks, req.get("budget"),
@@ -1006,8 +1189,7 @@ def _apply_unified_diff(base_text, diff_text, path):
     return "".join(out)
 
 
-def verb_overlay_create(ws, snap, idx, req):
-    patch = req.get("patch") or {}
+def _files_from_patch(ws, patch):
     fmt = patch.get("format", "files")
     files = {}
     if fmt == "files":
@@ -1038,6 +1220,11 @@ def verb_overlay_create(ws, snap, idx, req):
     for p in files:
         if os.path.isabs(p) or ".." in p.split("/"):
             raise QuarryError("BAD_REQUEST", f"path escapes workspace: {p}")
+    return files
+
+
+def verb_overlay_create(ws, snap, idx, req):
+    files = _files_from_patch(ws, req.get("patch") or {})
     blob = json.dumps(files, sort_keys=True)
     oid = "ovl:" + hashlib.sha256(blob.encode()).hexdigest()[:8]
     path = os.path.join(ws.root, ".quarry", "overlays",
@@ -1206,24 +1393,39 @@ def verb_capabilities(ws, snap, idx, req):
         pf = True
     except ImportError:
         pf = False
+    my = _have_mypy()
+    if my:
+        backend = "cpython-parse+mypy"
+    elif pf:
+        backend = "cpython-parse+pyflakes"
+    else:
+        backend = "cpython-parse"
+    verbs = ["resolve", "describe", "refs", "graph",
+             "search:regex", "search:symbol", "check", "impact",
+             "brief", "overlay.create", "edit.rename",
+             "capabilities", "doctor"]
+    missing = ["search:ast", "edit.move", "edit.change-signature"]
+    extras = ["cross-file refs/graph", "impact", "overlay", "edit.rename"]
+    if my:
+        verbs += ["type-of", "impact:patch"]
+        extras += ["check at L3 (mypy: syntax+name+attribute+type)",
+                   "type-of (mypy reveal probe)"]
+    else:
+        missing += ["type-of", "impact:patch"]
+        extras += ["check (syntax+names)"]
     return make_envelope(snap, idx, {
         "protocol": PROTO_VERSION,
         "langs": {
             "python": {
-                # honest per SPEC §7: L2 requires index-backed cross-file
-                # graph (we have it) but our resolution quality is
-                # syntactic, so we claim L1 plus extras rather than L2
+                # honest per SPEC §7/§7.1: graph verbs resolve
+                # syntactically (L1 quality) even though check/type-of run
+                # at compiler confidence when mypy is present, so the
+                # level claim stays 1 with extras enumerated
                 "level": 1, "confidence": "syntactic",
-                "extras_beyond_level": [
-                    "cross-file refs/graph", "check (syntax+names)",
-                    "impact", "overlay", "edit.rename"],
-                "verbs": ["resolve", "describe", "refs", "graph",
-                          "search:regex", "search:symbol", "check",
-                          "impact", "brief", "overlay.create",
-                          "edit.rename", "capabilities", "doctor"],
-                "missing": ["type-of", "search:ast", "edit.move",
-                            "edit.change-signature"],
-                "check_backend": "cpython-parse" + ("+pyflakes" if pf else ""),
+                "extras_beyond_level": extras,
+                "verbs": verbs,
+                "missing": missing,
+                "check_backend": backend,
             },
             "*": {"level": 0, "confidence": "textual",
                   "verbs": ["search:regex"]},
@@ -1237,13 +1439,23 @@ def verb_doctor(ws, snap, idx, req):
     checks = []
     checks.append({"check": "python", "ok": True,
                    "detail": sys.version.split()[0]})
+    if _have_mypy():
+        checks.append({"check": "mypy", "ok": True,
+                       "detail": "check runs at L3 (types+attributes); "
+                                 "type-of and impact:patch available"})
+    else:
+        checks.append({"check": "mypy", "ok": False,
+                       "remedy": "pip install mypy",
+                       "consequence": "check degrades to name errors at "
+                                      "best; type-of and impact:patch "
+                                      "UNSUPPORTED"})
     try:
         import pyflakes  # noqa: F401
         checks.append({"check": "pyflakes", "ok": True})
     except ImportError:
         checks.append({"check": "pyflakes", "ok": False,
                        "remedy": "pip install pyflakes",
-                       "consequence": "check() degrades to syntax-only"})
+                       "consequence": "fallback when mypy absent"})
     checks.append({"check": "index", "ok": not idx["errored"],
                    "detail": f"{len(idx['files'])} files, "
                              f"{len(idx['symbols'])} symbols, "

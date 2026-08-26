@@ -38,6 +38,8 @@ quarry.py check    --root R --path src/app/util.py --plus-dependents
 quarry.py impact   --root R --name X --json '{"change":{"kind":"signature","to":"def f(a, b): pass"}}'
 quarry.py impact   --root R --name X --json '{"change":{"kind":"delete"}}'
 quarry.py impact   --root R --name X --json '{"change":{"kind":"rename"}}'   # lists textual mentions a rename will NOT rewrite
+quarry.py impact   --root R --json '{"change":{"kind":"patch","patch":{"format":"files","files":{"p.py":"<new content>"}}}}'  # new mypy diagnostics the patch would introduce
+quarry.py type-of  --root R --json '{"at":{"path":"src/x.py","line":26,"anchor":"tok = self.peek_token()"},"expr":"self.peek_token()"}'  # mypy-inferred type of expr at that point
 quarry.py brief    --root R --name X                       # budgeted dossier
 quarry.py edit.rename --root R --name Config.timeout --to request_timeout   # returns DIFF + conflicts
 quarry.py edit.rename --root R --name X --to Y --mode apply                 # writes to disk
@@ -58,6 +60,11 @@ to symbol verbs. The anchor is verified; if the file drifted you get
 `ANCHOR_MISMATCH` with the actual line, never a wrong answer.
 
 Notable limits of this prototype (reported honestly by `capabilities`):
-Python only above L0; `type-of` and `search:ast` are `UNSUPPORTED`;
-reference matching is syntactic (name-based); `check` = syntax + name errors
-(pyflakes), not attribute/type errors.
+Python only above L0; `search:ast` is `UNSUPPORTED`; reference matching is
+syntactic (name-based). With mypy installed, `check` runs at L3 (syntax +
+name + attribute + type errors) and `type-of`/`impact:patch` are available;
+without it, `check` degrades and says so.
+
+Conformance: `python3 conformance.py --cmd "python3 /path/to/quarry.py"`
+runs the protocol's black-box conformance suite (41 checks) against any
+implementation.

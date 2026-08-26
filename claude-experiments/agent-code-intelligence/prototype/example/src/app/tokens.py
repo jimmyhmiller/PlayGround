@@ -2,15 +2,15 @@
 
 
 class Token:
-    def __init__(self, kind, text):
+    def __init__(self, kind: str, text: str) -> None:
         self.kind = kind
         self.text = text
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Token({self.kind!r}, {self.text!r})"
 
 
-def tokenize(source):
+def tokenize(source: str) -> list[Token]:
     """Split source into number and operator tokens."""
     tokens = []
     for part in source.replace("(", " ( ").replace(")", " ) ").split():
