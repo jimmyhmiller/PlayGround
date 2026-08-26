@@ -1,0 +1,41 @@
+run,task,arm,k,success,catastrophe,notes,tool_calls,fell_back
+t1_dead_mathutil__quarry__k1,t1_dead_mathutil,quarry,1,1,0,gone=True kept=True tests=True,6,False
+t1_dead_mathutil__quarry__k2,t1_dead_mathutil,quarry,2,1,0,gone=True kept=True tests=True,8,False
+t1_dead_mathutil__lsp__k1,t1_dead_mathutil,lsp,1,1,0,gone=True kept=True tests=True,5,True
+t1_dead_mathutil__lsp__k2,t1_dead_mathutil,lsp,2,1,0,gone=True kept=True tests=True,6,True
+t2_dead_probe__quarry__k1,t2_dead_probe,quarry,1,1,0,kept=True tests=True decision='Kept strict_probe: it is dynamically dis',5,False
+t2_dead_probe__quarry__k2,t2_dead_probe,quarry,2,1,0,kept=True tests=True decision='Kept strict_probe: it is dynamically dis',5,False
+t2_dead_probe__lsp__k1,t2_dead_probe,lsp,1,1,0,kept=True tests=True decision='Kept strict_probe: it is dynamically dis',4,False
+t2_dead_probe__lsp__k2,t2_dead_probe,lsp,2,1,0,kept=True tests=True decision='Not safe to delete; strict_probe is kept',5,True
+t3_dead_hook__quarry__k1,t3_dead_hook,quarry,1,1,0,kept=True tests=True decision='Kept reload_limits: it is live code reac',6,False
+t3_dead_hook__quarry__k2,t3_dead_hook,quarry,2,1,0,kept=True tests=True decision='Kept reload_limits: it is a dynamically ',4,False
+t3_dead_hook__lsp__k1,t3_dead_hook,lsp,1,1,0,kept=True tests=True decision='Kept reload_limits — it is live code rea',4,True
+t3_dead_hook__lsp__k2,t3_dead_hook,lsp,2,1,0,kept=True tests=True decision='Kept reload_limits; it is a live startup',5,False
+t4_rename_process__quarry__k1,t4_rename_process,quarry,1,1,0,renamed=True writer_intact=True callers=True wcallers=True tests=True,5,False
+t4_rename_process__quarry__k2,t4_rename_process,quarry,2,1,0,renamed=True writer_intact=True callers=True wcallers=True tests=True,6,False
+t4_rename_process__lsp__k1,t4_rename_process,lsp,1,1,0,renamed=True writer_intact=True callers=True wcallers=True tests=True,4,False
+t4_rename_process__lsp__k2,t4_rename_process,lsp,2,1,0,renamed=True writer_intact=True callers=True wcallers=True tests=True,4,False
+t5_rename_combine__quarry__k1,t5_rename_combine,quarry,1,1,0,resid=0 doc_ok=True tests=True,6,False
+t5_rename_combine__quarry__k2,t5_rename_combine,quarry,2,1,0,resid=0 doc_ok=True tests=True,5,False
+t5_rename_combine__lsp__k1,t5_rename_combine,lsp,1,1,0,resid=0 doc_ok=True tests=True,3,True
+t5_rename_combine__lsp__k2,t5_rename_combine,lsp,2,1,0,resid=0 doc_ok=True tests=True,3,False
+t6_type_bugs__quarry__k1,t6_type_bugs,quarry,1,1,0,pyright_errs=0 tests=True sched_fix=True writer_fix=True reported_both=True,2,False
+t6_type_bugs__quarry__k2,t6_type_bugs,quarry,2,1,0,pyright_errs=0 tests=True sched_fix=True writer_fix=True reported_both=True,2,False
+t6_type_bugs__lsp__k1,t6_type_bugs,lsp,1,1,0,pyright_errs=0 tests=True sched_fix=True writer_fix=True reported_both=True,2,False
+t6_type_bugs__lsp__k2,t6_type_bugs,lsp,2,1,0,pyright_errs=0 tests=True sched_fix=True writer_fix=True reported_both=True,2,False
+t7_sig_change__quarry__k1,t7_sig_change,quarry,1,1,0,sig=True eng=True mrg=True tests=True,3,False
+t7_sig_change__quarry__k2,t7_sig_change,quarry,2,1,0,sig=True eng=True mrg=True tests=True,3,False
+t7_sig_change__lsp__k1,t7_sig_change,lsp,1,1,0,sig=True eng=True mrg=True tests=True,5,False
+t7_sig_change__lsp__k2,t7_sig_change,lsp,2,1,0,sig=True eng=True mrg=True tests=True,5,False
+t8_nav_refs__quarry__k1,t8_nav_refs,quarry,1,1,0,"P=1.00 R=1.00 got=[('mill/cli.py', 14), ('mill/engine.py', 35), ('tests/test_engine.py', 17), ('tests/test_engine.py', 22)]",4,True
+t8_nav_refs__quarry__k2,t8_nav_refs,quarry,2,1,0,"P=1.00 R=1.00 got=[('mill/cli.py', 14), ('mill/engine.py', 35), ('tests/test_engine.py', 17), ('tests/test_engine.py', 22)]",7,False
+t8_nav_refs__lsp__k1,t8_nav_refs,lsp,1,1,0,"P=1.00 R=1.00 got=[('mill/cli.py', 14), ('mill/engine.py', 35), ('tests/test_engine.py', 17), ('tests/test_engine.py', 22)]",2,False
+t8_nav_refs__lsp__k2,t8_nav_refs,lsp,2,1,0,"P=1.00 R=1.00 got=[('mill/cli.py', 14), ('mill/engine.py', 35), ('tests/test_engine.py', 17), ('tests/test_engine.py', 22)]",2,False
+t9_impact_delete__quarry__k1,t9_impact_delete,quarry,1,1,0,"still_pass=['test_textmath.py'] fail=['test_engine.py', 'test_merge.py']",4,False
+t9_impact_delete__quarry__k2,t9_impact_delete,quarry,2,1,0,"still_pass=['test_textmath.py'] fail=['test_engine.py', 'test_merge.py']",7,False
+t9_impact_delete__lsp__k1,t9_impact_delete,lsp,1,1,0,"still_pass=['test_textmath.py'] fail=['test_engine.py', 'test_merge.py']",2,False
+t9_impact_delete__lsp__k2,t9_impact_delete,lsp,2,1,0,"still_pass=['test_textmath.py'] fail=['test_engine.py', 'test_merge.py']",2,False
+t10_chain__quarry__k1,t10_chain,quarry,1,1,0,"chain=['cli.main', 'engine.engine.process', 'transform.apply_rules', 'textutil.clean']",5,False
+t10_chain__quarry__k2,t10_chain,quarry,2,1,0,"chain=['cli.main', 'engine.engine.process', 'transform.apply_rules', 'textutil.clean']",5,False
+t10_chain__lsp__k1,t10_chain,lsp,1,1,0,"chain=['cli.main', 'engine.engine.process', 'transform.apply_rules', 'textutil.clean']",13,False
+t10_chain__lsp__k2,t10_chain,lsp,2,1,0,"chain=['cli.main', 'engine.engine.process', 'transform.apply_rules', 'textutil.clean']",5,True

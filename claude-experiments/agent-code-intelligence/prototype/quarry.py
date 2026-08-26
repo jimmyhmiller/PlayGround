@@ -977,8 +977,11 @@ def verb_type_of(ws, snap, idx, req):
     target = lines[line_no - 1]
     indent = re.match(r"[ \t]*", target).group(0)
     probe = indent + f"reveal_type({expr})"
-    # a probe after return/raise/etc. is unreachable and mypy skips it
-    if re.match(r"(return|raise|break|continue)\b", target.strip()):
+    # a probe after return/raise/etc. is unreachable and mypy skips it;
+    # a probe after a block opener (line ending ':') would empty the block
+    # and break the parse — both cases probe BEFORE the line instead
+    if re.match(r"(return|raise|break|continue)\b", target.strip()) \
+            or target.rstrip().endswith(":"):
         probe_line = line_no
         new_lines = lines[:line_no - 1] + [probe] + lines[line_no - 1:]
     else:
