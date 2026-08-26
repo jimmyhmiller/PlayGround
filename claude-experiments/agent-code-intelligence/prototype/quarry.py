@@ -187,7 +187,16 @@ class _Indexer(ast.NodeVisitor):
         # decorators shift lineno of the name line in py>=3.8? lineno is the
         # def/class line itself, decorators have their own lines. Fine.
         q = self.add_symbol(node.name, kind, node, signature=sig, doc=doc)
-        self.add_occ(node.name, node, "definition")
+        # definition occurrence must point at the identifier, not the
+        # def/class keyword, or col-verified rewrites of the def line fail
+        line = self.line_text(node.lineno)
+        m = re.search(r"\b(?:def|class)\s+(" + re.escape(node.name) + r")\b",
+                      line)
+        fake = ast.Name(id=node.name, ctx=ast.Load())
+        fake.lineno = node.lineno
+        fake.col_offset = (len(line[:m.start(1)].encode("utf-8"))
+                           if m else node.col_offset)
+        self.add_occ(node.name, fake, "definition")
         self.stack.append(node.name)
         if kind == "class":
             self.class_stack.append(q)
@@ -569,16 +578,30 @@ def verb_graph(ws, snap, idx, req):
                         nxt.append(caller)
             frontier = nxt
     elif edge == "callees":
-        d = symbol["def"]
-        span = [o for o in idx["occurrences"]
-                if o["path"] == d["path"] and o["role"] == "call"
-                and d["line"] <= o["line"] <= d["end_line"]]
-        for o in span:
-            for cand in resolve_symbols(idx, o["name"]):
-                edges.append({"from": symbol["qualname"],
-                              "to": cand["qualname"], "edge": "calls",
-                              "at": {"path": o["path"], "line": o["line"]}})
-                nodes[cand["qualname"]] = cand["sym"]
+        def callees_of(qualname):
+            s = idx["symbols"].get(qualname)
+            if not s:
+                return []
+            d = s["def"]
+            return [o for o in idx["occurrences"]
+                    if o["path"] == d["path"] and o["role"] == "call"
+                    and d["line"] <= o["line"] <= d["end_line"]]
+        frontier, visited = [symbol["qualname"]], {symbol["qualname"]}
+        for _ in range(depth):
+            nxt = []
+            for q in frontier:
+                for o in callees_of(q):
+                    for cand in resolve_symbols(idx, o["name"],
+                                                match="suffix"):
+                        edges.append({"from": q, "to": cand["qualname"],
+                                      "edge": "calls",
+                                      "at": {"path": o["path"],
+                                             "line": o["line"]}})
+                        nodes[cand["qualname"]] = cand["sym"]
+                        if cand["qualname"] not in visited:
+                            visited.add(cand["qualname"])
+                            nxt.append(cand["qualname"])
+            frontier = nxt
     elif edge == "importers":
         mod = symbol["qualname"]
         for imp in idx["imports"]:
@@ -604,7 +627,9 @@ def verb_graph(ws, snap, idx, req):
                           "nodes": nodes, "edges": kept, "total": len(edges)},
                          elided=elided,
                          notes=["caller/callee edges are name-matched "
-                                "(syntactic)"])
+                                "(syntactic)",
+                                "callees of a class include calls made "
+                                "anywhere in its body, methods included"])
 
 
 def _enclosing_for(idx, path, line):
@@ -633,6 +658,9 @@ def verb_search(ws, snap, idx, req):
                      or s["visibility"] == pred["visibility"])
                 and (not pred.get("name_regex")
                      or re.search(pred["name_regex"], s["qualname"]))]
+        if where.get("path"):
+            hits = [s for s in hits
+                    if fnmatch.fnmatch(s["def"]["path"], where["path"])]
         kept, elided = apply_item_budget(hits, req.get("budget"),
                                         req.get("cursor"))
         return make_envelope(snap, idx, {"symbols": kept, "total": len(hits)},
@@ -646,10 +674,11 @@ def verb_search(ws, snap, idx, req):
     except re.error as e:
         raise QuarryError("BAD_REQUEST", f"bad regex: {e}")
     path_glob = where.get("path")
-    matches = []
+    matches, files_searched = [], 0
     for rel in ws.walk():
         if path_glob and not fnmatch.fnmatch(rel, path_glob):
             continue
+        files_searched += 1
         for i, ln in enumerate(ws.read(rel).splitlines(), 1):
             if rx.search(ln):
                 m = {"path": rel, "line": i, "text": ln.rstrip()}
@@ -663,8 +692,11 @@ def verb_search(ws, snap, idx, req):
                    and idx["symbols"].get(m["enclosing"], {}).get("kind") == want]
     kept, elided = apply_item_budget(matches, req.get("budget"),
                                     req.get("cursor"))
-    return make_envelope(snap, idx, {"matches": kept, "total": len(matches)},
-                         confidence="textual", elided=elided)
+    env = make_envelope(snap, idx, {"matches": kept, "total": len(matches)},
+                        confidence="textual", elided=elided)
+    # for L0 textual queries, query coverage != index coverage: say which
+    env["coverage"]["files_searched"] = files_searched
+    return env
 
 
 def _pyflakes_check(source, rel):
@@ -808,7 +840,9 @@ def verb_impact(ws, snap, idx, req):
          "count": len(breaks), "tests_affected": tests},
         elided=elided,
         notes=["impact is computed syntactically (name-matched call sites); "
-               "run check on an overlay for compiler-grade confirmation"])
+               "run check on an overlay for compiler-grade confirmation",
+               "tests_affected lists files with DIRECT breaking call sites "
+               "only; use graph --edge callers for transitive test exposure"])
 
 
 def verb_brief(ws, snap, idx, req):
@@ -974,6 +1008,7 @@ def verb_edit_rename(ws, snap, idx, req):
     rewritten, new_contents, mismatches = set(), {}, []
     for rel, file_occs in sorted(by_file.items()):
         lines = ws.read(rel).splitlines(keepends=True)
+        file_hits = 0
         for o in sorted(file_occs, key=lambda x: (-x["line"], -x["col"])):
             li = o["line"] - 1
             if li >= len(lines):
@@ -982,16 +1017,21 @@ def verb_edit_rename(ws, snap, idx, req):
                 continue
             raw = lines[li].encode("utf-8")
             col = o["col"]
-            if raw[col:col + len(old)].decode("utf-8", "replace") != old:
+            actual = raw[col:col + len(old)].decode("utf-8", "replace")
+            if actual != old:
                 mismatches.append({"path": rel, "line": o["line"],
+                                   "col": col,
                                    "reason": "occurrence text mismatch — "
                                              "not rewritten",
+                                   "expected": old, "actual": actual,
                                    "text": lines[li].rstrip()})
                 continue
             lines[li] = (raw[:col] + new.encode("utf-8")
                          + raw[col + len(old):]).decode("utf-8")
             rewritten.add((rel, o["line"], col))
-        new_contents[rel] = "".join(lines)
+            file_hits += 1
+        if file_hits:
+            new_contents[rel] = "".join(lines)
     conflicts = mismatches + _textual_mentions(
         ws, old, exclude_py=False, rewritten=rewritten)
     diff_parts = []
@@ -1002,23 +1042,25 @@ def verb_edit_rename(ws, snap, idx, req):
             fromfile="a/" + rel, tofile="b/" + rel))
     diff_text = "".join(diff_parts)
     # post-check on an overlay of the new contents
-    post = {"clean": None}
-    try:
-        ov = Workspace(ws.root)
-        ov.overlay = dict(new_contents)
-        pc_diags = []
-        for rel in new_contents:
-            try:
-                compile(ov.read(rel), rel, "exec")
-            except SyntaxError as e:
-                pc_diags.append({"path": rel, "line": e.lineno,
-                                 "message": str(e.msg)})
-        post = {"clean": not pc_diags, "diagnostics": pc_diags,
-                "confidence": "compiler(syntax-only)"}
-    except Exception as e:
-        post = {"clean": None, "error": str(e)}
+    if not new_contents:
+        post = {"clean": None, "note": "nothing rewritten — no check ran"}
+    else:
+        try:
+            ov = Workspace(ws.root)
+            ov.overlay = dict(new_contents)
+            pc_diags = []
+            for rel in new_contents:
+                try:
+                    compile(ov.read(rel), rel, "exec")
+                except SyntaxError as e:
+                    pc_diags.append({"path": rel, "line": e.lineno,
+                                     "message": str(e.msg)})
+            post = {"clean": not pc_diags, "diagnostics": pc_diags,
+                    "confidence": "compiler(syntax-only)"}
+        except Exception as e:
+            post = {"clean": None, "error": str(e)}
     applied = False
-    if mode == "apply":
+    if mode == "apply" and new_contents:
         for rel, content in new_contents.items():
             full = os.path.join(ws.root, rel)
             with open(full, "w", encoding="utf-8") as f:
@@ -1026,6 +1068,8 @@ def verb_edit_rename(ws, snap, idx, req):
         applied = True
     kept_conf, elided = apply_item_budget(conflicts, req.get("budget"),
                                          req.get("cursor"))
+    # truth-telling: a rename that rewrote nothing is not a success
+    status = "complete" if rewritten else "partial"
     return make_envelope(
         snap, idx,
         {"diff": diff_text, "applied": applied,
@@ -1033,7 +1077,7 @@ def verb_edit_rename(ws, snap, idx, req):
          "occurrences_rewritten": len(rewritten),
          "conflicts": kept_conf, "conflict_total": len(conflicts),
          "post_check": post},
-        elided=elided,
+        status=status, elided=elided,
         notes=["rename matched occurrences by name (syntactic): same-named "
                "attributes on other classes are also rewritten — review the "
                "diff and conflicts"])

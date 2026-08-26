@@ -37,6 +37,7 @@ quarry.py check    --root R                                # whole project
 quarry.py check    --root R --path src/app/util.py --plus-dependents
 quarry.py impact   --root R --name X --json '{"change":{"kind":"signature","to":"def f(a, b): pass"}}'
 quarry.py impact   --root R --name X --json '{"change":{"kind":"delete"}}'
+quarry.py impact   --root R --name X --json '{"change":{"kind":"rename"}}'   # lists textual mentions a rename will NOT rewrite
 quarry.py brief    --root R --name X                       # budgeted dossier
 quarry.py edit.rename --root R --name Config.timeout --to request_timeout   # returns DIFF + conflicts
 quarry.py edit.rename --root R --name X --to Y --mode apply                 # writes to disk
