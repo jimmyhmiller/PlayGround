@@ -62,6 +62,48 @@ second depended on the agent knowing to look. This pilot's agents always
 knew to look — the full eval's no-doc and alpha-renamed conditions exist
 to test whether that holds when they aren't told.
 
+## The Haiku replication (same 40 runs, smaller model)
+
+The obvious ceiling-effect suspect was model strength, so the identical
+trial was re-run with Claude Haiku 4.5 as the agent (`results-haiku.csv`).
+One scorer regex was loosened after the fact (it rejected functionally
+correct positional `True`/`False` arguments at t7 call sites — a scorer
+bug, not an agent failure).
+
+| | LSP (Fable) | quarry (Fable) | LSP (Haiku) | quarry (Haiku) |
+|---|---|---|---|---|
+| Success | 20/20 | 20/20 | 20/20 | 20/20 |
+| Catastrophes | 0 | 0 | 0 | 0 |
+| Mean tool calls | 4.2 | 4.9 | 2.5 | 3.5 |
+| Mean tokens | 40.8k | 41.7k | 34.6k | 36.3k |
+| Self-reported fallbacks | 6/20 | 1/20 | 3/20 | 4/20 |
+
+What the replication actually showed:
+
+- **The ceiling holds even for a small model.** On a context-sized corpus
+  with blind-spot-naming docs and a cheap, trustworthy test suite, Haiku
+  goes 40/40 too. Model strength was not the binding constraint; the
+  *conditions* are. This strengthens the case that separation requires
+  the full eval's harder conditions, not a weaker model.
+- **Method changed even though outcomes didn't.** Haiku runs used ~40%
+  fewer tool calls and visibly less analysis: several Haiku LSP runs
+  resolved the dead-code traps *empirically* — delete the function, watch
+  the tests fail, restore it — where every Fable run reasoned it out
+  first (and Fable LSP runs explicitly checked the registry for dynamic
+  dispatch; Haiku LSP t1 runs skipped that check and were saved by the
+  function actually being dead). Delete-and-see lands safely only because
+  this corpus has a fast suite that covers the dynamic paths; on a repo
+  with weaker tests, that method converts directly into the catastrophic
+  false-delete the trap was designed to catch. The safety margin under
+  Haiku came from the test suite, not from the code-intelligence tool —
+  for either arm.
+- **Self-reported fallback is unreliable at the smaller tier.** The
+  Fable pattern (LSP 6 vs quarry 1, all six being the same
+  outside-the-graph shape) inverted into noise under Haiku (3 vs 4, with
+  inconsistent labeling of what counts as a fallback). The metric is
+  real but must be measured from transcripts, not self-report — as the
+  full-eval design already recommends.
+
 ## Limits of this pilot (read before quoting the table)
 
 - One tiny corpus a model can hold in context; no alpha-renamed repo, so

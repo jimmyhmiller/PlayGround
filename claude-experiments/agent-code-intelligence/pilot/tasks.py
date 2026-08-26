@@ -285,9 +285,9 @@ def score_run(rdir):
     elif tid == "t7_sig_change":
         tr = src("mill/transform.py")
         sig_ok = re.search(r"def apply_rules\(.*strict: bool\)", tr)
-        eng_ok = re.search(r"apply_rules\(.*strict=True\)",
+        eng_ok = re.search(r"apply_rules\(.*(strict=True|,\s*True)\)",
                            src("mill/engine.py"))
-        mrg_ok = re.search(r"apply_rules\(.*strict=False\)",
+        mrg_ok = re.search(r"apply_rules\(.*(strict=False|,\s*False)\)",
                            src("mill/merge.py"))
         out["success"] = int(bool(sig_ok and eng_ok and mrg_ok) and tests_ok)
         out["catastrophe"] = int(not tests_ok)
