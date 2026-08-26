@@ -13,4 +13,10 @@ and answers agents can't trust.
   intelligence protocol: stateless snapshot queries, name-based addressing, mandatory
   completeness/confidence metadata on every response, batch + budgeted results,
   pull-based diagnostics, speculative overlays, server-side transforms that return
-  diffs, and per-language conformance levels (L0 textual → L3 semantic).
+  diffs, and per-language conformance levels (L0 textual → L3 semantic). §11 contains
+  normative amendments learned from building and attacking the prototype.
+- **[prototype/](./prototype/)** — a working stdlib-only implementation (`quarry.py`)
+  covering L0/L1 plus check/impact/overlay/rename for Python, a fixture project with
+  deliberate traps, usage docs, and [TESTING.md](./prototype/TESTING.md): reports from
+  three independent agents who used it cold — a task agent, a trust agent, and an
+  adversarial agent — and the two fix rounds their findings drove.

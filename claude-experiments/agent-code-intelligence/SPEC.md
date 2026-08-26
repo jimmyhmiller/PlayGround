@@ -491,6 +491,94 @@ and at no point can anything tell you your reference list was complete.
 
 ---
 
+## 11. Amendments from the first implementation (v0.1.1)
+
+A prototype of this spec was built and evaluated by three agents that had not
+seen the spec's development — one task-driven, one comprehension/trust-focused,
+one adversarial (see `prototype/TESTING.md`). Their findings exposed places
+where the v0.1 text was loose enough that a *conformant* implementation could
+still commit the protocol's cardinal sin (a wrong answer under a confident
+envelope). The following amendments are normative.
+
+**A1. Locator binding (§2.3).** `occurrence` out of range — including `0`,
+negative, or non-integer — MUST be an error naming the valid range, never
+clamped. When `anchor` is present, the answered symbol's occurrence MUST
+lexically overlap the anchor text; an anchor that binds no symbol is
+`NOT_FOUND` (listing the occurrences on the line), never a fallback to
+"whatever is on the line". Position-resolution that is ambiguous at the
+server's confidence level (e.g. a name owned by several types, syntactically
+indistinguishable) MUST return `AMBIGUOUS`, never the first candidate.
+
+**A2. Resolution disclosure (§4).** Every symbol-addressed response MUST
+disclose how the name resolved: `match: "exact" | "suffix" | "fuzzy"`. A lone
+fuzzy hit MUST NOT be silently substituted under a completeness promise: the
+server returns `NOT_FOUND` with a `nearest` list unless the request opted into
+fuzzy matching. (Found in the wild: `refs evaluate` fuzzy-resolving to
+`evaluate_RENAMED` and answering "0 refs, complete" while `evaluate(` call
+sites sat on disk.)
+
+**A3. The structural-blind-spot rule (§2.5).** `complete` MUST NOT be claimed
+for a question class the stated confidence level structurally cannot see, and
+known blind spots MUST be closed or disclosed per verb: constructor calls
+count as references to the constructor; a class's instantiations count as
+references to `__init__`-equivalents; dynamic access (reflection, `getattr`)
+is named in `notes` where the language allows it. "Technically no
+name-matches" is not honesty if the question the agent asked has answers the
+level cannot represent.
+
+**A4. Scope-narrowing disclosure (§4.6, generally).** When a server answers
+less than the request asked — files it cannot check, filters it cannot apply,
+parameters it cannot honor (a `depth` it ignored, a `path` filter it dropped)
+— it MUST either error (`UNSUPPORTED`) or degrade loudly (`status:
+"degraded"` + the skipped scope enumerated in `coverage`). `clean: true` is
+forbidden when checked ⊂ requested. Silently ignoring a request parameter
+while stamping `complete` is a conformance failure equal to a wrong answer.
+
+**A5. Patch strictness (§2.2).** Any byte of a patch not consumed as a valid
+header or hunk ⇒ `PATCH_FAILED` with the unconsumed text. An empty patch is
+`PATCH_FAILED`, not an empty overlay. A malformed patch silently yielding a
+no-op overlay lets `check --overlay` "verify" the unpatched world — the
+worst possible speculative-execution failure.
+
+**A6. Overlay lifecycle (§2.2, §5).** Overlays record their base snapshot id;
+any query against an overlay whose base no longer matches the workspace MUST
+return `SNAPSHOT_GONE`. `edit.* mode:"apply"` is illegal against an overlay
+(the transform was computed in a world that is not the disk) and MUST be
+refused.
+
+**A7. Transform apply-gating (§5).** `mode: "apply"` MUST refuse to write
+when the transform's own post-check found diagnostics (`TRANSFORM_UNSAFE`,
+overridable only by an explicit `force: true`), MUST revalidate the base
+snapshot before writing, and MUST reject target names that are invalid in the
+language (keywords included). `applied`, `files_changed`, and the diff MUST
+describe only writes that actually happened; a transform that rewrote nothing
+is `partial`, never `complete`+`applied`.
+
+**A8. Same-named collateral (§5).** At syntactic confidence, occurrences of
+same-named symbols the server cannot distinguish from the target MUST be
+enumerated as per-symbol `conflicts` entries, not covered by a generic note.
+
+**A9. Errors keep their epistemics (§2.5, §2.6).** Error envelopes carry
+`coverage` like any other response: `NOT_FOUND` for a symbol whose defining
+file failed to index must say so, or it invites "the symbol doesn't exist".
+Reserved codes gain `WORKSPACE_NOT_FOUND`, `BAD_REQUEST` (mandatory for
+malformed request shapes — `INTERNAL` is reserved for server defects), and
+`TRANSFORM_UNSAFE`.
+
+**A10. Budget and cursor edges (§6).** `items: 0` is a valid budget (count
+without content); negative or non-integer budgets are `BAD_REQUEST`; an
+unrecognized or stale cursor is `BAD_REQUEST`, never silently offset zero
+(silent restarts hand accumulating agents duplicates); `BUDGET_TOO_SMALL`
+MUST be raised when a budget cannot fit a single item, with the minimum
+stated. The batch wrapper is itself a response and carries the full §2.5
+envelope; its status is the worst of its sub-results.
+
+**A11. Transport stdin contract (§3.1).** The CLI MUST NOT block waiting for
+stdin when request input is available elsewhere (flags/`--json`) or when the
+pipe has no data ready — an agent harness's open-but-silent stdin pipe is the
+normal case, and "no handshake, no hung pipe" applies to the CLI's own input
+too.
+
 ## Appendix A: verb index
 
 | Verb | Question |
