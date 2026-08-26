@@ -20,8 +20,10 @@ import fnmatch
 import hashlib
 import io
 import json
+import keyword
 import os
 import re
+import select
 import subprocess
 import sys
 import time
@@ -49,15 +51,21 @@ class QuarryError(Exception):
 class Workspace:
     def __init__(self, root, overlay_id=None):
         self.root = os.path.abspath(root)
+        if not os.path.isdir(self.root):
+            raise QuarryError("WORKSPACE_NOT_FOUND",
+                              f"no such directory: {self.root}")
         self.overlay = {}          # relpath -> content (str)
         self.overlay_id = overlay_id
+        self.overlay_base = None
         if overlay_id:
             path = self._overlay_path(overlay_id)
             if not os.path.exists(path):
                 raise QuarryError("SNAPSHOT_GONE",
                                   f"overlay {overlay_id} not found")
             with open(path, encoding="utf-8") as f:
-                self.overlay = json.load(f)["files"]
+                blob = json.load(f)
+            self.overlay = blob["files"]
+            self.overlay_base = blob.get("base")
 
     def _overlay_path(self, oid):
         return os.path.join(self.root, ".quarry", "overlays",
@@ -376,25 +384,28 @@ def error_envelope(code, detail=None, **extra):
 # ---------------------------------------------------------------- resolving
 
 def resolve_symbols(idx, name=None, sym=None, kinds=None, match="auto"):
+    """Returns symbol dict copies annotated with how they matched
+    ("match": exact|suffix|fuzzy) so callers can disclose non-exact
+    resolution instead of silently substituting a different symbol."""
     symbols = idx["symbols"]
     if sym:
         q = sym[3:] if sym.startswith("py:") else sym
         hit = symbols.get(q)
-        return [hit] if hit else []
+        return [dict(hit, match="exact")] if hit else []
     if not name:
         return []
     exact = [s for s in symbols.values() if s["qualname"] == name]
     if exact and match in ("auto", "exact"):
-        out = exact
+        out = [dict(s, match="exact") for s in exact]
     else:
         suffix = [s for s in symbols.values()
                   if s["qualname"].endswith("." + name)
                   or s["qualname"].split(".")[-1] == name]
         if suffix and match in ("auto", "suffix", "exact"):
-            out = suffix
+            out = [dict(s, match="suffix") for s in suffix]
         elif match in ("auto", "fuzzy"):
             low = name.lower()
-            out = [s for s in symbols.values()
+            out = [dict(s, match="fuzzy") for s in symbols.values()
                    if low in s["qualname"].lower()]
         else:
             out = []
@@ -405,13 +416,24 @@ def resolve_symbols(idx, name=None, sym=None, kinds=None, match="auto"):
 
 def resolve_unique(ws, idx, req):
     at = req.get("at")
+    if at and (req.get("name") or req.get("sym")):
+        raise QuarryError("BAD_REQUEST",
+                          "pass exactly one of at | name | sym")
     if at:
         return symbol_at(ws, idx, at)
     cands = resolve_symbols(idx, req.get("name"), req.get("sym"),
-                            req.get("kinds"))
+                            req.get("kinds"), req.get("match", "auto"))
     if not cands:
         raise QuarryError("NOT_FOUND",
                           f"no symbol matches {req.get('name') or req.get('sym')!r}")
+    # a lone fuzzy hit is a DIFFERENT name than asked for: never silently
+    # substitute it under a completeness promise — surface it instead
+    if cands[0].get("match") == "fuzzy" and req.get("match") != "fuzzy":
+        raise QuarryError(
+            "NOT_FOUND",
+            f"no exact or suffix match for {req.get('name')!r}",
+            nearest=[c["qualname"] for c in cands[:5]],
+            hint="pass \"match\": \"fuzzy\" to accept a fuzzy match")
     if len(cands) > 1:
         raise QuarryError(
             "AMBIGUOUS", f"{len(cands)} symbols match",
@@ -449,23 +471,50 @@ def symbol_at(ws, idx, at):
     anchor = at.get("anchor", "")
     occs = [o for o in idx["occurrences"]
             if o["path"] == at["path"] and o["line"] == line]
-    if anchor:
-        occs = [o for o in occs if o["name"] in anchor] or occs
-    nth = at.get("occurrence", 1)
     if not occs:
         raise QuarryError("NOT_FOUND",
                           f"no symbol occurrence at {at['path']}:{line}")
-    occ = occs[min(nth, len(occs)) - 1]
+    if anchor:
+        # the anchor must bind to a symbol: never fall back to "whatever
+        # is on the line" when it doesn't
+        bound = [o for o in occs if o["name"] in anchor]
+        if not bound:
+            raise QuarryError(
+                "NOT_FOUND",
+                f"anchor names no symbol occurrence at {at['path']}:{line}",
+                occurrences_on_line=[o["name"] for o in occs])
+        occs = bound
+    nth = at.get("occurrence", 1)
+    if not isinstance(nth, int) or nth < 1 or nth > len(occs):
+        raise QuarryError(
+            "BAD_REQUEST",
+            f"occurrence must be 1..{len(occs)} at {at['path']}:{line}, "
+            f"got {nth!r}",
+            occurrences_on_line=[o["name"] for o in occs])
+    occ = occs[nth - 1]
     cands = resolve_symbols(idx, occ["name"])
     if not cands:
         raise QuarryError("NOT_FOUND",
                           f"occurrence {occ['name']!r} resolves to no indexed symbol")
+    if len(cands) > 1:
+        raise QuarryError(
+            "AMBIGUOUS",
+            f"occurrence {occ['name']!r} resolves to {len(cands)} symbols "
+            "(syntactic resolution cannot pick a receiver)",
+            candidates=[{"sym": c["sym"], "kind": c["kind"],
+                         "def": c["def"]} for c in cands])
     return cands[0]
 
 
 def refs_for(idx, symbol, roles=None):
     last = symbol["qualname"].split(".")[-1]
     occs = [o for o in idx["occurrences"] if o["name"] == last]
+    # constructor trap: calls to Klass(...) ARE references to __init__
+    parts = symbol["qualname"].split(".")
+    if last == "__init__" and len(parts) >= 2:
+        cls = parts[-2]
+        occs = occs + [o for o in idx["occurrences"]
+                       if o["name"] == cls and o["role"] == "call"]
     if roles:
         occs = [o for o in occs if o["role"] in roles]
     return occs
@@ -474,15 +523,33 @@ def refs_for(idx, symbol, roles=None):
 def apply_item_budget(items, budget, cursor=None):
     """Deterministic truncation. Returns (kept, elided_dict)."""
     offset = 0
-    if cursor and cursor.startswith("offset:"):
-        offset = int(cursor.split(":", 1)[1])
+    if cursor is not None:
+        m = re.fullmatch(r"offset:(\d+)", str(cursor))
+        if not m:
+            raise QuarryError("BAD_REQUEST",
+                              f"unrecognized cursor {cursor!r} "
+                              "(expected offset:<n>)")
+        offset = int(m.group(1))
     items = items[offset:]
     limit = None
     if budget:
         limit = budget.get("items")
-        if budget.get("tokens") and limit is None:
+        if limit is not None and (not isinstance(limit, int) or limit < 0):
+            raise QuarryError("BAD_REQUEST",
+                              f"budget.items must be a non-negative int, "
+                              f"got {limit!r}")
+        if budget.get("tokens") is not None and limit is None:
+            tokens = budget["tokens"]
+            if not isinstance(tokens, int) or tokens < 0:
+                raise QuarryError("BAD_REQUEST",
+                                  f"budget.tokens must be a non-negative "
+                                  f"int, got {tokens!r}")
+            if tokens < 60:
+                raise QuarryError("BUDGET_TOO_SMALL",
+                                  f"budget.tokens={tokens} cannot fit one "
+                                  "result item (~60 tokens)")
             # crude: assume ~60 tokens per item
-            limit = max(1, budget["tokens"] // 60)
+            limit = max(1, tokens // 60)
     if limit is not None and len(items) > limit:
         kept = items[:limit]
         return kept, {"count": len(items) - limit,
@@ -735,9 +802,15 @@ def verb_check(ws, snap, idx, req):
     scope = req.get("scope") or {}
     paths = scope.get("paths")
     files = [p for p in (paths or idx["files"]) if p.endswith(".py")]
+    skipped = [p for p in (paths or []) if not p.endswith(".py")]
     missing = [p for p in files if not ws.exists(p)]
     if missing:
         raise QuarryError("NOT_FOUND", f"no such files: {missing}")
+    if paths and not files:
+        raise QuarryError("UNSUPPORTED",
+                          "no checkable files in scope: this prototype "
+                          "checks Python only",
+                          skipped=skipped)
     if paths and scope.get("plus_dependents"):
         files = sorted(set(files) | _dependents(idx, files))
     diagnostics, have_pyflakes = [], True
@@ -763,6 +836,12 @@ def verb_check(ws, snap, idx, req):
     notes = ["clean covers syntax and name errors only — attribute and type "
              "errors are NOT detected at this level (needs L3 / mypy)"]
     status, confidence = "complete", "compiler"
+    if skipped:
+        # requested scope was narrowed: clean must not overpromise
+        result["skipped"] = skipped
+        status = "degraded"
+        notes.append(f"{len(skipped)} requested file(s) were not checkable "
+                     "(non-Python) and are NOT covered by clean")
     if not have_pyflakes:
         status = "degraded"
         notes.append("pyflakes not installed: only CPython syntax checking "
@@ -876,6 +955,12 @@ def _apply_unified_diff(base_text, diff_text, path):
     out, idx_line = [], 0
     hunks = re.split(r"^(@@ .*@@.*)$", diff_text, flags=re.M)
     # hunks[0] is headers; then alternating header/body
+    if len(hunks) < 2:
+        # a diff section with no parseable hunk is a malformed patch, not
+        # a no-op: applying it silently would "verify" the unpatched world
+        raise QuarryError("PATCH_FAILED",
+                          f"no @@ hunks found for {path}",
+                          unconsumed=diff_text.strip()[:200] or "<empty>")
     it = iter(range(1, len(hunks), 2))
     for h in it:
         m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
@@ -913,6 +998,10 @@ def _apply_unified_diff(base_text, diff_text, path):
                 out.append(content + "\n")
             elif tag == "\\":
                 pass
+            else:
+                raise QuarryError("PATCH_FAILED",
+                                  f"unparseable patch line in {path}: "
+                                  f"{raw[:80]!r}")
     out.extend(lines[idx_line:])
     return "".join(out)
 
@@ -930,6 +1019,10 @@ def verb_overlay_create(ws, snap, idx, req):
         content = patch.get("content", "")
         # split per-file sections
         sections = re.split(r"^--- ", content, flags=re.M)
+        if len(sections) < 2:
+            raise QuarryError("PATCH_FAILED",
+                              "no '--- <file>' sections found in diff",
+                              unconsumed=content.strip()[:200] or "<empty>")
         for sec in sections[1:]:
             m = re.match(r"(?:a/)?(\S+)\n\+\+\+ (?:b/)?(\S+)\n", sec)
             if not m:
@@ -988,9 +1081,15 @@ def _textual_mentions(ws, name, exclude_py=True, rewritten=None):
 def verb_edit_rename(ws, snap, idx, req):
     symbol = resolve_unique(ws, idx, req)
     new = req.get("to")
-    if not new or not new.isidentifier():
-        raise QuarryError("BAD_REQUEST", "--to must be a valid identifier")
+    if not new or not new.isidentifier() or keyword.iskeyword(new):
+        raise QuarryError("BAD_REQUEST",
+                          "--to must be a valid, non-keyword identifier")
     mode = req.get("mode", "diff")
+    if mode == "apply" and ws.overlay_id:
+        raise QuarryError("BAD_REQUEST",
+                          "cannot apply a transform computed in an overlay "
+                          "world to disk — run without --overlay, or keep "
+                          "mode=diff")
     old = symbol["qualname"].split(".")[-1]
     occs = refs_for(idx, symbol) + \
         [o for o in idx["occurrences"]
@@ -1032,7 +1131,19 @@ def verb_edit_rename(ws, snap, idx, req):
             file_hits += 1
         if file_hits:
             new_contents[rel] = "".join(lines)
-    conflicts = mismatches + _textual_mentions(
+    # same-named symbols elsewhere: their occurrences were rewritten too
+    # (name-matching cannot tell receivers apart) — surface each as a
+    # conflict, not just a generic note
+    same_named = [
+        {"path": s["def"]["path"], "line": s["def"]["line"],
+         "text": s["def"]["text"],
+         "reason": f"same-named symbol {s['qualname']} also exists — "
+                   "its occurrences were ALSO rewritten; revert them in "
+                   "the diff if unintended"}
+        for s in idx["symbols"].values()
+        if s["qualname"].split(".")[-1] == old
+        and s["qualname"] != symbol["qualname"]]
+    conflicts = mismatches + same_named + _textual_mentions(
         ws, old, exclude_py=False, rewritten=rewritten)
     diff_parts = []
     for rel, content in sorted(new_contents.items()):
@@ -1060,6 +1171,12 @@ def verb_edit_rename(ws, snap, idx, req):
         except Exception as e:
             post = {"clean": None, "error": str(e)}
     applied = False
+    if mode == "apply" and post.get("clean") is False and not req.get("force"):
+        raise QuarryError(
+            "TRANSFORM_UNSAFE",
+            "post-check found diagnostics in the transformed world; "
+            "nothing was written (pass \"force\": true to apply anyway)",
+            diagnostics=post.get("diagnostics"))
     if mode == "apply" and new_contents:
         for rel, content in new_contents.items():
             full = os.path.join(ws.root, rel)
@@ -1093,7 +1210,13 @@ def verb_capabilities(ws, snap, idx, req):
         "protocol": PROTO_VERSION,
         "langs": {
             "python": {
-                "level": 2, "confidence": "syntactic",
+                # honest per SPEC §7: L2 requires index-backed cross-file
+                # graph (we have it) but our resolution quality is
+                # syntactic, so we claim L1 plus extras rather than L2
+                "level": 1, "confidence": "syntactic",
+                "extras_beyond_level": [
+                    "cross-file refs/graph", "check (syntax+names)",
+                    "impact", "overlay", "edit.rename"],
                 "verbs": ["resolve", "describe", "refs", "graph",
                           "search:regex", "search:symbol", "check",
                           "impact", "brief", "overlay.create",
@@ -1158,8 +1281,19 @@ def run_one(root, req):
     if verb not in VERBS and verb != "batch":
         return error_envelope("UNSUPPORTED", f"unknown verb {verb!r}",
                               supported=sorted(VERBS) + ["batch"])
+    idx = None
     try:
         ws = Workspace(root, overlay_id=req.get("overlay"))
+        if ws.overlay_id and ws.overlay_base:
+            # an overlay is a world built on a specific base snapshot; if
+            # the disk moved underneath, that world no longer exists
+            disk_id = Workspace(root).snapshot()["id"]
+            if disk_id != ws.overlay_base:
+                raise QuarryError(
+                    "SNAPSHOT_GONE",
+                    f"overlay {ws.overlay_id} was built on "
+                    f"{ws.overlay_base}, but the workspace is now "
+                    f"{disk_id} — recreate the overlay")
         snap, idx = load_index(ws)
         if verb == "batch":
             out = []
@@ -1182,10 +1316,30 @@ def run_one(root, req):
                     env = error_envelope(e.code, e.detail, **e.extra)
                 env["id"] = sub.get("id")
                 out.append(env)
-            return {"status": "complete", "snapshot": snap, "results": out}
+            # the batch wrapper is a response too: it carries the envelope
+            worst = "error" if all(r.get("status") == "error" for r in out) \
+                else ("partial" if any(r.get("status") == "error"
+                                       for r in out) else "complete")
+            wrapper = make_envelope(snap, idx, None, status=worst)
+            del wrapper["result"]
+            wrapper["results"] = out
+            return wrapper
         return VERBS[verb](ws, snap, idx, req)
     except QuarryError as e:
-        return error_envelope(e.code, e.detail, **e.extra)
+        env = error_envelope(e.code, e.detail, **e.extra)
+        if idx is not None:
+            # errors keep their epistemics: an agent told NOT_FOUND must
+            # still see whether the defining file failed to index
+            env["coverage"] = {
+                "files_indexed": len(idx["files"]),
+                "files_errored": [x["path"] for x in idx["errored"]]}
+            if idx["errored"]:
+                env["coverage"]["errored_detail"] = idx["errored"]
+        return env
+    except (TypeError, ValueError, KeyError, AttributeError) as e:
+        # malformed request shapes are the caller's problem, not INTERNAL
+        return error_envelope("BAD_REQUEST",
+                              f"malformed request: {type(e).__name__}: {e}")
     except Exception as e:  # never a stack trace on stdout: structured error
         return error_envelope("INTERNAL", f"{type(e).__name__}: {e}")
 
@@ -1217,11 +1371,11 @@ def build_request(argv):
         v = getattr(args, k)
         if v is not None:
             req[k] = v
-    if args.budget_items or args.budget_tokens:
+    if args.budget_items is not None or args.budget_tokens is not None:
         req["budget"] = {}
-        if args.budget_items:
+        if args.budget_items is not None:
             req["budget"]["items"] = args.budget_items
-        if args.budget_tokens:
+        if args.budget_tokens is not None:
             req["budget"]["tokens"] = args.budget_tokens
     if args.path:
         if args.verb == "search":
@@ -1234,9 +1388,16 @@ def build_request(argv):
     if args.json:
         req.update(json.loads(args.json))
     elif not sys.stdin.isatty():
-        data = sys.stdin.read().strip()
-        if data:
-            req.update(json.loads(data))
+        # never hang on an open-but-silent pipe (the normal harness/CI
+        # condition): only read stdin if data is already available
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+        except (OSError, ValueError):
+            ready = []
+        if ready:
+            data = sys.stdin.read().strip()
+            if data:
+                req.update(json.loads(data))
     return args.root, req
 
 
