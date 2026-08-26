@@ -1,0 +1,33 @@
+run,task,arm,k,success,catastrophe,tool_calls,notes
+g1_judge_a__quarry__k1,g1_judge_a,quarry,1,1,0,9,present=False vis=True hid=True decision='glaze_spool_berth is dead code; deleted it and the'
+g1_judge_a__quarry__k2,g1_judge_a,quarry,2,1,0,10,present=False vis=True hid=True decision='glaze_spool_berth is dead code; deleted it and the'
+g1_judge_a__lsp__k1,g1_judge_a,lsp,1,1,0,23,"present=False vis=True hid=True decision='glaze_spool_berth is unreachable by any mechanism,'"
+g1_judge_a__lsp__k2,g1_judge_a,lsp,2,1,0,15,"present=False vis=True hid=True decision='Deleted glaze_spool_berth: no static reference, im'"
+g2_judge_b__quarry__k1,g2_judge_b,quarry,1,1,0,7,present=False vis=True hid=True decision='stamp_carton is dead code; deleted it and the fast'
+g2_judge_b__quarry__k2,g2_judge_b,quarry,2,1,0,12,present=False vis=True hid=True decision='stamp_carton is dead code with no static or dynami'
+g2_judge_b__lsp__k1,g2_judge_b,lsp,1,1,0,19,"present=False vis=True hid=True decision='stamp_carton is dead code by every mechanism, so i'"
+g2_judge_b__lsp__k2,g2_judge_b,lsp,2,1,0,9,present=False vis=True hid=True decision='stamp_carton is dead code with no static or dynami'
+g3_judge_c__quarry__k1,g3_judge_c,quarry,1,1,0,5,present=True vis=True hid=True decision='Kept fold_quorum_chunk: it is invoked dynamically '
+g3_judge_c__quarry__k2,g3_judge_c,quarry,2,1,0,3,present=True vis=True hid=True decision='Kept fold_quorum_chunk: it is invoked dynamically '
+g3_judge_c__lsp__k1,g3_judge_c,lsp,1,1,0,3,present=True vis=True hid=True decision='Kept fold_quorum_chunk: it is invoked dynamically '
+g3_judge_c__lsp__k2,g3_judge_c,lsp,2,1,0,3,present=True vis=True hid=True decision='Kept fold_quorum_chunk: it is reachable via config'
+g4_judge_d__quarry__k1,g4_judge_d,quarry,1,1,0,5,present=True vis=True hid=True decision='Kept braid_spool_carton: it is dynamically invoked'
+g4_judge_d__quarry__k2,g4_judge_d,quarry,2,1,0,3,present=True vis=True hid=True decision='Kept braid_spool_carton: it is reachable via dynam'
+g4_judge_d__lsp__k1,g4_judge_d,lsp,1,1,0,3,present=True vis=True hid=True decision='Kept braid_spool_carton: it is invoked dynamically'
+g4_judge_d__lsp__k2,g4_judge_d,lsp,2,1,0,5,present=True vis=True hid=True decision='Kept braid_spool_carton: it is invoked dynamically'
+g5_nav__quarry__k1,g5_nav,quarry,1,1,0,72,"P=1.00 R=1.00 got=[('granite/app/split_berth_spool.py', 21), ('granite/ops/glaze_ledger_carton.py', 62), ('granite/ops/glaze_ledger_carton.py', 117), ('granite/ops/glaze_ledger_carton.py', 152)]"
+g5_nav__quarry__k2,g5_nav,quarry,2,1,0,140,"P=1.00 R=1.00 got=[('granite/app/split_berth_spool.py', 21), ('granite/ops/glaze_ledger_carton.py', 62), ('granite/ops/glaze_ledger_carton.py', 117), ('granite/ops/glaze_ledger_carton.py', 152)]"
+g5_nav__lsp__k1,g5_nav,lsp,1,1,0,10,"P=1.00 R=1.00 got=[('granite/app/split_berth_spool.py', 21), ('granite/ops/glaze_ledger_carton.py', 62), ('granite/ops/glaze_ledger_carton.py', 117), ('granite/ops/glaze_ledger_carton.py', 152)]"
+g5_nav__lsp__k2,g5_nav,lsp,2,1,0,10,"P=1.00 R=1.00 got=[('granite/app/split_berth_spool.py', 21), ('granite/ops/glaze_ledger_carton.py', 62), ('granite/ops/glaze_ledger_carton.py', 117), ('granite/ops/glaze_ledger_carton.py', 152)]"
+g6_typebugs__quarry__k1,g6_typebugs,quarry,1,1,0,2,pyright=0 recall=1.00 vis=True hid=True
+g6_typebugs__quarry__k2,g6_typebugs,quarry,2,1,0,2,pyright=0 recall=1.00 vis=True hid=True
+g6_typebugs__lsp__k1,g6_typebugs,lsp,1,1,0,2,pyright=0 recall=1.00 vis=True hid=True
+g6_typebugs__lsp__k2,g6_typebugs,lsp,2,1,0,2,pyright=0 recall=1.00 vis=True hid=True
+g7_hooks__quarry__k1,g7_hooks,quarry,1,1,0,39,got=[] want=[]
+g7_hooks__quarry__k2,g7_hooks,quarry,2,1,0,54,got=[] want=[]
+g7_hooks__lsp__k1,g7_hooks,lsp,1,1,0,29,got=[] want=[]
+g7_hooks__lsp__k2,g7_hooks,lsp,2,1,0,36,got=[] want=[]
+g8_reach__quarry__k1,g8_reach,quarry,1,1,0,859,target=True decoy=False chain_len=6
+g8_reach__quarry__k2,g8_reach,quarry,2,1,0,6,target=True decoy=False chain_len=6
+g8_reach__lsp__k1,g8_reach,lsp,1,1,0,12,target=True decoy=False chain_len=6
+g8_reach__lsp__k2,g8_reach,lsp,2,1,0,2,target=True decoy=False chain_len=6
