@@ -57,6 +57,8 @@ class Workspace:
         self.overlay = {}          # relpath -> content (str)
         self.overlay_id = overlay_id
         self.overlay_base = None
+        self.contents = None       # atomic snapshot of disk (rel -> str)
+        self.unstable = False      # True if disk kept changing during load
         if overlay_id:
             path = self._overlay_path(overlay_id)
             if not os.path.exists(path):
@@ -91,15 +93,57 @@ class Workspace:
                 out.append(rel)
         return sorted(out)
 
-    def read(self, rel):
-        if rel in self.overlay:
-            return self.overlay[rel]
+    def _read_disk(self, rel):
         full = os.path.join(self.root, rel)
         with open(full, encoding="utf-8", errors="replace") as f:
             return f.read()
 
+    def ensure_loaded(self):
+        """Atomic snapshot load: read every file, then re-read to verify no
+        file changed during the scan. A concurrent editor can otherwise
+        produce a 'torn' cross-file view served with full confidence (the
+        0.4% stale hit in the stress hammer). Instability after retries is
+        disclosed in the snapshot, never silent."""
+        if self.contents is not None:
+            return
+        files = [r for r in self.walk() if r not in self.overlay]
+        contents = {}
+        for _ in range(3):
+            contents = {}
+            for rel in files:
+                try:
+                    contents[rel] = self._read_disk(rel)
+                except OSError:
+                    pass
+            stable = True
+            for rel in list(contents):
+                try:
+                    if self._read_disk(rel) != contents[rel]:
+                        stable = False
+                        break
+                except OSError:
+                    stable = False
+                    break
+            if stable:
+                self.contents = contents
+                return
+        self.contents = contents
+        self.unstable = True
+
+    def read(self, rel):
+        if rel in self.overlay:
+            return self.overlay[rel]
+        self.ensure_loaded()
+        if rel in self.contents:
+            return self.contents[rel]
+        return self._read_disk(rel)
+
     def exists(self, rel):
-        return rel in self.overlay or os.path.exists(os.path.join(self.root, rel))
+        if rel in self.overlay:
+            return True
+        self.ensure_loaded()
+        return rel in self.contents or \
+            os.path.exists(os.path.join(self.root, rel))
 
     def materialize(self, tmpdir):
         """Write the workspace view (disk + overlay) into tmpdir so batch
@@ -111,6 +155,7 @@ class Workspace:
                 f.write(self.read(rel))
 
     def snapshot(self):
+        self.ensure_loaded()
         h = hashlib.sha256()
         files = self.walk()
         for rel in files:
@@ -121,6 +166,8 @@ class Workspace:
                 pass
         sid = "snap:" + h.hexdigest()[:12]
         info = {"id": sid, "file_count": len(files)}
+        if self.unstable:
+            info["unstable"] = True
         try:
             rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                                  cwd=self.root, capture_output=True, text=True,
@@ -146,9 +193,16 @@ def module_name(rel):
 
 
 class _Indexer(ast.NodeVisitor):
-    """One file. Collects symbols and occurrences with enclosing qualnames."""
+    """One file. Collects symbols and occurrences with enclosing qualnames.
 
-    def __init__(self, rel, source, index):
+    Receiver inference (the L2 upgrade): a global class registry plus
+    local type tracking — `v = ClassName()`, annotated params/vars,
+    `self`, and direct `ClassName().meth()` chains — lets attribute
+    occurrences carry `recv` (the receiver's class qualname) when
+    provable. Unknown receivers stay None and are disclosed downstream.
+    """
+
+    def __init__(self, rel, source, index, registry=None):
         self.rel = rel
         self.mod = module_name(rel)
         self.lines = source.splitlines()
@@ -156,6 +210,28 @@ class _Indexer(ast.NodeVisitor):
         self.stack = [self.mod]           # qualname stack
         self.class_stack = []             # ClassDef qualnames
         self.call_marks = {}              # id(func_node) -> n_args
+        self.registry = registry or {}    # module -> {classname: qualname}
+        self.class_env = dict(self.registry.get(self.mod, {}))
+        self.type_envs = [{}]             # var name -> class qualname
+
+    # -- receiver-inference helpers
+    def _ann_class(self, ann):
+        if isinstance(ann, ast.Name):
+            return self.class_env.get(ann.id)
+        if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+            return self.class_env.get(ann.value)
+        return None
+
+    def _value_class(self, value):
+        """Class qualname of an expression's value, when provable."""
+        if isinstance(value, ast.Name):
+            for env in reversed(self.type_envs):
+                if value.id in env:
+                    return env[value.id]
+            return None
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            return self.class_env.get(value.func.id)
+        return None
 
     # -- helpers
     def qual(self, name):
@@ -183,13 +259,15 @@ class _Indexer(ast.NodeVisitor):
         }
         return q
 
-    def add_occ(self, name, node, role, n_args=None):
+    def add_occ(self, name, node, role, n_args=None, recv=None):
         occ = {"name": name, "path": self.rel, "line": node.lineno,
                "col": node.col_offset, "role": role,
                "enclosing": ".".join(self.stack),
                "text": self.line_text(node.lineno)}
         if n_args is not None:
             occ["n_args"] = n_args
+        if recv is not None:
+            occ["recv"] = recv
         self.index["occurrences"].append(occ)
 
     # -- visitors
@@ -217,7 +295,23 @@ class _Indexer(ast.NodeVisitor):
         self.stack.append(node.name)
         if kind == "class":
             self.class_stack.append(q)
+        if kind != "class":
+            env = {}
+            args = getattr(node, "args", None)
+            if args is not None:
+                for a in (args.posonlyargs + args.args + args.kwonlyargs):
+                    cls = self._ann_class(a.annotation) if a.annotation \
+                        else None
+                    if cls:
+                        env[a.arg] = cls
+                if self.class_stack and (args.posonlyargs + args.args):
+                    first = (args.posonlyargs + args.args)[0].arg
+                    if first in ("self", "cls"):
+                        env[first] = self.class_stack[-1]
+            self.type_envs.append(env)
         self.generic_visit(node)
+        if kind != "class":
+            self.type_envs.pop()
         if kind == "class":
             self.class_stack.pop()
         self.stack.pop()
@@ -233,7 +327,23 @@ class _Indexer(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    def visit_AnnAssign(self, node):
+        if isinstance(node.target, ast.Name):
+            cls = self._ann_class(node.annotation)
+            if cls:
+                self.type_envs[-1][node.target.id] = cls
+        self.generic_visit(node)
+
     def visit_Assign(self, node):
+        # receiver inference: v = ClassName(...) / v = other_typed_var
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            cls = self._value_class(node.value)
+            tname = node.targets[0].id
+            if cls:
+                self.type_envs[-1][tname] = cls
+            else:
+                # reassignment to something unprovable kills the binding
+                self.type_envs[-1].pop(tname, None)
         # self.X = ... inside a method -> attribute symbol on the class
         for tgt in node.targets:
             if (isinstance(tgt, ast.Attribute)
@@ -271,14 +381,16 @@ class _Indexer(ast.NodeVisitor):
         if isinstance(node.ctx, (ast.Store, ast.Del)):
             role = "write"
         mark = self.call_marks.get(id(node))
+        recv = self._value_class(node.value)
         # col of the attribute name itself: end of node minus len(attr)
         fake = ast.Name(id=node.attr, ctx=node.ctx)
         fake.lineno = node.end_lineno
         fake.col_offset = node.end_col_offset - len(node.attr)
         if mark:
-            self.add_occ(node.attr, fake, "call", n_args=sum(mark))
+            self.add_occ(node.attr, fake, "call", n_args=sum(mark),
+                         recv=recv)
         else:
-            self.add_occ(node.attr, fake, role)
+            self.add_occ(node.attr, fake, role, recv=recv)
         self.generic_visit(node)
 
     def visit_Import(self, node):
@@ -294,9 +406,17 @@ class _Indexer(ast.NodeVisitor):
 
     def visit_ImportFrom(self, node):
         mod = node.module or ""
+        if node.level:      # relative import: resolve against this module
+            base = self.mod.split(".")
+            base = base[: len(base) - node.level]
+            mod = ".".join(base + ([mod] if mod else []))
         self.index["imports"].append(
             {"path": self.rel, "module": mod, "line": node.lineno})
         for alias in node.names:
+            # imported classes join the receiver-inference environment
+            if alias.name in self.registry.get(mod, {}):
+                self.class_env[alias.asname or alias.name] = \
+                    self.registry[mod][alias.name]
             fake = ast.Name(id=alias.name, ctx=ast.Load())
             fake.lineno = getattr(alias, "lineno", node.lineno)
             fake.col_offset = getattr(alias, "col_offset", node.col_offset)
@@ -307,6 +427,21 @@ def build_index(ws):
     t0 = time.time()
     index = {"symbols": {}, "occurrences": [], "imports": [],
              "files": [], "errored": [], "excluded": 0}
+    # pass 1: global class registry so receiver inference can resolve
+    # imported class names across files
+    registry, trees = {}, {}
+    for rel in ws.walk():
+        if not rel.endswith(".py"):
+            continue
+        try:
+            trees[rel] = ast.parse(ws.read(rel))
+        except SyntaxError:
+            continue
+        mod = module_name(rel)
+        for node in ast.walk(trees[rel]):
+            if isinstance(node, ast.ClassDef):
+                registry.setdefault(mod, {})[node.name] = \
+                    f"{mod}.{node.name}"
     for rel in ws.walk():
         if not rel.endswith(".py"):
             continue
@@ -321,7 +456,7 @@ def build_index(ws):
         mod = module_name(rel)
         node = ast.Module(body=[], type_ignores=[])
         node.lineno, node.end_lineno = 1, max(1, len(source.splitlines()))
-        ix = _Indexer(rel, source, index)
+        ix = _Indexer(rel, source, index, registry=registry)
         # module symbol
         index["symbols"].setdefault(mod, {
             "sym": "py:" + mod, "display": mod, "qualname": mod,
@@ -378,6 +513,14 @@ def make_envelope(snap, idx, result, status="complete", confidence="syntactic",
     if idx["errored"]:
         env["status"] = "partial" if status == "complete" else status
         env["coverage"]["errored_detail"] = idx["errored"]
+    if snap.get("unstable"):
+        # the workspace kept changing during the atomic load retries
+        env["status"] = "partial" if env["status"] == "complete" \
+            else env["status"]
+        notes = list(notes or [])
+        notes.append("workspace was being modified during snapshot load "
+                     "(3 stability retries failed): answers reflect a "
+                     "possibly-torn view — re-query when writes settle")
     if elided and elided.get("count"):
         env["elided"] = elided
     if notes:
@@ -520,6 +663,13 @@ def symbol_at(ws, idx, at):
 
 
 def refs_for(idx, symbol, roles=None):
+    """Returns (occurrences, receiver_meta).
+
+    For class members, occurrences are partitioned by receiver inference:
+    provably this class -> kept as receiver 'proven'; provably ANOTHER
+    class -> excluded (counted); unprovable -> kept as 'unknown'. For
+    plain functions receiver_meta is None.
+    """
     last = symbol["qualname"].split(".")[-1]
     occs = [o for o in idx["occurrences"] if o["name"] == last]
     # constructor trap: calls to Klass(...) ARE references to __init__
@@ -528,9 +678,30 @@ def refs_for(idx, symbol, roles=None):
         cls = parts[-2]
         occs = occs + [o for o in idx["occurrences"]
                        if o["name"] == cls and o["role"] == "call"]
+    cls_qual = ".".join(parts[:-1])
+    meta = None
+    if idx["symbols"].get(cls_qual, {}).get("kind") == "class":
+        kept, excluded, proven, unknown = [], 0, 0, 0
+        for o in occs:
+            recv = o.get("recv")
+            # a definition's receiver is its enclosing class, always
+            if o["role"] == "definition" and idx["symbols"].get(
+                    o.get("enclosing", ""), {}).get("kind") == "class":
+                recv = o["enclosing"]
+            if recv == cls_qual:
+                kept.append(dict(o, receiver="proven"))
+                proven += 1
+            elif recv is None:
+                kept.append(dict(o, receiver="unknown"))
+                unknown += 1
+            else:
+                excluded += 1
+        occs = kept
+        meta = {"receiver_proven": proven, "receiver_unknown": unknown,
+                "excluded_other_receivers": excluded}
     if roles:
         occs = [o for o in occs if o["role"] in roles]
-    return occs
+    return occs, meta
 
 
 def apply_item_budget(items, budget, cursor=None):
@@ -582,7 +753,7 @@ def verb_resolve(ws, snap, idx, req):
 
 
 def _counts(idx, symbol):
-    occs = refs_for(idx, symbol)
+    occs, _rm = refs_for(idx, symbol)
     non_def = [o for o in occs if o["role"] != "definition"]
     callers = {o["enclosing"] for o in occs if o["role"] == "call"}
     tests = {o["path"] for o in non_def if "test" in o["path"].lower()}
@@ -604,7 +775,7 @@ def verb_refs(ws, snap, idx, req):
     roles = req.get("role")
     if isinstance(roles, str):
         roles = [roles]
-    occs = refs_for(idx, symbol, roles)
+    occs, recv_meta = refs_for(idx, symbol, roles)
     if not req.get("include_definitions"):
         occs = [o for o in occs if o["role"] != "definition"] \
             if roles is None else occs
@@ -629,8 +800,25 @@ def verb_refs(ws, snap, idx, req):
                              for p, v in sorted(groups.items())]}
     else:
         result = {"total": total, "symbol": symbol["sym"], "occurrences": out}
-    notes = ["matches are by name (syntactic): verify receivers before "
-             "destructive action"]
+    confidence = "syntactic"
+    if recv_meta is not None:
+        result["receivers"] = recv_meta
+        if recv_meta["receiver_unknown"] == 0:
+            confidence = "index"
+            notes = [f"every occurrence's receiver is proven to be this "
+                     f"class; {recv_meta['excluded_other_receivers']} "
+                     "same-named occurrence(s) on other classes excluded"]
+        else:
+            notes = [f"receiver-partitioned: "
+                     f"{recv_meta['receiver_proven']} proven, "
+                     f"{recv_meta['receiver_unknown']} unknown (marked per "
+                     f"occurrence), "
+                     f"{recv_meta['excluded_other_receivers']} excluded as "
+                     "provably other classes — verify 'unknown' ones "
+                     "before destructive action"]
+    else:
+        notes = ["matches are by name (syntactic): verify receivers before "
+                 "destructive action"]
     # §7.1 L1 blind-spot disclosure: string/comment/config mentions are
     # outside the symbol graph (possible getattr-style dynamic access) —
     # a zero here without this count is a green light off a cliff
@@ -643,13 +831,23 @@ def verb_refs(ws, snap, idx, req):
                      "comments/config outside the symbol graph — possible "
                      "dynamic access (getattr, config keys): inspect before "
                      "acting on the occurrence count alone")
-    return make_envelope(snap, idx, result, elided=elided, notes=notes)
+    return make_envelope(snap, idx, result, confidence=confidence,
+                         elided=elided, notes=notes)
 
 
 def _callers_of(idx, qualname):
     last = qualname.split(".")[-1]
-    return sorted({o["enclosing"] for o in idx["occurrences"]
-                   if o["name"] == last and o["role"] == "call"})
+    parent = ".".join(qualname.split(".")[:-1])
+    is_member = idx["symbols"].get(parent, {}).get("kind") == "class"
+    out = set()
+    for o in idx["occurrences"]:
+        if o["name"] != last or o["role"] != "call":
+            continue
+        if is_member and o.get("recv") is not None \
+                and o["recv"] != parent:
+            continue        # provably another class's method
+        out.add(o["enclosing"])
+    return sorted(out)
 
 
 def verb_graph(ws, snap, idx, req):
@@ -669,7 +867,16 @@ def verb_graph(ws, snap, idx, req):
                         nodes[caller] = "py:" + caller
                         nxt.append(caller)
             frontier = nxt
-    elif edge == "callees":
+    elif edge in ("callees", "path"):
+        def resolve_call(o):
+            """Callee candidates for a call occurrence — receiver-exact
+            when inference proved the class, suffix-matched otherwise."""
+            recv = o.get("recv")
+            if recv is not None:
+                exact = idx["symbols"].get(recv + "." + o["name"])
+                return [dict(exact, match="receiver")] if exact else []
+            return resolve_symbols(idx, o["name"], match="suffix")
+
         def callees_of(qualname):
             s = idx["symbols"].get(qualname)
             if not s:
@@ -678,15 +885,91 @@ def verb_graph(ws, snap, idx, req):
             return [o for o in idx["occurrences"]
                     if o["path"] == d["path"] and o["role"] == "call"
                     and d["line"] <= o["line"] <= d["end_line"]]
+
+        if edge == "path":
+            to_name = req.get("to")
+            if not to_name:
+                raise QuarryError("BAD_REQUEST",
+                                  "edge=path requires 'to' (target symbol)")
+            t_cands = resolve_symbols(idx, to_name)
+            t_cands = [c for c in t_cands if c.get("match") != "fuzzy"]
+            if not t_cands:
+                raise QuarryError("NOT_FOUND",
+                                  f"no symbol matches target {to_name!r}")
+            targets = {c["qualname"] for c in t_cands}
+            max_depth = int(req.get("depth", 30))
+            parent, hop = {}, {}
+            frontier, seen = [symbol["qualname"]], {symbol["qualname"]}
+            found = None
+            for _ in range(max_depth):
+                if found or not frontier:
+                    break
+                nxt = []
+                for q in frontier:
+                    for o in callees_of(q):
+                        cands = resolve_call(o)
+                        for cand in cands:
+                            cq = cand["qualname"]
+                            if cq in seen:
+                                continue
+                            seen.add(cq)
+                            parent[cq] = q
+                            hop[cq] = {"path": o["path"], "line": o["line"],
+                                       "receiver_resolved":
+                                       o.get("recv") is not None
+                                       or len(cands) == 1}
+                            if cq in targets:
+                                found = cq
+                                break
+                            nxt.append(cq)
+                        if found:
+                            break
+                    if found:
+                        break
+                frontier = nxt
+            t_last = to_name.split(".")[-1]
+            t_mentions = _textual_mentions(ws, t_last, exclude_py=False)
+            notes_p = ["static call edges only — dynamic dispatch "
+                       "(getattr/importlib) is NOT traversed"]
+            if t_mentions:
+                notes_p.append(
+                    f"{len(t_mentions)} textual mention(s) of the target "
+                    "exist (config/strings): dynamic reachability is "
+                    "possible even if statically unreachable")
+            if found:
+                chain, hops, c = [found], [], found
+                while c != symbol["qualname"]:
+                    hops.append(dict(hop[c], callee=c, caller=parent[c]))
+                    c = parent[c]
+                    chain.append(c)
+                chain.reverse()
+                hops.reverse()
+                conf = "index" if all(h["receiver_resolved"]
+                                      for h in hops) else "syntactic"
+                return make_envelope(
+                    snap, idx,
+                    {"from": symbol["sym"], "to": found, "reachable": True,
+                     "chain": chain, "hops": hops,
+                     "nodes_explored": len(seen),
+                     "textual_mentions_of_target": len(t_mentions)},
+                    confidence=conf, notes=notes_p)
+            return make_envelope(
+                snap, idx,
+                {"from": symbol["sym"], "to": sorted(targets),
+                 "reachable": False, "nodes_explored": len(seen),
+                 "textual_mentions_of_target": len(t_mentions)},
+                confidence="syntactic", notes=notes_p)
+
         frontier, visited = [symbol["qualname"]], {symbol["qualname"]}
         for _ in range(depth):
             nxt = []
             for q in frontier:
                 for o in callees_of(q):
-                    for cand in resolve_symbols(idx, o["name"],
-                                                match="suffix"):
+                    for cand in resolve_call(o):
                         edges.append({"from": q, "to": cand["qualname"],
                                       "edge": "calls",
+                                      "receiver_resolved":
+                                      o.get("recv") is not None,
                                       "at": {"path": o["path"],
                                              "line": o["line"]}})
                         nodes[cand["qualname"]] = cand["sym"]
@@ -710,8 +993,8 @@ def verb_graph(ws, snap, idx, req):
     else:
         raise QuarryError("UNSUPPORTED",
                           f"edge {edge!r} not implemented at this level",
-                          supported=["callers", "callees", "importers",
-                                     "imports"])
+                          supported=["callers", "callees", "path",
+                                     "importers", "imports"])
     kept, elided = apply_item_budget(edges, req.get("budget"),
                                     req.get("cursor"))
     return make_envelope(snap, idx,
@@ -1046,8 +1329,9 @@ def verb_impact(ws, snap, idx, req):
     if kind != "patch":
         symbol = resolve_unique(ws, idx, req)
     if kind == "delete":
+        del_occs, _rm = refs_for(idx, symbol)
         breaks = [dict(o, reason="reference to deleted symbol")
-                  for o in refs_for(idx, symbol)
+                  for o in del_occs
                   if o["role"] != "definition"]
         # string/comment/config mentions can be live dynamic access
         # (getattr, registries): a delete verdict that omits them is a
@@ -1063,7 +1347,8 @@ def verb_impact(ws, snap, idx, req):
         new_counts = _count_params(change.get("to", ""))
         old_counts = _count_params(symbol.get("signature", ""))
         breaks, reason = [], "call arity incompatible with new signature"
-        calls = [o for o in refs_for(idx, symbol) if o["role"] == "call"]
+        sig_occs, _rm = refs_for(idx, symbol)
+        calls = [o for o in sig_occs if o["role"] == "call"]
         if new_counts is None:
             raise QuarryError("BAD_REQUEST",
                               "could not parse change.to as a def signature")
@@ -1141,7 +1426,8 @@ def verb_brief(ws, snap, idx, req):
     d = symbol["def"]
     lines = ws.read(d["path"]).splitlines()
     body = "\n".join(lines[d["line"] - 1:d["end_line"]])
-    calls = [o for o in refs_for(idx, symbol) if o["role"] == "call"]
+    brief_occs, _rm = refs_for(idx, symbol)
+    calls = [o for o in brief_occs if o["role"] == "call"]
     calls.sort(key=lambda o: (0 if "test" in o["path"].lower() else 1,
                               o["path"], o["line"]))
     kept, elided = apply_item_budget(
@@ -1307,7 +1593,8 @@ def verb_edit_rename(ws, snap, idx, req):
                           "world to disk — run without --overlay, or keep "
                           "mode=diff")
     old = symbol["qualname"].split(".")[-1]
-    occs = refs_for(idx, symbol) + \
+    ren_occs, ren_meta = refs_for(idx, symbol)
+    occs = ren_occs + \
         [o for o in idx["occurrences"]
          if o["name"] == old and o["role"] == "definition"]
     # dedupe
@@ -1354,12 +1641,18 @@ def verb_edit_rename(ws, snap, idx, req):
         {"path": s["def"]["path"], "line": s["def"]["line"],
          "text": s["def"]["text"],
          "reason": f"same-named symbol {s['qualname']} also exists — "
-                   "its occurrences were ALSO rewritten; revert them in "
-                   "the diff if unintended"}
+                   "occurrences with PROVEN receivers on it were excluded "
+                   "from the rewrite; unknown-receiver ones were rewritten "
+                   "and are listed separately"}
         for s in idx["symbols"].values()
         if s["qualname"].split(".")[-1] == old
         and s["qualname"] != symbol["qualname"]]
-    conflicts = mismatches + same_named + _textual_mentions(
+    unknown_recv = [
+        {"path": o["path"], "line": o["line"], "text": o["text"],
+         "reason": "receiver unproven — rewritten; verify this occurrence "
+                   "belongs to the intended class"}
+        for o in ren_occs if o.get("receiver") == "unknown"]
+    conflicts = mismatches + same_named + unknown_recv + _textual_mentions(
         ws, old, exclude_py=False, rewritten=rewritten)
     diff_parts = []
     for rel, content in sorted(new_contents.items()):
@@ -1429,12 +1722,15 @@ def verb_capabilities(ws, snap, idx, req):
         backend = "cpython-parse+pyflakes"
     else:
         backend = "cpython-parse"
-    verbs = ["resolve", "describe", "refs", "graph",
+    verbs = ["resolve", "describe", "refs", "graph", "graph:path",
              "search:regex", "search:symbol", "check", "impact",
              "brief", "overlay.create", "edit.rename",
              "capabilities", "doctor"]
     missing = ["search:ast", "edit.move", "edit.change-signature"]
-    extras = ["cross-file refs/graph", "impact", "overlay", "edit.rename"]
+    extras = ["cross-file refs/graph", "receiver-resolved member refs "
+              "(constructor/annotation/self inference; unknowns "
+              "disclosed)", "graph path reachability", "impact",
+              "overlay", "edit.rename"]
     if my:
         verbs += ["type-of", "impact:patch"]
         extras += ["check at L3 (mypy: syntax+name+attribute+type)",
@@ -1446,11 +1742,11 @@ def verb_capabilities(ws, snap, idx, req):
         "protocol": PROTO_VERSION,
         "langs": {
             "python": {
-                # honest per SPEC §7/§7.1: graph verbs resolve
-                # syntactically (L1 quality) even though check/type-of run
-                # at compiler confidence when mypy is present, so the
-                # level claim stays 1 with extras enumerated
-                "level": 1, "confidence": "syntactic",
+                # SPEC §7/§7.1: receiver inference + the global class
+                # registry give cross-file identity for the provable
+                # subset (disclosed partition), meeting the L2 bar;
+                # unknown receivers degrade honestly to syntactic
+                "level": 2, "confidence": "index",
                 "extras_beyond_level": extras,
                 "verbs": verbs,
                 "missing": missing,

@@ -14,3 +14,7 @@ status/confidence/notes fields.
     $Q impact   --root WS --name NAME --json '{"change":{"kind":"delete"}}'
     $Q edit.rename --root WS --name NAME --to NEW [--mode apply]
     $Q brief    --root WS --name NAME
+    $Q graph    --root WS --name A --edge path --to B   # is B reachable from A? returns the call chain
+Member refs are receiver-partitioned: each occurrence is marked
+receiver "proven"|"unknown"; provably-other-class occurrences are
+excluded and counted in result.receivers.

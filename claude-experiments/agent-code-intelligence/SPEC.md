@@ -601,6 +601,28 @@ pipe has no data ready — an agent harness's open-but-silent stdin pipe is the
 normal case, and "no handshake, no hung pipe" applies to the CLI's own input
 too.
 
+**A12. Snapshot atomicity (§2.1).** A snapshot MUST present a consistent
+cross-file view: implementations MUST detect files changing during the
+snapshot load (e.g. read-verify passes) and either retry or disclose the
+instability (`snapshot.unstable` + `status: partial`), never serve a torn
+view as `complete`. The snapshot id is the response's claim of record: a
+response is correct iff its answer matches the content state its id
+hashes, and conformance may verify exactly that under a concurrent-editor
+hammer. (Found by the stress battery: sequential per-file reads allowed a
+mid-scan edit to produce a torn view served with full confidence.)
+
+**A13. Receiver resolution is an L2 obligation with a disclosed
+partition (§7.1).** For class-member queries at L2+, every returned
+occurrence carries its receiver status: `proven` (this class),
+`unknown` (undeterminable — returned and flagged), with provably
+other-class occurrences excluded and counted. `confidence: "index"` may
+be claimed only when no `unknown` occurrences are present; otherwise the
+response degrades to `syntactic` with the partition disclosed. Transforms
+respect the partition: proven-other occurrences are never rewritten;
+unknown-receiver rewrites are surfaced as conflicts. (Found by the
+scaled eval: agents otherwise buy receiver resolution retail — 72–140
+compiler probes per navigation question.)
+
 ## Appendix A: verb index
 
 | Verb | Question |

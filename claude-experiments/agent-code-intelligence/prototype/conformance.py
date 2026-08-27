@@ -62,6 +62,10 @@ def use_beta() -> int:
     return b.go(Alpha().go(2))
 
 
+def relay(worker, x: int) -> int:
+    return worker.go(x)
+
+
 def dead_fn() -> None:
     """Never referenced anywhere."""
 ''',
@@ -573,6 +577,46 @@ def build_checks(s):
             "an untypeable expression must error with the reason"
     C("L3-3 type-of on an undefined name errors, never reveals Any",
       l3_typeof_honest)
+
+    # ------------------------------------------------------ receivers/path
+    def recv_partition():
+        e = s.call("refs", {"sym": "py:pkg.alpha.Alpha.go"})
+        s.is_ok(e)
+        rm = e["result"].get("receivers") or {}
+        assert rm.get("excluded_other_receivers", 0) >= 1, \
+            "Beta.go's typed call must be excluded from Alpha.go refs"
+        assert rm.get("receiver_unknown", 0) >= 1, \
+            "the untyped relay(worker) call must be disclosed as unknown"
+        assert e["confidence"] == "syntactic", \
+            "unknown receivers present -> confidence must stay syntactic"
+        marks = {o.get("receiver") for o in e["result"]["occurrences"]}
+        assert marks <= {"proven", "unknown"}, f"bad receiver marks {marks}"
+    C("RECV-1 member refs partition receivers and disclose unknowns",
+      recv_partition)
+
+    def recv_confidence():
+        e = s.call("refs", {"sym": "py:pkg.beta.Beta.go", "role": "call"})
+        s.is_ok(e)
+        rm = e["result"].get("receivers") or {}
+        assert rm.get("excluded_other_receivers", 0) >= 1
+    C("RECV-2 receiver exclusion is symmetric", recv_confidence)
+
+    def path_reachable():
+        e = s.call("graph", {"name": "top", "edge": "path", "to": "leaf"})
+        s.is_ok(e)
+        r = e["result"]
+        assert r["reachable"] is True and "pkg.alpha.mid" in r["chain"], \
+            f"top->mid->leaf chain expected, got {r.get('chain')}"
+    C("PATH-1 graph path finds the transitive chain", path_reachable)
+
+    def path_unreachable():
+        e = s.call("graph", {"name": "leaf", "edge": "path", "to": "top"})
+        s.is_ok(e)
+        assert e["result"]["reachable"] is False
+        assert any("dynamic" in n for n in e.get("notes", [])), \
+            "unreachable verdict must carry the dynamic-dispatch caveat"
+    C("PATH-2 unreachable verdicts disclose the dynamic blind spot",
+      path_unreachable)
 
     # ---------------------------------------------------------- capabilities
     def cap_shape():
