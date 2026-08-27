@@ -72,6 +72,35 @@ noisier on g7.
   needs innocuous docstrings on traps (and on safe-dead functions,
   identical ones).
 
+## Rematch after the L2 upgrade
+
+The two tail-makers were then built into quarry (receiver inference with
+a proven/unknown/excluded partition; `graph --edge path` reachability
+with receiver-exact edges), the torn-snapshot risk was fixed with atomic
+verify-reread loads (id-scored hammer: 325/325 responses consistent with
+their claimed snapshot, zero torn views — the earlier "1 stale" was the
+scorer's own race), and conformance grew to 50 checks including the new
+obligations (SPEC A12/A13). Fresh agents then re-ran the two tasks
+quarry had lost on cost:
+
+| | quarry before | quarry after | LSP (reference) |
+|---|---|---|---|
+| g5 nav — tool calls | 72 / 140 | **3 / 4** | 10 |
+| g5 nav — tokens / wall | 56–66k / 156–242 s | 40k / 34 s | 37k / 45 s |
+| g8 reach — tool calls | 23 / 859 | **4 / 4** | 19 / 29 |
+| g8 reach — tokens / wall | 68–96k / 298–396 s | 40k / 40 s | 76–81k / 155–166 s |
+
+All four runs exact against the key (4/4 receiver-proven sites with 167
+collisions excluded; the 6-hop chain plus a correct unreachable verdict
+on the decoy). The measured gaps didn't narrow — they inverted: quarry
+now answers both families in fewer calls and less wall-clock than the
+steelman bridge, while keeping the disclosure channel that won the
+judgment family. Which is the levels thesis (§7) demonstrated end to
+end: the tails were never protocol properties, they were the price of
+the missing L2 capabilities, and building those capabilities — with the
+partition disclosed, per A13 — removes the tails without giving up
+honesty.
+
 ## What this eval settles, and what it doesn't
 
 Settled: at 15k LOC with hazard-free docs and weak tests, both interfaces
