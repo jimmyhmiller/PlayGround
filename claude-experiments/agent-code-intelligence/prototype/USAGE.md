@@ -71,3 +71,9 @@ without it, `check` degrades and says so.
 Conformance: `python3 conformance.py --cmd "python3 /path/to/quarry.py"`
 runs the protocol's black-box conformance suite (41 checks) against any
 implementation.
+
+Multi-worktree sharing: the index is stored as content-addressed per-file
+shards in a store shared by all git worktrees of the repo (the git common
+dir; `--store DIR` overrides). Identical trees share assembled indexes;
+an edit re-indexes only the changed files; concurrent agents race
+benignly (write-once semantics). `doctor` reports the store location.

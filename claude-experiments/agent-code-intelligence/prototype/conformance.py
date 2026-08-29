@@ -78,7 +78,7 @@ hook = getattr(beta, "dead_fn")
     "notes.md": "The go method multiplies by rate.\n",
 }
 
-VOLATILE = ("build_ms", "cache", "age_s")
+VOLATILE = ("build_ms", "cache", "age_s", "shards")
 
 
 class Suite:

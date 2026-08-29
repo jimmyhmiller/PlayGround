@@ -623,6 +623,23 @@ unknown-receiver rewrites are surfaced as conflicts. (Found by the
 scaled eval: agents otherwise buy receiver resolution retail — 72–140
 compiler probes per navigation question.)
 
+**A14. Shared content-addressed index store (§2.1, multi-agent).** The
+index decomposes into per-file **shards**, each a pure function of
+`(path, content)` — cross-file facts (receiver types, class identity) are
+recorded in shards as *candidates* and resolved at assembly against the
+snapshot's merged symbol table, so shards are never invalidated by other
+files changing. Shards and assembled indexes live in a store shared by
+every checkout of the repository (for git, the common dir all worktrees
+share). Writes are content-addressed and write-once (tmp + atomic
+rename): concurrent agents racing to index the same content produce
+identical bytes, so no locking exists in the read or write path. The
+consequences are the multi-agent story: N worktrees share one store and
+zero resident processes; an identical tree's first query is served from
+another worktree's assembly; an edit re-indexes exactly the changed
+files. (Measured on the 150-file corpus: 148 shards on first index;
+a sibling worktree's first query warm in 0.27 s; one edited file ⇒
+1 shard built, 147 reused.)
+
 ## Appendix A: verb index
 
 | Verb | Question |

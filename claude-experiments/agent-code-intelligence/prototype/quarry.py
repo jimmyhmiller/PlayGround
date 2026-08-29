@@ -202,7 +202,7 @@ class _Indexer(ast.NodeVisitor):
     provable. Unknown receivers stay None and are disclosed downstream.
     """
 
-    def __init__(self, rel, source, index, registry=None):
+    def __init__(self, rel, source, index):
         self.rel = rel
         self.mod = module_name(rel)
         self.lines = source.splitlines()
@@ -210,9 +210,8 @@ class _Indexer(ast.NodeVisitor):
         self.stack = [self.mod]           # qualname stack
         self.class_stack = []             # ClassDef qualnames
         self.call_marks = {}              # id(func_node) -> n_args
-        self.registry = registry or {}    # module -> {classname: qualname}
-        self.class_env = dict(self.registry.get(self.mod, {}))
-        self.type_envs = [{}]             # var name -> class qualname
+        self.class_env = {}               # local name -> CANDIDATE qualname
+        self.type_envs = [{}]             # var name -> candidate qualname
 
     # -- receiver-inference helpers
     def _ann_class(self, ann):
@@ -267,7 +266,7 @@ class _Indexer(ast.NodeVisitor):
         if n_args is not None:
             occ["n_args"] = n_args
         if recv is not None:
-            occ["recv"] = recv
+            occ["recv_cand"] = recv
         self.index["occurrences"].append(occ)
 
     # -- visitors
@@ -413,69 +412,137 @@ class _Indexer(ast.NodeVisitor):
         self.index["imports"].append(
             {"path": self.rel, "module": mod, "line": node.lineno})
         for alias in node.names:
-            # imported classes join the receiver-inference environment
-            if alias.name in self.registry.get(mod, {}):
-                self.class_env[alias.asname or alias.name] = \
-                    self.registry[mod][alias.name]
+            # every from-import is a receiver-type CANDIDATE; assembly
+            # keeps it only if the qualname is a real class in the
+            # merged symbol table (keeps shards content-pure)
+            self.class_env[alias.asname or alias.name] = \
+                f"{mod}.{alias.name}" 
             fake = ast.Name(id=alias.name, ctx=ast.Load())
             fake.lineno = getattr(alias, "lineno", node.lineno)
             fake.col_offset = getattr(alias, "col_offset", node.col_offset)
             self.add_occ(alias.name, fake, "import")
 
 
-def build_index(ws):
+SHARD_VERSION = "sv3"     # bump when index_file's output shape changes
+
+
+def store_dir(root, override=None):
+    """Shared content-addressed index store. Worktrees of one repo share
+    the git common dir, so they share one store — the whole point: N
+    agents on N worktrees, one set of index shards, zero servers."""
+    if override:
+        return override
+    try:
+        p = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                           cwd=root, capture_output=True, text=True,
+                           timeout=5)
+        if p.returncode == 0 and p.stdout.strip():
+            common = p.stdout.strip()
+            if not os.path.isabs(common):
+                common = os.path.join(root, common)
+            return os.path.join(os.path.abspath(common), "quarry-store")
+    except Exception:
+        pass
+    return os.path.join(root, ".quarry", "store")
+
+
+def index_file(rel, source):
+    """Pure function of (path, content) -> shard. No cross-file inputs:
+    receiver types are recorded as CANDIDATE qualnames (from this file's
+    own imports and class defs) and validated at assembly time against
+    the merged symbol table — that is what makes shards shareable across
+    worktrees and immune to other files changing."""
+    shard = {"symbols": {}, "occurrences": [], "imports": [],
+             "error": None}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        shard["error"] = {"path": rel, "line": e.lineno,
+                          "message": str(e.msg)}
+        return shard
+    mod = module_name(rel)
+    shard["symbols"][mod] = {
+        "sym": "py:" + mod, "display": mod, "qualname": mod,
+        "kind": "module", "lang": "python",
+        "def": {"path": rel, "line": 1,
+                "end_line": max(1, len(source.splitlines())), "text": ""},
+        "signature": mod, "doc": ast.get_docstring(tree),
+        "visibility": "public"}
+    ix = _Indexer(rel, source, shard)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            ix.class_env.setdefault(node.name, f"{mod}.{node.name}")
+    ix.visit(tree)
+    return shard
+
+
+def get_shard(store, rel, content):
+    """Fetch or build one shard. Content-addressed and write-once: racing
+    agents build identical bytes, so tmp+rename needs no locking."""
+    key = hashlib.sha256(
+        (SHARD_VERSION + "\0" + rel + "\0").encode() + content.encode()
+    ).hexdigest()
+    path = os.path.join(store, "objects", key + ".json")
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f), False
+        except Exception:
+            pass
+    shard = index_file(rel, content)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(shard, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return shard, True
+
+
+def build_index(ws, store=None):
     t0 = time.time()
+    store = store or store_dir(ws.root)
     index = {"symbols": {}, "occurrences": [], "imports": [],
              "files": [], "errored": [], "excluded": 0}
-    # pass 1: global class registry so receiver inference can resolve
-    # imported class names across files
-    registry, trees = {}, {}
-    for rel in ws.walk():
-        if not rel.endswith(".py"):
-            continue
-        try:
-            trees[rel] = ast.parse(ws.read(rel))
-        except SyntaxError:
-            continue
-        mod = module_name(rel)
-        for node in ast.walk(trees[rel]):
-            if isinstance(node, ast.ClassDef):
-                registry.setdefault(mod, {})[node.name] = \
-                    f"{mod}.{node.name}"
+    built = reused = 0
     for rel in ws.walk():
         if not rel.endswith(".py"):
             continue
         index["files"].append(rel)
-        source = ws.read(rel)
-        try:
-            tree = ast.parse(source)
-        except SyntaxError as e:
-            index["errored"].append({"path": rel, "line": e.lineno,
-                                     "message": str(e.msg)})
+        shard, was_built = get_shard(store, rel, ws.read(rel))
+        built += was_built
+        reused += not was_built
+        if shard["error"]:
+            index["errored"].append(shard["error"])
             continue
-        mod = module_name(rel)
-        node = ast.Module(body=[], type_ignores=[])
-        node.lineno, node.end_lineno = 1, max(1, len(source.splitlines()))
-        ix = _Indexer(rel, source, index, registry=registry)
-        # module symbol
-        index["symbols"].setdefault(mod, {
-            "sym": "py:" + mod, "display": mod, "qualname": mod,
-            "kind": "module", "lang": "python",
-            "def": {"path": rel, "line": 1,
-                    "end_line": node.end_lineno, "text": ""},
-            "signature": mod, "doc": ast.get_docstring(tree),
-            "visibility": "public"})
-        ix.visit(tree)
+        index["symbols"].update(shard["symbols"])
+        index["occurrences"].extend(shard["occurrences"])
+        index["imports"].extend(shard["imports"])
+    # assembly: a receiver candidate counts only if it names a real class
+    # in THIS snapshot's merged symbol table
+    classes = {q for q, s in index["symbols"].items()
+               if s["kind"] == "class"}
+    for o in index["occurrences"]:
+        rc = o.pop("recv_cand", None)
+        if rc is not None and rc in classes:
+            o["recv"] = rc
     index["build_ms"] = int((time.time() - t0) * 1000)
+    index["shards"] = {"built": built, "reused": reused}
     return index
 
 
-def load_index(ws):
-    """Cache-as-daemon: reuse a cached index when the snapshot id matches."""
+def load_index(ws, store=None):
+    """Cache-as-daemon: reuse the assembled index when the snapshot id
+    matches. Assembled indexes live in the shared store too — snapshot
+    ids are content hashes, so identical trees in different worktrees
+    share the assembly as well as the shards."""
     snap = ws.snapshot()
-    cache_dir = os.path.join(ws.root, ".quarry", "cache")
-    cache_file = os.path.join(cache_dir, snap["id"].replace(":", "_") + ".json")
-    if not ws.overlay_id and os.path.exists(cache_file):
+    sdir = store or store_dir(ws.root)
+    cache_file = os.path.join(sdir, "assembled",
+                              snap["id"].replace(":", "_") + ".json")
+    if os.path.exists(cache_file):
         try:
             with open(cache_file, encoding="utf-8") as f:
                 idx = json.load(f)
@@ -483,15 +550,16 @@ def load_index(ws):
             return snap, idx
         except Exception:
             pass
-    idx = build_index(ws)
+    idx = build_index(ws, store=sdir)
     idx["cache"] = "cold"
-    if not ws.overlay_id:
-        try:
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(idx, f)
-        except OSError:
-            pass
+    try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        tmp = f"{cache_file}.tmp{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(idx, f)
+        os.replace(tmp, cache_file)
+    except OSError:
+        pass
     return snap, idx
 
 
@@ -504,7 +572,8 @@ def make_envelope(snap, idx, result, status="complete", confidence="syntactic",
         "confidence": confidence,
         "index": {"state": "fresh", "age_s": 0,
                   "built_pct": 100, "cache": idx.get("cache", "cold"),
-                  "build_ms": idx.get("build_ms", 0)},
+                  "build_ms": idx.get("build_ms", 0),
+                  "shards": idx.get("shards")},
         "coverage": {"files_indexed": len(idx["files"]),
                      "files_errored": [e["path"] for e in idx["errored"]]},
         "snapshot": snap,
@@ -1781,6 +1850,14 @@ def verb_doctor(ws, snap, idx, req):
         checks.append({"check": "pyflakes", "ok": False,
                        "remedy": "pip install pyflakes",
                        "consequence": "fallback when mypy absent"})
+    sdir = store_dir(ws.root, req.get("store"))
+    n_objects = 0
+    obj_dir = os.path.join(sdir, "objects")
+    if os.path.isdir(obj_dir):
+        n_objects = len(os.listdir(obj_dir))
+    checks.append({"check": "store", "ok": True,
+                   "detail": f"{sdir} ({n_objects} shards; shared across "
+                             "git worktrees via the common dir)"})
     checks.append({"check": "index", "ok": not idx["errored"],
                    "detail": f"{len(idx['files'])} files, "
                              f"{len(idx['symbols'])} symbols, "
@@ -1831,7 +1908,7 @@ def run_one(root, req):
                     f"overlay {ws.overlay_id} was built on "
                     f"{ws.overlay_base}, but the workspace is now "
                     f"{disk_id} — recreate the overlay")
-        snap, idx = load_index(ws)
+        snap, idx = load_index(ws, req.get("store"))
         if verb == "batch":
             out = []
             for sub in req.get("queries", []):
@@ -1845,7 +1922,8 @@ def run_one(root, req):
                     sws = Workspace(root, overlay_id=sub.get("overlay",
                                                              req.get("overlay")))
                     if sws.overlay_id != ws.overlay_id:
-                        ssnap, sidx = load_index(sws)
+                        ssnap, sidx = load_index(
+                            sws, sub.get("store", req.get("store")))
                     else:
                         sws, ssnap, sidx = ws, snap, idx
                     env = VERBS[sub_v](sws, ssnap, sidx, sub)
@@ -1894,6 +1972,7 @@ def build_request(argv):
     p.add_argument("--depth", type=int); p.add_argument("--role")
     p.add_argument("--regex"); p.add_argument("--overlay")
     p.add_argument("--cursor"); p.add_argument("--match")
+    p.add_argument("--store")
     p.add_argument("--group-by", dest="group_by")
     p.add_argument("--context-lines", dest="context_lines", type=int)
     p.add_argument("--budget-items", dest="budget_items", type=int)
@@ -1904,7 +1983,8 @@ def build_request(argv):
     args = p.parse_args(argv)
     req = {"verb": args.verb}
     for k in ("name", "sym", "to", "mode", "edge", "depth", "role", "regex",
-              "overlay", "cursor", "match", "group_by", "context_lines"):
+              "overlay", "cursor", "match", "group_by", "context_lines",
+              "store"):
         v = getattr(args, k)
         if v is not None:
             req[k] = v

@@ -151,3 +151,17 @@ breadth, not the contract: one language, one compiler backend, one repo of
 real-world scale. The meta-result stands as the design lesson: trust comes
 from the protocol making dishonesty a conformance failure, not from the
 tool being smart — and that is now enforced by code, not discipline.
+
+## Round 5 — multi-worktree sharing (amendment A14)
+
+The index was decomposed into content-addressed per-file shards (pure in
+(path, content); receiver types recorded as candidates and resolved at
+assembly) stored in the git common dir all worktrees share. Measured on
+the 150-file granite corpus as a real git repo with three worktrees:
+cold index 148 shards / 639 ms; a sibling worktree's FIRST query warm in
+0.27 s (identical tree ⇒ shared assembly); one edited file ⇒ 1 shard
+built + 147 reused in 0.35 s; two worktrees querying concurrently with
+no locks and no interference; total footprint one 23 MB store and zero
+resident processes. Conformance stayed 50/50 across the refactor — the
+sharing is observationally invisible, which is the point: it is a cache
+layout, not a semantics change.
