@@ -1,4 +1,5 @@
 (module workflow)
+(import "coil.alloc" :as alloc)
 
 (const MAX_NODES 7)
 (const OUTPUT_CAPACITY 4096)
@@ -53,7 +54,7 @@
 
 (defn string-length [(text (ptr i8))] (-> i64)
   (let [(mut length) 0]
-    (loop (if (icmp-eq (load (index text (load length))) (cast i8 0))
+    (loop (if (= (load (index text (load length))) (cast i8 0))
             (break)
             (store! length (+ (load length) 1))))
     (load length)))
@@ -62,33 +63,33 @@
   (let [(mut position) 0]
     (loop (let [leftByte (load (index left (load position)))
                 rightByte (load (index right (load position)))]
-            (if (icmp-ne leftByte rightByte)
+            (if (!= leftByte rightByte)
               (break false)
-              (if (icmp-eq leftByte (cast i8 0))
+              (if (= leftByte (cast i8 0))
                 (break true)
                 (store! position (+ (load position) 1))))))))
 
 (defn starts-with [(text (ptr i8)) (prefix (ptr i8))] (-> bool)
   (let [(mut position) 0]
     (loop (let [prefixByte (load (index prefix (load position)))]
-            (if (icmp-eq prefixByte (cast i8 0))
+            (if (= prefixByte (cast i8 0))
               (break true)
-              (if (icmp-ne (load (index text (load position))) prefixByte)
+              (if (!= (load (index text (load position))) prefixByte)
                 (break false)
                 (store! position (+ (load position) 1))))))))
 
 (defn trim-left [(text (ptr i8))] (-> (ptr i8))
-  (if (icmp-eq (load text) (cast i8 32)) (trim-left (index text 1)) text))
+  (if (= (load text) (cast i8 32)) (trim-left (index text 1)) text))
 
 (defn read-source [(path (ptr i8))] (-> (ptr i8))
   (let [descriptor (open path (cast i32 0))
         buffer (malloc 65536)]
-    (if (icmp-lt descriptor (cast i32 0))
+    (if (< descriptor (cast i32 0))
       (do (store! buffer (cast i8 0)) buffer)
       (let [count (read descriptor buffer 65535)]
         (do
           (close descriptor)
-          (store! (index buffer (if (icmp-lt count 0) 0 count)) (cast i8 0))
+          (store! (index buffer (if (< count 0) 0 count)) (cast i8 0))
           buffer)))))
 
 (defn allocate-buffer [(capacity i64)] (-> (ptr i8))
@@ -124,9 +125,9 @@
       (do
         (store! (field node dependencyNameA) text)
         (loop (let [byte (load (index text (load position)))]
-                (if (icmp-eq byte (cast i8 0))
+                (if (= byte (cast i8 0))
                   (break)
-                  (if (icmp-eq byte (cast i8 44))
+                  (if (= byte (cast i8 44))
                     (do
                       (store! (index text (load position)) (cast i8 0))
                       (store! (field node dependencyNameB) (trim-left (index text (+ (load position) 1))))
@@ -135,7 +136,7 @@
         0))))
 
 (defn parse-line [(program (mut WorkflowProgram)) (line (ptr i8)) (current i64)] (-> i64)
-  (cond (or (icmp-eq (load line) (cast i8 0)) (icmp-eq (load line) (cast i8 35))) current
+  (cond (or (= (load line) (cast i8 0)) (= (load line) (cast i8 35))) current
         (starts-with line c"workflow ") (do (store! (field program name) (index line 9)) current)
         (starts-with line c"runner ") (do (store! (field program runner) (index line 7)) current)
         (starts-with line c"agent ")
@@ -170,10 +171,10 @@
             firstName (load (field node dependencyNameA))
             secondName (load (field node dependencyNameB))]
         (do
-          (if (icmp-ne (cast i64 firstName) 0)
+          (if (!= (cast i64 firstName) 0)
             (store! (field node dependencyA) (find-node program firstName))
             0)
-          (if (icmp-ne (cast i64 secondName) 0)
+          (if (!= (cast i64 secondName) 0)
             (store! (field node dependencyB) (find-node program secondName))
             0)
           0))
@@ -192,15 +193,15 @@
       (store! (field program path) path)
       (store! (field program source) source)
       (loop (let [byte (load (load cursor))]
-              (if (or (icmp-eq byte (cast i8 10)) (icmp-eq byte (cast i8 0)))
+              (if (or (= byte (cast i8 10)) (= byte (cast i8 0)))
                 (do
                   (if (and (!= (load cursor) source)
-                           (icmp-eq (load (index (load cursor) -1)) (cast i8 13)))
+                           (= (load (index (load cursor) -1)) (cast i8 13)))
                     (store! (index (load cursor) -1) (cast i8 0))
                     0)
                   (store! (load cursor) (cast i8 0))
                   (store! current (parse-line (mut program) (load lineStart) (load current)))
-                  (if (icmp-eq byte (cast i8 0))
+                  (if (= byte (cast i8 0))
                     (break)
                     (do
                       (store! cursor (index (load cursor) 1))
@@ -249,10 +250,10 @@
       (do
         (store! (field catalog count) 0)
         (loop (let [byte (load (load cursor))]
-                (if (or (icmp-eq byte (cast i8 10)) (icmp-eq byte (cast i8 0)))
+                (if (or (= byte (cast i8 10)) (= byte (cast i8 0)))
                   (do
                     (store! (load cursor) (cast i8 0))
-                    (if (and (icmp-ne (load (load lineStart)) (cast i8 0))
+                    (if (and (!= (load (load lineStart)) (cast i8 0))
                              (< (load (field catalog count)) MAX_WORKFLOWS))
                       (let [runtime (cast (ptr Runtime) (malloc (sizeof Runtime)))
                             runtimeValue (load-runtime (load lineStart))]
@@ -264,7 +265,7 @@
                             0)
                           0))
                       0)
-                    (if (icmp-eq byte (cast i8 0))
+                    (if (= byte (cast i8 0))
                       (break)
                       (do
                         (store! cursor (index (load cursor) 1))
@@ -316,7 +317,7 @@
         (mut writePosition) 0
         (mut lastDash) 1]
     (do
-      (while (and (icmp-ne (load (index name (load readPosition))) (cast i8 0))
+      (while (and (!= (load (index name (load readPosition))) (cast i8 0))
                   (< (load writePosition) (- capacity 1)))
         (let [byte (cast i64 (load (index name (load readPosition))))]
           (do
@@ -341,7 +342,7 @@
                     0))
             (store! readPosition (+ (load readPosition) 1)))))
       (if (and (> (load writePosition) 0)
-               (icmp-eq (load (index destination (- (load writePosition) 1))) (cast i8 45)))
+               (= (load (index destination (- (load writePosition) 1))) (cast i8 45)))
         (store! writePosition (- (load writePosition) 1))
         0)
       (store! (index destination (load writePosition)) (cast i8 0))
@@ -356,8 +357,8 @@
   (let [program (parse-program c".flowline/design.draft.flow")]
     (if (= (load (field program nodeCount)) 0)
       0
-      (let [slug (cast (ptr i8) (cast i64 (alloc-stack (array i8 64))))
-            path (cast (ptr i8) (cast i64 (alloc-stack (array i8 96))))
+      (let [slug (cast (ptr i8) (cast i64 (alloc/stack (array i8 64))))
+            path (cast (ptr i8) (cast i64 (alloc/stack (array i8 96))))
             content (read-source c".flowline/design.draft.flow")]
         (do
           (slugify-into slug (load (field program name)) 48)
@@ -433,8 +434,8 @@
         (mut position) 0]
     (do
       (loop (let [byte (load (index createdPath (load position)))]
-              (if (or (icmp-eq byte (cast i8 0))
-                      (or (icmp-eq byte (cast i8 10)) (icmp-eq byte (cast i8 13))))
+              (if (or (= byte (cast i8 0))
+                      (or (= byte (cast i8 10)) (= byte (cast i8 13))))
                 (do
                   (store! (index createdPath (load position)) (cast i8 0))
                   (break))
@@ -499,13 +500,13 @@
 
 (defn file-exists [(path (ptr i8))] (-> bool)
   (let [file (fopen path c"rb")]
-    (if (icmp-eq (cast i64 file) 0)
+    (if (= (cast i64 file) 0)
       false
       (do (fclose file) true))))
 
 (defn write-prompt [(node i64) (prompt (ptr i8))] (-> i64)
   (let [file (fopen (prompt-path node) c"wb")]
-    (if (icmp-eq (cast i64 file) 0)
+    (if (= (cast i64 file) 0)
       -1
       (do
         (fwrite prompt 1 (string-length prompt) file)
@@ -518,7 +519,7 @@
 (defn load-output [(runtime (mut Runtime)) (node i64)] (-> i64)
   (let [file (fopen (output-path node) c"rb")
         buffer (output-buffer (mut runtime) node)]
-    (if (icmp-eq (cast i64 file) 0)
+    (if (= (cast i64 file) 0)
       (do (store! buffer (cast i8 0)) 0)
       (let [count (fread buffer 1 (- OUTPUT_CAPACITY 1) file)]
         (do
@@ -750,7 +751,7 @@
       (loop (if (>= (load position) (- capacity 1))
               (break)
               (let [byte (load (index source (load position)))]
-                (if (icmp-eq byte (cast i8 0))
+                (if (= byte (cast i8 0))
                   (break)
                   (do
                     (store! (index destination (load position)) byte)
@@ -769,8 +770,8 @@
         (mut written) 0]
     (do
       (loop (let [byte (load (index source (load read)))]
-              (if (or (icmp-eq byte (cast i8 0))
-                      (or (icmp-eq byte (cast i8 124)) (icmp-eq byte (cast i8 10))))
+              (if (or (= byte (cast i8 0))
+                      (or (= byte (cast i8 124)) (= byte (cast i8 10))))
                 (break)
                 (do
                   (if (< (load written) (- capacity 1))
@@ -782,7 +783,7 @@
                   (store! read (+ (load read) 1))
                   0))))
       (store! (index destination (load written)) (cast i8 0))
-      (if (icmp-eq (load (index source (load read))) (cast i8 0))
+      (if (= (load (index source (load read))) (cast i8 0))
         (load read)
         (+ (load read) 1)))))
 
@@ -792,10 +793,10 @@
         (mut total) 0]
     (do
       (loop (let [byte (cast i64 (load (index text (load position))))]
-              (if (or (< byte \0) (> byte \9))
+              (if (or (< byte #\0) (> byte #\9))
                 (break)
                 (do
-                  (store! total (+ (* (load total) 10) (- byte \0)))
+                  (store! total (+ (* (load total) 10) (- byte #\0)))
                   (store! position (+ (load position) 1))
                   0))))
       (load total))))
@@ -821,17 +822,17 @@
 (defn load-run-log [(log (ptr RunLog))] (-> i64)
   (let [source (read-source c".flowline/runs.log")
         (mut position) 0
-        scratch (cast (ptr i8) (cast i64 (alloc-stack (array i8 32))))]
+        scratch (cast (ptr i8) (cast i64 (alloc/stack (array i8 32))))]
     (do
       (store! log (zeroed RunLog))
       (store! (field log nextId) 1)
-      (if (icmp-ne (load source) (cast i8 0))
+      (if (!= (load source) (cast i8 0))
         (do
           (store! position (scan-field source 0 scratch 32))
           (store! (field log nextId) (parse-integer scratch))
           0)
         0)
-      (loop (if (or (icmp-eq (load (index source (load position))) (cast i8 0))
+      (loop (if (or (= (load (index source (load position))) (cast i8 0))
                     (>= (load (field log count)) MAX_RUNS))
               (break)
               (let [record (run-log-record log (load (field log count)))]
@@ -846,7 +847,7 @@
                   (store! (field record startedAt) (parse-integer scratch))
                   (store! position (scan-field source (load position) scratch 32))
                   (store! (field record duration) (parse-integer scratch))
-                  (if (icmp-eq (load (record-id record)) (cast i8 0))
+                  (if (= (load (record-id record)) (cast i8 0))
                     (break)
                     (store! (field log count) (+ (load (field log count)) 1)))
                   0))))
@@ -854,8 +855,8 @@
 
 (defn save-run-log [(log (ptr RunLog))] (-> i64)
   (let [file (fopen c".flowline/runs.log" c"wb")
-        line (cast (ptr i8) (cast i64 (alloc-stack (array i8 512))))]
-    (if (icmp-eq (cast i64 file) 0)
+        line (cast (ptr i8) (cast i64 (alloc/stack (array i8 512))))]
+    (if (= (cast i64 file) 0)
       -1
       (do
         (snprintf line 512 c"%lld\n" (load (field log nextId)))
@@ -903,7 +904,7 @@
     (if (>= (load (field log count)) MAX_RUNS) (evict-oldest-run log) 0)
     (let [entry (load (field log count))
           record (run-log-record log entry)
-          identifier (cast (ptr i8) (cast i64 (alloc-stack (array i8 16))))]
+          identifier (cast (ptr i8) (cast i64 (alloc/stack (array i8 16))))]
       (do
         (snprintf identifier 16 c"RUN-%04lld" (load (field log nextId)))
         (store! (field log nextId) (+ (load (field log nextId)) 1))
@@ -968,10 +969,10 @@
 
 (defn environment-set [(name (ptr i8))] (-> bool)
   (let [value (getenv name)]
-    (and (!= (cast i64 value) 0) (icmp-ne (load value) (cast i8 0)))))
+    (and (!= (cast i64 value) 0) (!= (load value) (cast i8 0)))))
 
 (defn command-available [(command (ptr i8))] (-> bool)
-  (let [line (cast (ptr i8) (cast i64 (alloc-stack (array i8 256))))]
+  (let [line (cast (ptr i8) (cast i64 (alloc/stack (array i8 256))))]
     (do
       (snprintf line 256 c"command -v %s >/dev/null 2>&1" command)
-      (icmp-eq (system line) (cast i32 0)))))
+      (= (system line) (cast i32 0)))))

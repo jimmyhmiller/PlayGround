@@ -1,9 +1,0 @@
-interface Tool { fn name() -> String }
-class ShellTool implements Tool { fn name() -> String { "shell" } }
-class SearchTool implements Tool { fn name() -> String { "search" } }
-fn main() {
-  let tools = List<Tool>()
-  tools.push(ShellTool())
-  tools.push(SearchTool())
-  for t in tools { print(t.name()) }
-}

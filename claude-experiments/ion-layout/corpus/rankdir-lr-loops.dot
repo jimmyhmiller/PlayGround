@@ -1,9 +1,0 @@
-digraph LRLoops {
-  rankdir=LR;
-  node [shape=box];
-  entry -> header;
-  header -> body1;
-  body1 -> body2;
-  body2 -> header;
-  header -> exit;
-}

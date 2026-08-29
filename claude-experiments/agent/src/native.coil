@@ -1,4 +1,5 @@
 (module native)
+(import "coil.alloc" :as alloc)
 
 ;; The components in this file are adapted from the Vercel Labs Native SDK
 ;; canvas widgets (https://github.com/vercel-labs/native), provided under the
@@ -8,7 +9,7 @@
 ;;
 ;; See licenses/native-sdk-Apache-2.0.txt and THIRD_PARTY_NOTICES.md.
 
-(import "raylib.coil" :as raylib)
+(import "raylib" :as raylib)
 
 (const NATIVE_KEY_SPACE 32)
 (const NATIVE_KEY_RIGHT 262)
@@ -52,11 +53,11 @@
    (comboboxOpen i64)
    (overlay i64)
    (resizableSplit f64)
-   (mono raylib.Font)
-   (sans raylib.Font)])
+   (mono raylib/Font)
+   (sans raylib/Font)])
 
-(defn color-alpha [(red i64) (green i64) (blue i64) (alpha i64)] (-> raylib.Color)
-  (let [value (alloc-stack raylib.Color)]
+(defn color-alpha [(red i64) (green i64) (blue i64) (alpha i64)] (-> raylib/Color)
+  (let [value (alloc/stack raylib/Color)]
     (do
       (store! (field value r) (cast u8 red))
       (store! (field value g) (cast u8 green))
@@ -64,7 +65,7 @@
       (store! (field value a) (cast u8 alpha))
       (load value))))
 
-(defn color [(red i64) (green i64) (blue i64)] (-> raylib.Color)
+(defn color [(red i64) (green i64) (blue i64)] (-> raylib/Color)
   (color-alpha red green blue 255))
 
 (defn smaller [(left f64) (right f64)] (-> f64)
@@ -73,15 +74,15 @@
 (defn larger [(left f64) (right f64)] (-> f64)
   (if (> left right) left right))
 
-(defn vector [(horizontal f64) (vertical f64)] (-> raylib.Vector2)
-  (let [value (alloc-stack raylib.Vector2)]
+(defn vector [(horizontal f64) (vertical f64)] (-> raylib/Vector2)
+  (let [value (alloc/stack raylib/Vector2)]
     (do
       (store! (field value x) (cast f32 horizontal))
       (store! (field value y) (cast f32 vertical))
       (load value))))
 
-(defn rectangle [(frame Frame)] (-> raylib.Rectangle)
-  (let [value (alloc-stack raylib.Rectangle)]
+(defn rectangle [(frame Frame)] (-> raylib/Rectangle)
+  (let [value (alloc/stack raylib/Rectangle)]
     (do
       (store! (field value x) (cast f32 (load (field frame left))))
       (store! (field value y) (cast f32 (load (field frame top))))
@@ -90,7 +91,7 @@
       (load value))))
 
 (defn frame [(left f64) (top f64) (width f64) (height f64)] (-> Frame)
-  (let [value (alloc-stack Frame)]
+  (let [value (alloc/stack Frame)]
     (do
       (store! (field value left) left)
       (store! (field value top) top)
@@ -99,7 +100,7 @@
       (load value))))
 
 (defn interaction [(hovered i64) (pressed i64) (focused i64) (disabled i64)] (-> Interaction)
-  (let [value (alloc-stack Interaction)]
+  (let [value (alloc/stack Interaction)]
     (do
       (store! (field value hovered) hovered)
       (store! (field value pressed) pressed)
@@ -113,38 +114,38 @@
             (and (>= vertical (load (field bounds top)))
                  (<= vertical (+ (load (field bounds top)) (load (field bounds height))))))))
 
-(defn background [] (-> raylib.Color) (color 10 10 10))
-(defn surface [] (-> raylib.Color) (color 23 23 23))
-(defn surface-subtle [] (-> raylib.Color) (color 38 38 38))
-(defn surface-pressed [] (-> raylib.Color) (color-alpha 255 255 255 38))
-(defn text [] (-> raylib.Color) (color 250 250 250))
-(defn text-muted [] (-> raylib.Color) (color 161 161 161))
-(defn border [] (-> raylib.Color) (color-alpha 255 255 255 26))
-(defn accent [] (-> raylib.Color) (color 229 229 229))
-(defn accent-text [] (-> raylib.Color) (color 23 23 23))
-(defn focus-ring [] (-> raylib.Color) (color 115 115 115))
+(defn background [] (-> raylib/Color) (color 10 10 10))
+(defn surface [] (-> raylib/Color) (color 23 23 23))
+(defn surface-subtle [] (-> raylib/Color) (color 38 38 38))
+(defn surface-pressed [] (-> raylib/Color) (color-alpha 255 255 255 38))
+(defn text [] (-> raylib/Color) (color 250 250 250))
+(defn text-muted [] (-> raylib/Color) (color 161 161 161))
+(defn border [] (-> raylib/Color) (color-alpha 255 255 255 26))
+(defn accent [] (-> raylib/Color) (color 229 229 229))
+(defn accent-text [] (-> raylib/Color) (color 23 23 23))
+(defn focus-ring [] (-> raylib/Color) (color 115 115 115))
 
-(defn rounded-fill [(bounds Frame) (radius f64) (tint raylib.Color)] (-> i64)
+(defn rounded-fill [(bounds Frame) (radius f64) (tint raylib/Color)] (-> i64)
   (do
-    (raylib.DrawRectangleRounded (rectangle bounds) (cast f32 (/ radius (smaller (load (field bounds width)) (load (field bounds height))))) (cast i32 8) tint)
+    (raylib/DrawRectangleRounded (rectangle bounds) (cast f32 (/ radius (smaller (load (field bounds width)) (load (field bounds height))))) (cast i32 8) tint)
     0))
 
-(defn rounded-stroke [(bounds Frame) (radius f64) (thickness f64) (tint raylib.Color)] (-> i64)
+(defn rounded-stroke [(bounds Frame) (radius f64) (thickness f64) (tint raylib/Color)] (-> i64)
   (do
-    (raylib.DrawRectangleRoundedLinesEx (rectangle bounds)
+    (raylib/DrawRectangleRoundedLinesEx (rectangle bounds)
                                          (cast f32 (/ radius (smaller (load (field bounds width)) (load (field bounds height)))))
                                          (cast i32 8)
                                          (cast f32 thickness)
                                          tint)
     0))
 
-(defn draw-label [(font raylib.Font) (label (ptr i8)) (left f64) (top f64) (size f64) (tint raylib.Color)] (-> i64)
+(defn draw-label [(font raylib/Font) (label (ptr i8)) (left f64) (top f64) (size f64) (tint raylib/Color)] (-> i64)
   (do
-    (raylib.DrawTextEx (load font) label (vector left top) (cast f32 size) (cast f32 0.0) tint)
+    (raylib/DrawTextEx (load font) label (vector left top) (cast f32 size) (cast f32 0.0) tint)
     0))
 
-(defn draw-centered-label [(font raylib.Font) (label (ptr i8)) (bounds Frame) (size f64) (tint raylib.Color)] (-> i64)
-  (let [measured (raylib.MeasureTextEx (load font) label (cast f32 size) (cast f32 0.0))]
+(defn draw-centered-label [(font raylib/Font) (label (ptr i8)) (bounds Frame) (size f64) (tint raylib/Color)] (-> i64)
+  (let [measured (raylib/MeasureTextEx (load font) label (cast f32 size) (cast f32 0.0))]
     (draw-label font
                 label
                 (+ (load (field bounds left)) (/ (- (load (field bounds width)) (cast f64 (load (field measured x)))) 2.0))
@@ -163,7 +164,7 @@
                     (focus-ring))
     0))
 
-(defn draw-button [(font raylib.Font) (label (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
+(defn draw-button [(font raylib/Font) (label (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
   (let [disabled (= (load (field state disabled)) 1)
         fill (if disabled
                (color 70 70 70)
@@ -175,8 +176,8 @@
       (draw-centered-label font label bounds 14.0 ink)
       0)))
 
-(defn draw-input [(font raylib.Font) (value (ptr i8)) (placeholder (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
-  (let [hasValue (icmp-ne (load value) (cast i8 0))]
+(defn draw-input [(font raylib/Font) (value (ptr i8)) (placeholder (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
+  (let [hasValue (!= (load value) (cast i8 0))]
     (do
       (rounded-fill bounds 6.0 (surface))
       (rounded-stroke bounds 6.0 1.0 (border))
@@ -189,8 +190,8 @@
                   (if hasValue (text) (text-muted)))
       0)))
 
-(defn draw-textarea [(font raylib.Font) (value (ptr i8)) (placeholder (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
-  (let [hasValue (icmp-ne (load value) (cast i8 0))]
+(defn draw-textarea [(font raylib/Font) (value (ptr i8)) (placeholder (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
+  (let [hasValue (!= (load value) (cast i8 0))]
     (do
       (rounded-fill bounds 6.0 (surface))
       (rounded-stroke bounds 6.0 1.0 (border))
@@ -203,7 +204,7 @@
                   (if hasValue (text) (text-muted)))
       0)))
 
-(defn draw-checkbox [(font raylib.Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
+(defn draw-checkbox [(font raylib/Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
   (let [box (frame (load (field bounds left))
                    (+ (load (field bounds top)) (/ (- (load (field bounds height)) 16.0) 2.0))
                    16.0
@@ -214,11 +215,11 @@
       (draw-focus box 4.0 (load (field state focused)))
       (if (= checked 1)
         (do
-          (raylib.DrawLineEx (vector (+ (load (field box left)) 4.0) (+ (load (field box top)) 8.5))
+          (raylib/DrawLineEx (vector (+ (load (field box left)) 4.0) (+ (load (field box top)) 8.5))
                              (vector (+ (load (field box left)) 7.0) (+ (load (field box top)) 11.0))
                              (cast f32 2.0)
                              (accent-text))
-          (raylib.DrawLineEx (vector (+ (load (field box left)) 7.0) (+ (load (field box top)) 11.0))
+          (raylib/DrawLineEx (vector (+ (load (field box left)) 7.0) (+ (load (field box top)) 11.0))
                              (vector (+ (load (field box left)) 12.0) (+ (load (field box top)) 5.0))
                              (cast f32 2.0)
                              (accent-text))
@@ -227,7 +228,7 @@
       (draw-label font label (+ (load (field bounds left)) 24.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
       0)))
 
-(defn draw-switch [(font raylib.Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
+(defn draw-switch [(font raylib/Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
   (let [track (frame (load (field bounds left))
                      (+ (load (field bounds top)) (/ (- (load (field bounds height)) 24.0) 2.0))
                      44.0
@@ -235,7 +236,7 @@
         knobLeft (if (= checked 1) (+ (load (field track left)) 22.0) (+ (load (field track left)) 2.0))]
     (do
       (rounded-fill track 12.0 (if (= checked 1) (accent) (surface-pressed)))
-      (raylib.DrawCircle (cast i32 (+ knobLeft 10.0))
+      (raylib/DrawCircle (cast i32 (+ knobLeft 10.0))
                          (cast i32 (+ (load (field track top)) 12.0))
                          (cast f32 10.0)
                          (if (= checked 1) (accent-text) (text)))
@@ -253,17 +254,17 @@
       (if (> activeWidth 0.0)
         (rounded-fill (frame (load (field bounds left)) trackTop activeWidth 4.0) 2.0 (accent))
         0)
-      (raylib.DrawCircle (cast i32 knobHorizontal)
+      (raylib/DrawCircle (cast i32 knobHorizontal)
                          (cast i32 (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0)))
                          (cast f32 6.0)
                          (color 255 255 255))
-      (raylib.DrawCircleLines (cast i32 knobHorizontal)
+      (raylib/DrawCircleLines (cast i32 knobHorizontal)
                               (cast i32 (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0)))
                               (cast f32 6.0)
                               (focus-ring))
       (if (= (load (field state focused)) 1)
         (do
-          (raylib.DrawCircleLines (cast i32 knobHorizontal)
+          (raylib/DrawCircleLines (cast i32 knobHorizontal)
                                   (cast i32 (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0)))
                                   (cast f32 9.0)
                                   (focus-ring))
@@ -271,7 +272,7 @@
         0)
       0)))
 
-(defn draw-toggle [(font raylib.Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
+(defn draw-toggle [(font raylib/Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
   (do
     (rounded-fill bounds 6.0 (if (= checked 1) (surface-pressed) (surface)))
     (if (= checked 1) 0 (rounded-stroke bounds 6.0 1.0 (border)))
@@ -279,26 +280,26 @@
     (draw-centered-label font label bounds 14.0 (text))
     0))
 
-(defn draw-radio [(font raylib.Font) (label (ptr i8)) (bounds Frame) (selected i64) (state Interaction)] (-> i64)
+(defn draw-radio [(font raylib/Font) (label (ptr i8)) (bounds Frame) (selected i64) (state Interaction)] (-> i64)
   (let [centerHorizontal (+ (load (field bounds left)) 8.0)
         centerVertical (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0))]
     (do
-      (raylib.DrawCircle (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 8.0) (surface))
-      (raylib.DrawCircleLines (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 8.0) (border))
+      (raylib/DrawCircle (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 8.0) (surface))
+      (raylib/DrawCircleLines (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 8.0) (border))
       (if (= selected 1)
         (do
-          (raylib.DrawCircle (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 4.0) (accent))
+          (raylib/DrawCircle (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 4.0) (accent))
           0)
         0)
       (if (= (load (field state focused)) 1)
         (do
-          (raylib.DrawCircleLines (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 11.0) (focus-ring))
+          (raylib/DrawCircleLines (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 11.0) (focus-ring))
           0)
         0)
       (draw-label font label (+ (load (field bounds left)) 24.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
       0)))
 
-(defn draw-alert [(font raylib.Font)
+(defn draw-alert [(font raylib/Font)
                   (title (ptr i8))
                   (description (ptr i8))
                   (bounds Frame)
@@ -311,20 +312,20 @@
     (draw-label font description (+ (load (field bounds left)) 40.0) (+ (load (field bounds top)) 36.0) 13.0 (text-muted))
     0))
 
-(defn draw-avatar [(font raylib.Font) (initials (ptr i8)) (bounds Frame)] (-> i64)
+(defn draw-avatar [(font raylib/Font) (initials (ptr i8)) (bounds Frame)] (-> i64)
   (do
     (rounded-fill bounds (/ (load (field bounds height)) 2.0) (surface-subtle))
     (draw-centered-label font initials bounds 14.0 (text))
     0))
 
-(defn draw-badge [(font raylib.Font) (label (ptr i8)) (bounds Frame) (strong i64)] (-> i64)
+(defn draw-badge [(font raylib/Font) (label (ptr i8)) (bounds Frame) (strong i64)] (-> i64)
   (do
     (rounded-fill bounds (/ (load (field bounds height)) 2.0) (if (= strong 1) (accent) (surface-subtle)))
     (if (= strong 1) 0 (rounded-stroke bounds (/ (load (field bounds height)) 2.0) 1.0 (border)))
     (draw-centered-label font label bounds 12.0 (if (= strong 1) (accent-text) (text)))
     0))
 
-(defn draw-breadcrumb [(font raylib.Font) (left f64) (top f64) (active (ptr i8))] (-> i64)
+(defn draw-breadcrumb [(font raylib/Font) (left f64) (top f64) (active (ptr i8))] (-> i64)
   (do
     (draw-label font c"Workflows" left top 13.0 (text-muted))
     (draw-label font c"/" (+ left 76.0) top 13.0 (text-muted))
@@ -333,14 +334,14 @@
     (draw-label font active (+ left 160.0) top 13.0 (text))
     0))
 
-(defn draw-bubble [(font raylib.Font) (message (ptr i8)) (bounds Frame) (agent i64)] (-> i64)
+(defn draw-bubble [(font raylib/Font) (message (ptr i8)) (bounds Frame) (agent i64)] (-> i64)
   (do
     (rounded-fill bounds 10.0 (if (= agent 1) (surface) (surface-subtle)))
     (if (= agent 1) (rounded-stroke bounds 10.0 1.0 (border)) 0)
     (draw-label font message (+ (load (field bounds left)) 14.0) (+ (load (field bounds top)) 12.0) 13.0 (text))
     0))
 
-(defn draw-card [(font raylib.Font)
+(defn draw-card [(font raylib/Font)
                  (title (ptr i8))
                  (description (ptr i8))
                  (bounds Frame)] (-> i64)
@@ -353,7 +354,7 @@
 
 (defn draw-separator [(bounds Frame)] (-> i64)
   (do
-    (raylib.DrawRectangleRec (rectangle bounds) (border))
+    (raylib/DrawRectangleRec (rectangle bounds) (border))
     0))
 
 (defn draw-skeleton [(bounds Frame)] (-> i64)
@@ -376,7 +377,7 @@
 (defn draw-spinner [(bounds Frame) (time f64)] (-> i64)
   (let [start (* time 210.0)]
     (do
-      (raylib.DrawRing (vector (+ (load (field bounds left)) (/ (load (field bounds width)) 2.0))
+      (raylib/DrawRing (vector (+ (load (field bounds left)) (/ (load (field bounds width)) 2.0))
                                   (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0)))
                        (cast f32 6.0)
                        (cast f32 8.0)
@@ -386,18 +387,18 @@
                        (accent))
       0)))
 
-(defn draw-table [(font raylib.Font) (bounds Frame)] (-> i64)
+(defn draw-table [(font raylib/Font) (bounds Frame)] (-> i64)
   (let [rowHeight (/ (load (field bounds height)) 4.0)
         firstColumn (+ (load (field bounds left)) (* (load (field bounds width)) 0.58))]
     (do
       (rounded-fill bounds 8.0 (surface))
       (rounded-stroke bounds 8.0 1.0 (border))
-      (raylib.DrawLineEx (vector firstColumn (load (field bounds top)))
+      (raylib/DrawLineEx (vector firstColumn (load (field bounds top)))
                          (vector firstColumn (+ (load (field bounds top)) (load (field bounds height))))
                          (cast f32 1.0)
                          (border))
       (for [row 1 4]
-        (raylib.DrawLineEx (vector (load (field bounds left)) (+ (load (field bounds top)) (* (cast f64 row) rowHeight)))
+        (raylib/DrawLineEx (vector (load (field bounds left)) (+ (load (field bounds top)) (* (cast f64 row) rowHeight)))
                            (vector (+ (load (field bounds left)) (load (field bounds width))) (+ (load (field bounds top)) (* (cast f64 row) rowHeight)))
                            (cast f32 1.0)
                            (border)))
@@ -411,7 +412,7 @@
       (draw-label font c"Draft" (+ firstColumn 12.0) (+ (+ (load (field bounds top)) (* rowHeight 3.0)) 9.0) 13.0 (text))
       0)))
 
-(defn draw-accordion [(font raylib.Font) (title (ptr i8)) (body (ptr i8)) (bounds Frame) (open i64) (state Interaction)] (-> i64)
+(defn draw-accordion [(font raylib/Font) (title (ptr i8)) (body (ptr i8)) (bounds Frame) (open i64) (state Interaction)] (-> i64)
   (do
     (rounded-fill bounds 8.0 (surface))
     (rounded-stroke bounds 8.0 1.0 (border))
@@ -426,7 +427,7 @@
     (draw-focus bounds 8.0 (load (field state focused)))
     0))
 
-(defn draw-tabs [(font raylib.Font) (bounds Frame) (selected i64)] (-> i64)
+(defn draw-tabs [(font raylib/Font) (bounds Frame) (selected i64)] (-> i64)
   (let [segmentWidth (/ (load (field bounds width)) 3.0)]
     (do
       (rounded-fill bounds 8.0 (surface-subtle))
@@ -441,7 +442,7 @@
       (draw-centered-label font c"Settings" (frame (+ (load (field bounds left)) (* segmentWidth 2.0)) (load (field bounds top)) segmentWidth (load (field bounds height))) 13.0 (if (= selected 2) (text) (text-muted)))
       0)))
 
-(defn draw-button-group [(font raylib.Font) (bounds Frame) (selected i64)] (-> i64)
+(defn draw-button-group [(font raylib/Font) (bounds Frame) (selected i64)] (-> i64)
   (let [segmentWidth (/ (load (field bounds width)) 3.0)]
     (do
       (for [segment 0 3]
@@ -464,10 +465,10 @@
       (draw-centered-label font c"Next" (frame (+ (load (field bounds left)) (* segmentWidth 2.0)) (load (field bounds top)) segmentWidth (load (field bounds height))) 13.0 (if (= selected 2) (accent-text) (text)))
       0)))
 
-(defn draw-toggle-group [(font raylib.Font) (bounds Frame) (selected i64)] (-> i64)
+(defn draw-toggle-group [(font raylib/Font) (bounds Frame) (selected i64)] (-> i64)
   (draw-button-group font bounds selected))
 
-(defn draw-pagination [(font raylib.Font) (bounds Frame) (page i64)] (-> i64)
+(defn draw-pagination [(font raylib/Font) (bounds Frame) (page i64)] (-> i64)
   (let [cell (load (field bounds height))]
     (do
       (for [item 0 5]
@@ -487,7 +488,7 @@
                                (if (= item page) (text) (text-muted)))))
       0)))
 
-(defn draw-select [(font raylib.Font) (label (ptr i8)) (bounds Frame) (open i64) (state Interaction)] (-> i64)
+(defn draw-select [(font raylib/Font) (label (ptr i8)) (bounds Frame) (open i64) (state Interaction)] (-> i64)
   (do
     (draw-input font label c"Select..." bounds state)
     (draw-label font (if (= open 1) c"^" c"v") (- (+ (load (field bounds left)) (load (field bounds width))) 24.0) (+ (load (field bounds top)) 8.0) 13.0 (text-muted))
@@ -502,7 +503,7 @@
       0)
     0))
 
-(defn draw-combobox [(font raylib.Font) (query (ptr i8)) (bounds Frame) (open i64) (state Interaction)] (-> i64)
+(defn draw-combobox [(font raylib/Font) (query (ptr i8)) (bounds Frame) (open i64) (state Interaction)] (-> i64)
   (do
     (draw-input font query c"Search workflows..." bounds state)
     (if (= open 1)
@@ -516,7 +517,7 @@
       0)
     0))
 
-(defn draw-dropdown-menu [(font raylib.Font) (bounds Frame)] (-> i64)
+(defn draw-dropdown-menu [(font raylib/Font) (bounds Frame)] (-> i64)
   (do
     (rounded-fill bounds 8.0 (surface))
     (rounded-stroke bounds 8.0 1.0 (border))
@@ -526,44 +527,44 @@
     (draw-label font c"Delete" (+ (load (field bounds left)) 12.0) (+ (load (field bounds top)) 78.0) 13.0 (color 255 100 103))
     0))
 
-(defn draw-tooltip [(font raylib.Font) (label (ptr i8)) (bounds Frame)] (-> i64)
+(defn draw-tooltip [(font raylib/Font) (label (ptr i8)) (bounds Frame)] (-> i64)
   (do
     (rounded-fill bounds 6.0 (text))
     (draw-centered-label font label bounds 12.0 (accent-text))
     0))
 
-(defn draw-dialog [(font raylib.Font) (screenWidth f64) (screenHeight f64)] (-> i64)
+(defn draw-dialog [(font raylib/Font) (screenWidth f64) (screenHeight f64)] (-> i64)
   (let [bounds (frame (/ (- screenWidth 420.0) 2.0) (/ (- screenHeight 210.0) 2.0) 420.0 210.0)]
     (do
-      (raylib.DrawRectangleRec (rectangle (frame 0.0 0.0 screenWidth screenHeight)) (color-alpha 0 0 0 166))
+      (raylib/DrawRectangleRec (rectangle (frame 0.0 0.0 screenWidth screenHeight)) (color-alpha 0 0 0 166))
       (draw-card font c"Build this workflow?" c"The creator agent will write an executable workflow." bounds)
       (draw-button font c"Build workflow" (frame (+ (load (field bounds left)) 252.0) (+ (load (field bounds top)) 154.0) 150.0 36.0) (interaction 0 0 1 0))
       0)))
 
-(defn draw-drawer [(font raylib.Font) (screenWidth f64) (screenHeight f64)] (-> i64)
+(defn draw-drawer [(font raylib/Font) (screenWidth f64) (screenHeight f64)] (-> i64)
   (let [bounds (frame 0.0 (- screenHeight 250.0) screenWidth 250.0)]
     (do
-      (raylib.DrawRectangleRec (rectangle (frame 0.0 0.0 screenWidth screenHeight)) (color-alpha 0 0 0 120))
+      (raylib/DrawRectangleRec (rectangle (frame 0.0 0.0 screenWidth screenHeight)) (color-alpha 0 0 0 120))
       (rounded-fill bounds 14.0 (surface))
       (draw-label font c"Run history" 28.0 (+ (load (field bounds top)) 28.0) 18.0 (text))
       (draw-label font c"Inspect events and agent output from the latest run." 28.0 (+ (load (field bounds top)) 60.0) 13.0 (text-muted))
       0)))
 
-(defn draw-sheet [(font raylib.Font) (screenWidth f64) (screenHeight f64)] (-> i64)
+(defn draw-sheet [(font raylib/Font) (screenWidth f64) (screenHeight f64)] (-> i64)
   (let [bounds (frame (- screenWidth 420.0) 0.0 420.0 screenHeight)]
     (do
-      (raylib.DrawRectangleRec (rectangle (frame 0.0 0.0 screenWidth screenHeight)) (color-alpha 0 0 0 120))
-      (raylib.DrawRectangleRec (rectangle bounds) (surface))
+      (raylib/DrawRectangleRec (rectangle (frame 0.0 0.0 screenWidth screenHeight)) (color-alpha 0 0 0 120))
+      (raylib/DrawRectangleRec (rectangle bounds) (surface))
       (draw-label font c"Workflow settings" (+ (load (field bounds left)) 28.0) 32.0 18.0 (text))
       (draw-label font c"Configure approvals and execution." (+ (load (field bounds left)) 28.0) 64.0 13.0 (text-muted))
       0)))
 
-(defn draw-resizable [(font raylib.Font) (bounds Frame) (split f64)] (-> i64)
+(defn draw-resizable [(font raylib/Font) (bounds Frame) (split f64)] (-> i64)
   (let [divider (+ (load (field bounds left)) (* (load (field bounds width)) split))]
     (do
       (rounded-fill bounds 8.0 (surface))
       (rounded-stroke bounds 8.0 1.0 (border))
-      (raylib.DrawLineEx (vector divider (load (field bounds top)))
+      (raylib/DrawLineEx (vector divider (load (field bounds top)))
                          (vector divider (+ (load (field bounds top)) (load (field bounds height))))
                          (cast f32 2.0)
                          (border))
@@ -582,7 +583,7 @@
 (defn radio-second-frame [] (-> Frame) (frame 560.0 584.0 180.0 28.0))
 
 (defn catalog-state [] (-> CatalogState)
-  (let [state (alloc-stack CatalogState)]
+  (let [state (alloc/stack CatalogState)]
     (do
       (store! state (zeroed CatalogState))
       (store! (field state page) 0)
@@ -598,7 +599,7 @@
       (load state))))
 
 (defn input-at [(horizontal f64) (vertical f64) (pressed i64) (down i64)] (-> CatalogInput)
-  (let [input (alloc-stack CatalogInput)]
+  (let [input (alloc/stack CatalogInput)]
     (do
       (store! input (zeroed CatalogInput))
       (store! (field input mouseHorizontal) horizontal)
@@ -728,24 +729,24 @@
       0)))
 
 (defn capture-catalog-input [] (-> CatalogInput)
-  (let [mouse (raylib.GetMousePosition)
-        input (alloc-stack CatalogInput)]
+  (let [mouse (raylib/GetMousePosition)
+        input (alloc/stack CatalogInput)]
     (do
       (store! input (zeroed CatalogInput))
       (store! (field input mouseHorizontal) (cast f64 (load (field mouse x))))
       (store! (field input mouseVertical) (cast f64 (load (field mouse y))))
       (store! (field input mousePressed)
-              (if (icmp-ne (raylib.IsMouseButtonPressed (cast i32 0)) (cast u8 0)) 1 0))
+              (if (!= (raylib/IsMouseButtonPressed (cast i32 0)) (cast u8 0)) 1 0))
       (store! (field input mouseDown)
-              (if (icmp-ne (raylib.IsMouseButtonDown (cast i32 0)) (cast u8 0)) 1 0))
+              (if (!= (raylib/IsMouseButtonDown (cast i32 0)) (cast u8 0)) 1 0))
       (store! (field input tabPressed)
-              (if (icmp-ne (raylib.IsKeyPressed (cast i32 NATIVE_KEY_TAB)) (cast u8 0)) 1 0))
+              (if (!= (raylib/IsKeyPressed (cast i32 NATIVE_KEY_TAB)) (cast u8 0)) 1 0))
       (store! (field input spacePressed)
-              (if (icmp-ne (raylib.IsKeyPressed (cast i32 NATIVE_KEY_SPACE)) (cast u8 0)) 1 0))
+              (if (!= (raylib/IsKeyPressed (cast i32 NATIVE_KEY_SPACE)) (cast u8 0)) 1 0))
       (store! (field input leftPressed)
-              (if (icmp-ne (raylib.IsKeyPressed (cast i32 NATIVE_KEY_LEFT)) (cast u8 0)) 1 0))
+              (if (!= (raylib/IsKeyPressed (cast i32 NATIVE_KEY_LEFT)) (cast u8 0)) 1 0))
       (store! (field input rightPressed)
-              (if (icmp-ne (raylib.IsKeyPressed (cast i32 NATIVE_KEY_RIGHT)) (cast u8 0)) 1 0))
+              (if (!= (raylib/IsKeyPressed (cast i32 NATIVE_KEY_RIGHT)) (cast u8 0)) 1 0))
       (load input))))
 
 (defn control-interaction [(state CatalogState) (input CatalogInput) (identifier i64) (bounds Frame)] (-> Interaction)
@@ -838,7 +839,7 @@
     (draw-label (field state mono) c"SKELETON + SPINNER" 520.0 420.0 11.0 (text-muted))
     (draw-skeleton (frame 520.0 454.0 280.0 16.0))
     (draw-skeleton (frame 520.0 480.0 220.0 16.0))
-    (draw-spinner (frame 824.0 458.0 28.0 28.0) (raylib.GetTime))
+    (draw-spinner (frame 824.0 458.0 28.0 28.0) (raylib/GetTime))
     (draw-separator (frame 520.0 536.0 372.0 1.0))
     (draw-alert (field state sans) c"Creation failed" c"The workflow file could not be parsed." (frame 520.0 562.0 372.0 64.0) 1)
     0))
@@ -902,7 +903,7 @@
 
 (defn draw-catalog [(state CatalogState) (input CatalogInput)] (-> i64)
   (do
-    (raylib.ClearBackground (background))
+    (raylib/ClearBackground (background))
     (draw-label (field state sans)
                 (case (load (field state page)) 0 c"Native controls" 1 c"Native surfaces" 2 c"Native navigation" c"Native overlays")
                 64.0
@@ -926,57 +927,57 @@
 
 (defn run-catalog [] (-> i64)
   (do
-    (raylib.SetConfigFlags (cast u32 NATIVE_WINDOW_FLAGS))
-    (raylib.InitWindow (cast i32 960) (cast i32 700) c"flowline - native controls")
-    (raylib.SetTargetFPS (cast i32 60))
-    (let [state (alloc-stack CatalogState)
+    (raylib/SetConfigFlags (cast u32 NATIVE_WINDOW_FLAGS))
+    (raylib/InitWindow (cast i32 960) (cast i32 700) c"flowline - native controls")
+    (raylib/SetTargetFPS (cast i32 60))
+    (let [state (alloc/stack CatalogState)
           initial (catalog-state)]
       (store! state initial)
       (store! (field state mono)
-              (raylib.LoadFontEx c"assets/fonts/IBMPlexMono-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
+              (raylib/LoadFontEx c"assets/fonts/IBMPlexMono-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
       (store! (field state sans)
-              (raylib.LoadFontEx c"assets/fonts/IBMPlexSans-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
-      (raylib.SetTextureFilter (load (field (field state mono) texture)) (cast i32 1))
-      (raylib.SetTextureFilter (load (field (field state sans) texture)) (cast i32 1))
-      (loop (if (icmp-ne (raylib.WindowShouldClose) (cast u8 0))
+              (raylib/LoadFontEx c"assets/fonts/IBMPlexSans-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
+      (raylib/SetTextureFilter (load (field (field state mono) texture)) (cast i32 1))
+      (raylib/SetTextureFilter (load (field (field state sans) texture)) (cast i32 1))
+      (loop (if (!= (raylib/WindowShouldClose) (cast u8 0))
               (break)
               (let [input (capture-catalog-input)]
                 (do
                   (apply-catalog-input (mut state) input)
-                  (raylib.BeginDrawing)
+                  (raylib/BeginDrawing)
                   (draw-catalog (load state) input)
-                  (raylib.EndDrawing)
+                  (raylib/EndDrawing)
                   (continue)))))
-      (raylib.UnloadFont (load (field state mono)))
-      (raylib.UnloadFont (load (field state sans))))
-    (raylib.CloseWindow)
+      (raylib/UnloadFont (load (field state mono)))
+      (raylib/UnloadFont (load (field state sans))))
+    (raylib/CloseWindow)
     0))
 
 (defn render-catalog-snapshot [] (-> i64)
   (do
-    (raylib.SetConfigFlags (cast u32 NATIVE_WINDOW_FLAGS))
-    (raylib.InitWindow (cast i32 960) (cast i32 700) c"flowline - native controls snapshot")
-    (let [state (alloc-stack CatalogState)
+    (raylib/SetConfigFlags (cast u32 NATIVE_WINDOW_FLAGS))
+    (raylib/InitWindow (cast i32 960) (cast i32 700) c"flowline - native controls snapshot")
+    (let [state (alloc/stack CatalogState)
           initial (catalog-state)
           input (input-at 0.0 0.0 0 0)]
       (store! state initial)
       (store! (field state mono)
-              (raylib.LoadFontEx c"assets/fonts/IBMPlexMono-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
+              (raylib/LoadFontEx c"assets/fonts/IBMPlexMono-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
       (store! (field state sans)
-              (raylib.LoadFontEx c"assets/fonts/IBMPlexSans-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
-      (raylib.SetTextureFilter (load (field (field state mono) texture)) (cast i32 1))
-      (raylib.SetTextureFilter (load (field (field state sans) texture)) (cast i32 1))
-      (raylib.BeginDrawing)
+              (raylib/LoadFontEx c"assets/fonts/IBMPlexSans-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
+      (raylib/SetTextureFilter (load (field (field state mono) texture)) (cast i32 1))
+      (raylib/SetTextureFilter (load (field (field state sans) texture)) (cast i32 1))
+      (raylib/BeginDrawing)
       (draw-catalog (load state) input)
-      (raylib.TakeScreenshot c"native-controls.png")
-      (raylib.EndDrawing)
-      (raylib.UnloadFont (load (field state mono)))
-      (raylib.UnloadFont (load (field state sans))))
-    (raylib.CloseWindow)
+      (raylib/TakeScreenshot c"native-controls.png")
+      (raylib/EndDrawing)
+      (raylib/UnloadFont (load (field state mono)))
+      (raylib/UnloadFont (load (field state sans))))
+    (raylib/CloseWindow)
     0))
 
 (defn check-catalog-interactions [] (-> i64)
-  (let [state (alloc-stack CatalogState)
+  (let [state (alloc/stack CatalogState)
         (mut input) (input-at 0.0 0.0 0 0)]
     (do
       (store! state (catalog-state))

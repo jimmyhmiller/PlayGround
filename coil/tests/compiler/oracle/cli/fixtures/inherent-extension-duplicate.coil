@@ -1,5 +1,0 @@
-(module inherent_extension_duplicate)
-(import "inherent-remote.coil" :use [Remote])
-
-(impl Remote
-  (remote-mark [(r Remote)] (-> i64) 60))

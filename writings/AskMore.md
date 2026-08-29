@@ -5,3 +5,5 @@ The way we interact with our programming languages has been fundamentally altere
 The kinds of syntactic wars that once raged in the software war are now largely gone. Disliking python because of space sensitive syntax when you aren't type the code feels entirely arbitrary. But the fact that syntax becomes less important does not mean that languages stop mattering. Despite what some billionaire said, the end point is not going to be llms writing everything directly in machine code. Nor are we seeing the death of new programming languages because they aren't in the training set. Instead, we are at a point where we can finally demand more from our programming languages. Where the concrete benefits start mattering way more than that superficial trappings that once dictated popularity.
 
 ## What More Could you Want?
+
+asdfd

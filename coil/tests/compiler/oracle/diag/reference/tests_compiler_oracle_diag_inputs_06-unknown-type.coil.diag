@@ -1,5 +1,0 @@
-error: in 'main': alloc: unknown type 'Nope'
-  --> tests/compiler/oracle/diag/inputs/06-unknown-type.coil:3:32
-  |
-3 | (defn main [] (-> i64) (let [p (alloc/stack Nope)] 0))
-  |                                ^^^^^^^^^^^^^^^^^^

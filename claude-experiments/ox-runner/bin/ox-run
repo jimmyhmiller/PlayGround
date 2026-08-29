@@ -86,7 +86,7 @@ cleanup_worktree() {
 
 # Append the structured record and move the task file to its resting place.
 finish() {
-  local dur=$(( $(ox_epoch) - START_EPOCH ))
+  local dur=$(( $(ox_epoch) - START_EPOCH )) keep_trying="false"
   cleanup_worktree
 
   # Values go through the environment, never through heredoc interpolation, so
@@ -142,7 +142,23 @@ finish() {
       dest="$OX_DONE/$TASK_NAME"
       ;;
     *)
-      if [ "$RETRYABLE" = "true" ] && [ "$ATTEMPT" -lt "$(max_attempts)" ]; then
+      # Agent-level failures are never terminal. A provider may recover after
+      # the nominal retry budget, and an accepted turn can still end empty.
+      # Input/configuration/git failures retain the finite task retry budget.
+      case "$STATUS" in
+        codex-error|timeout|no-changes) keep_trying="true" ;;
+      esac
+      if [ "$RETRYABLE" = "true" ] && { [ "$ATTEMPT" -lt "$(max_attempts)" ] || [ "$keep_trying" = "true" ]; }; then
+        if [ "$keep_trying" = "true" ]; then
+          local delay="$OX_RATE_LIMIT_BACKOFF" backoff_step=1
+          while [ "$backoff_step" -lt "$ATTEMPT" ] && [ "$delay" -lt "$OX_RATE_LIMIT_BACKOFF_CAP" ]; do
+            delay=$((delay * 2))
+            [ "$delay" -le "$OX_RATE_LIMIT_BACKOFF_CAP" ] || delay="$OX_RATE_LIMIT_BACKOFF_CAP"
+            backoff_step=$((backoff_step + 1))
+          done
+          ox_log "agent retry; waiting ${delay}s before requeue"
+          sleep "$delay"
+        fi
         dest="$OX_INBOX/$TASK_NAME"
         ox_log "requeueing for attempt $((ATTEMPT + 1))/$(max_attempts): $REASON"
       else
@@ -293,7 +309,30 @@ if [ "$CODEX_EXIT" = "124" ] || [ "$CODEX_EXIT" = "137" ]; then
   STATUS="timeout"; REASON="codex exceeded ${TIMEOUT}s"; RETRYABLE="true"
 elif [ "$CODEX_EXIT" != "0" ]; then
   STATUS="codex-error"
-  REASON="codex exited $CODEX_EXIT: $(tail -c 300 "$RUN_DIR/codex.stderr" | tr '\n' ' ')"
+  # Provider failures are emitted as JSON events, while stderr may contain
+  # only the unhelpful "no last agent message" warning.
+  CODEX_ERROR="$(python3 - "$RUN_DIR/codex.jsonl" <<'PY'
+import json, sys
+messages = []
+try:
+    for line in open(sys.argv[1]):
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if event.get("type") == "error":
+            message = event.get("message", "")
+            if message and not message.startswith("Reconnecting..."):
+                messages.append(message)
+except OSError:
+    pass
+print(messages[-1] if messages else "")
+PY
+)"
+  if [ -z "$CODEX_ERROR" ]; then
+    CODEX_ERROR="$(tail -c 300 "$RUN_DIR/codex.stderr" | tr '\n' ' ')"
+  fi
+  REASON="codex exited $CODEX_EXIT: $CODEX_ERROR"
   RETRYABLE="true"
 fi
 

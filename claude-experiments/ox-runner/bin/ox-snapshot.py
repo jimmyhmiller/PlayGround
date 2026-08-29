@@ -27,6 +27,20 @@ def count_md(d):
         return 0
 
 
+def terminal_failed_count():
+    """Failed task files that are not also active after an explicit replay."""
+    def md_names(d):
+        try:
+            return {f for f in os.listdir(d) if f.endswith(".md")}
+        except OSError:
+            return set()
+
+    failed = md_names(os.path.join(OX_HOME, "failed"))
+    active = md_names(os.path.join(OX_HOME, "inbox"))
+    active |= md_names(os.path.join(OX_HOME, "processing"))
+    return len(failed - active)
+
+
 def daemon_state():
     try:
         out = subprocess.run(
@@ -60,16 +74,39 @@ def last_log_line(run_dir):
 
 
 def in_flight():
-    """Run dirs with no meta.json yet — i.e. still executing."""
+    """Tasks owned by the daemon, including retry backoff after an attempt."""
     out = []
+    processing = os.path.join(OX_HOME, "processing")
     try:
-        names = os.listdir(RUNS)
+        tasks = sorted(f for f in os.listdir(processing) if f.endswith(".md"))
     except OSError:
         return out
-    for name in names:
-        d = os.path.join(RUNS, name)
-        if not os.path.isdir(d) or os.path.exists(os.path.join(d, "meta.json")):
+    for task_name in tasks:
+        state_path = os.path.join(OX_HOME, "state", task_name + ".json")
+        name = ""
+        attempt = 0
+        try:
+            with open(state_path) as fh:
+                state = json.load(fh)
+            attempt = int(state.get("attempts", 0))
+            runs = state.get("runs", [])
+            if runs:
+                name = runs[-1]
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+        if not name:
             continue
+        d = os.path.join(RUNS, name)
+        if not os.path.isdir(d):
+            continue
+        meta = None
+        meta_path = os.path.join(d, "meta.json")
+        try:
+            with open(meta_path) as fh:
+                meta = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            pass
+        phase = "retrying" if meta else "running"
         started = None
         try:
             started = os.path.getmtime(os.path.join(d, "prompt.txt"))
@@ -79,7 +116,7 @@ def in_flight():
             except OSError:
                 pass
         repo = title = ""
-        task = os.path.join(d, "task.md")
+        task = os.path.join(processing, task_name)
         if os.path.exists(task):
             try:
                 with open(task) as fh:
@@ -92,12 +129,19 @@ def in_flight():
                             break
             except OSError:
                 pass
+        last = last_log_line(d)
+        if meta:
+            reason = meta.get("reason", "")
+            last = "retry scheduled: " + (reason or meta.get("status", "agent failure"))
         out.append({
             "run_id": name,
+            "task": task_name,
             "repo": repo,
             "title": title,
+            "phase": phase,
+            "attempt": attempt,
             "elapsed": int(time.time() - started) if started else 0,
-            "last": last_log_line(d),
+            "last": last,
         })
     out.sort(key=lambda r: r["run_id"], reverse=True)
     return out
@@ -180,7 +224,7 @@ def repos():
 # Bump when a field consumers rely on is added. The jim widget compares this
 # and respawns its stream when it is talking to an older `ox stream` process —
 # `install.sh` replaces the script on disk but cannot restart a running stream.
-SCHEMA = 2
+SCHEMA = 3
 
 
 def snapshot(limit=RECENT_DEFAULT):
@@ -194,7 +238,7 @@ def snapshot(limit=RECENT_DEFAULT):
             "waiting": count_md(os.path.join(OX_HOME, "inbox")),
             "running": count_md(os.path.join(OX_HOME, "processing")),
             "done": count_md(os.path.join(OX_HOME, "done")),
-            "failed": count_md(os.path.join(OX_HOME, "failed")),
+            "failed": terminal_failed_count(),
         },
         "queued": queued(),
         "in_flight": in_flight(),

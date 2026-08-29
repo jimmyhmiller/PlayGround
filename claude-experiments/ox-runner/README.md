@@ -114,6 +114,13 @@ Retryable failures go back to `inbox/` until the attempt budget is spent, then
 land in `failed/` with a `.last-run.json` sidecar. `ox retry <run-id>` requeues
 anything by hand.
 
+Agent-level failures (`codex-error`, an empty `no-changes` run, or a timeout
+with no work to preserve) are the exception: they retry forever. Their delay
+doubles from `OX_RATE_LIMIT_BACKOFF` up to `OX_RATE_LIMIT_BACKOFF_CAP`, then
+stays at that cap until an agent completes useful work. Input, repository, and
+git failures retain the finite attempt budget so broken configuration does not
+loop forever.
+
 ## Robustness properties
 
 - **Singleton daemon.** `flock` on `.daemon.lock`; a second one refuses to start.
@@ -147,6 +154,8 @@ OX_SANDBOX=danger-full-access
 OX_EFFORT=high
 OX_MODEL=stealth/ox-alpha
 OX_BRANCH_PREFIX=ox
+OX_RATE_LIMIT_BACKOFF=60       # first 429 delay; doubles after each attempt
+OX_RATE_LIMIT_BACKOFF_CAP=360  # maximum 429 delay
 OX_PROJECTS=$HOME/Documents/Code/projects
 ```
 

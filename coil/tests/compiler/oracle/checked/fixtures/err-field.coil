@@ -1,7 +1,0 @@
-(module errtest)
-(import "primitive.coil" :as primitive)
-(import "alloc.coil" :as alloc)
-(defstruct Pt [(x i64) (y i64)])
-(defn main [] (-> i64)
-  (let [p (alloc/stack Pt)]
-    (primitive/load (primitive/field p z))))

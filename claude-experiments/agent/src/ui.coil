@@ -1,13 +1,14 @@
 (module ui)
+(import "coil.alloc" :as alloc)
 
-(import "raylib.coil" :as raylib)
+(import "raylib" :as raylib)
 
 ;; Small rendering primitives shared by applications built with the Flowline UI.
 ;; The module deliberately contains no application state: callers own layout,
 ;; input, and transitions, and pass all drawing data explicitly.
 
-(defn color-alpha [(red i64) (green i64) (blue i64) (alpha i64)] (-> raylib.Color)
-  (let [value (alloc-stack raylib.Color)]
+(defn color-alpha [(red i64) (green i64) (blue i64) (alpha i64)] (-> raylib/Color)
+  (let [value (alloc/stack raylib/Color)]
     (do
       (store! (field value r) (cast u8 red))
       (store! (field value g) (cast u8 green))
@@ -15,18 +16,18 @@
       (store! (field value a) (cast u8 alpha))
       (load value))))
 
-(defn color [(red i64) (green i64) (blue i64)] (-> raylib.Color)
+(defn color [(red i64) (green i64) (blue i64)] (-> raylib/Color)
   (color-alpha red green blue 255))
 
-(defn vector [(horizontal f64) (vertical f64)] (-> raylib.Vector2)
-  (let [value (alloc-stack raylib.Vector2)]
+(defn vector [(horizontal f64) (vertical f64)] (-> raylib/Vector2)
+  (let [value (alloc/stack raylib/Vector2)]
     (do
       (store! (field value x) (cast f32 horizontal))
       (store! (field value y) (cast f32 vertical))
       (load value))))
 
-(defn rectangle [(left f64) (top f64) (width f64) (height f64)] (-> raylib.Rectangle)
-  (let [value (alloc-stack raylib.Rectangle)]
+(defn rectangle [(left f64) (top f64) (width f64) (height f64)] (-> raylib/Rectangle)
+  (let [value (alloc/stack raylib/Rectangle)]
     (do
       (store! (field value x) (cast f32 left))
       (store! (field value y) (cast f32 top))
@@ -37,45 +38,45 @@
 (defn ui-scale [] (-> f64)
   1.25)
 
-(defn draw-text [(font raylib.Font) (text (ptr i8)) (left f64) (top f64) (size f64) (tint raylib.Color)] (-> i64)
+(defn draw-text [(font raylib/Font) (text (ptr i8)) (left f64) (top f64) (size f64) (tint raylib/Color)] (-> i64)
   (do
-    (raylib.DrawTextEx (load font) text (vector left top) (cast f32 (* size 1.16)) (cast f32 0.18) tint)
+    (raylib/DrawTextEx (load font) text (vector left top) (cast f32 (* size 1.16)) (cast f32 0.18) tint)
     0))
 
 (defn begin-scissor [(left f64) (top f64) (width f64) (height f64)] (-> i64)
   (do
-    (raylib.BeginScissorMode (cast i32 (* left (ui-scale)))
+    (raylib/BeginScissorMode (cast i32 (* left (ui-scale)))
                              (cast i32 (* top (ui-scale)))
                              (cast i32 (* width (ui-scale)))
                              (cast i32 (* height (ui-scale))))
     0))
 
-(defn fill-rectangle [(left f64) (top f64) (width f64) (height f64) (tint raylib.Color)] (-> i64)
-  (do (raylib.DrawRectangleRec (rectangle left top width height) tint) 0))
+(defn fill-rectangle [(left f64) (top f64) (width f64) (height f64) (tint raylib/Color)] (-> i64)
+  (do (raylib/DrawRectangleRec (rectangle left top width height) tint) 0))
 
-(defn stroke-rectangle [(left f64) (top f64) (width f64) (height f64) (thickness f64) (tint raylib.Color)] (-> i64)
-  (do (raylib.DrawRectangleLinesEx (rectangle left top width height) (cast f32 thickness) tint) 0))
+(defn stroke-rectangle [(left f64) (top f64) (width f64) (height f64) (thickness f64) (tint raylib/Color)] (-> i64)
+  (do (raylib/DrawRectangleLinesEx (rectangle left top width height) (cast f32 thickness) tint) 0))
 
 (defn line [(fromHorizontal f64)
             (fromVertical f64)
             (toHorizontal f64)
             (toVertical f64)
             (thickness f64)
-            (tint raylib.Color)] (-> i64)
+            (tint raylib/Color)] (-> i64)
   (do
-    (raylib.DrawLineEx (vector fromHorizontal fromVertical) (vector toHorizontal toVertical) (cast f32 thickness) tint)
+    (raylib/DrawLineEx (vector fromHorizontal fromVertical) (vector toHorizontal toVertical) (cast f32 thickness) tint)
     0))
 
-(defn text-width [(font raylib.Font) (text (ptr i8)) (size f64)] (-> f64)
-  (let [measured (raylib.MeasureTextEx (load font) text (cast f32 (* size 1.16)) (cast f32 0.18))]
+(defn text-width [(font raylib/Font) (text (ptr i8)) (size f64)] (-> f64)
+  (let [measured (raylib/MeasureTextEx (load font) text (cast f32 (* size 1.16)) (cast f32 0.18))]
     (cast f64 (load (field measured x)))))
 
-(defn draw-text-right [(font raylib.Font)
+(defn draw-text-right [(font raylib/Font)
                        (text (ptr i8))
                        (right f64)
                        (top f64)
                        (size f64)
-                       (tint raylib.Color)] (-> i64)
+                       (tint raylib/Color)] (-> i64)
   (draw-text font text (- right (text-width font text size)) top size tint))
 
 (export color-alpha

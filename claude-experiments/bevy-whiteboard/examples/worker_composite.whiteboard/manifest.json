@@ -1,7 +1,0 @@
-{
-  "format_version": 1,
-  "canvas": {
-    "name": "Worker (from primitives)",
-    "description": "WorkerComposite expanded as a compound on the canvas: inline entry adapter L (req→packet, pushes self on return_path) → Filter (color match) → Service (busy + bounded backlog + service_ns) → inline terminal reply R (packet→resp popping). Two callers drive it so the inner pipeline visibly cycles."
-  }
-}

@@ -1,2 +1,0 @@
-(foo "start
-end" baz

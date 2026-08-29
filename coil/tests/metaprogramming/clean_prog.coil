@@ -1,3 +1,0 @@
-(module app)
-(import "primitive.coil" :as primitive)
-(defn main [] (-> :i64) (if (primitive/icmp-gt 3 2) 42 0))

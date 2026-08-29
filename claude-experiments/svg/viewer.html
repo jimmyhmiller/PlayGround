@@ -115,6 +115,16 @@
     width: 50px; background: #333; color: #fff; border: 1px solid #555;
     border-radius: 3px; padding: 2px 4px; font-size: 12px; font-family: monospace;
   }
+  #path-editor .pe-header-btns { display: flex; gap: 6px; }
+  #path-editor .pe-delete {
+    background: #900; color: #fff; border: none; border-radius: 3px;
+    padding: 2px 8px; cursor: pointer; font-size: 12px;
+  }
+  #path-editor .pe-delete:hover { background: #b00; }
+  #path-editor .pe-note { color: #999; font-size: 12px; }
+  #path-editor .pe-sep { height: 1px; background: #444; margin: 2px 0; }
+  #path-editor .pe-slider { flex: 1; min-width: 130px; accent-color: #4a9eff; }
+  #path-editor .pe-inherited { color: #4a9eff; }
 </style>
 </head>
 <body>
@@ -126,8 +136,10 @@
     <button onclick="setBg('black')" id="btn-black">Black</button>
     <button onclick="setBg('navy')" id="btn-navy">Navy</button>
     <button onclick="resetView()">Reset View</button>
-    <button onclick="undoPathEdit()">Undo</button>
-    <button onclick="redoPathEdit()">Redo</button>
+    <button onclick="saveSvg()" id="btn-save">Save</button>
+    <button onclick="saveSvgAs()">Save As</button>
+    <button onclick="undoPathEdit()" id="btn-undo">Undo</button>
+    <button onclick="redoPathEdit()" id="btn-redo">Redo</button>
     <button onclick="resetAll()" style="background:#900">Reset All</button>
   </div>
 
@@ -145,7 +157,10 @@
   <div id="path-editor">
     <div class="pe-header">
       <span id="pe-tag"></span>
-      <button class="pe-close" onclick="deselectPath()">X</button>
+      <div class="pe-header-btns">
+        <button class="pe-delete" onclick="deleteSelected()">Delete</button>
+        <button class="pe-close" onclick="deselectPath()">X</button>
+      </div>
     </div>
     <div id="pe-rows"></div>
   </div>
@@ -174,17 +189,20 @@
     var pathEdits = {}; // elKey -> { fill, stroke, 'fill-opacity', 'stroke-opacity' }
     var elKeyMap = {}; // elKey -> element (built after SVG loads)
     var elToKey = null; // WeakMap: element -> elKey
-    var undoStack = []; // [{el, type, prop, oldColor, oldOpacity}]
+    var undoStack = []; // snapshots of the document before each edit
     var redoStack = [];
-    var selectionOverlay = null; // cloned SVG element used for outline
 
+    // Keys are stamped onto the elements so they survive a history restore,
+    // where document order can differ from the original file. They are
+    // stripped again on save/export.
     function buildElKeys(svg) {
       elKeyMap = {};
       elToKey = new WeakMap();
       var allEls = svg.querySelectorAll('*');
       for (var i = 0; i < allEls.length; i++) {
         var el = allEls[i];
-        var key = el.id ? 'id:' + el.id : 'idx:' + i;
+        var key = el.getAttribute('data-svgv-key') || (el.id ? 'id:' + el.id : 'idx:' + i);
+        el.setAttribute('data-svgv-key', key);
         elKeyMap[key] = el;
         elToKey.set(el, key);
       }
@@ -224,12 +242,17 @@
         var el = elKeyMap[keys[i]];
         if (!el) continue;
         var edits = pathEdits[keys[i]];
+        if (edits.d) {
+          el.setAttribute('d', edits.d);
+        }
         if (edits.fill) {
           var style = el.getAttribute('style') || '';
           if (/fill\s*:/.test(style)) {
             el.setAttribute('style', style.replace(/(fill\s*:\s*)([^;]+)/, '$1' + edits.fill));
           } else if (el.hasAttribute('fill')) {
             el.setAttribute('fill', edits.fill);
+          } else {
+            setStyleProp(el, 'fill', edits.fill); // inherited fill
           }
         }
         if (edits.stroke) {
@@ -238,6 +261,8 @@
             el.setAttribute('style', style.replace(/(stroke\s*:\s*)([^;]+)/, '$1' + edits.stroke));
           } else if (el.hasAttribute('stroke')) {
             el.setAttribute('stroke', edits.stroke);
+          } else {
+            setStyleProp(el, 'stroke', edits.stroke); // inherited stroke
           }
         }
         if (edits['fill-opacity'] !== undefined) {
@@ -245,6 +270,12 @@
         }
         if (edits['stroke-opacity'] !== undefined) {
           setOpacity(el, 'stroke', edits['stroke-opacity']);
+        }
+        if (edits.outset) {
+          applyOutset(el, parseFloat(edits.outset));
+        }
+        if (edits.deleted && el.parentNode) {
+          el.parentNode.removeChild(el);
         }
       }
     }
@@ -259,6 +290,7 @@
 
     function applyTransform() {
       canvas.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
+      refreshHandleScale(); // keep point handles the same size on screen
     }
 
     function resetView() {
@@ -301,6 +333,43 @@
       return c;
     }
 
+    function setStyleProp(el, prop, value) {
+      var style = el.getAttribute('style') || '';
+      var re = new RegExp('(^|;)(\\s*' + prop + '\\s*:\\s*)([^;]*)');
+      if (re.test(style)) {
+        style = style.replace(re, '$1$2' + value);
+      } else {
+        style = style ? style.replace(/;\s*$/, '') + ';' + prop + ':' + value : prop + ':' + value;
+      }
+      el.setAttribute('style', style);
+    }
+
+    function removeStyleProp(el, prop) {
+      var style = el.getAttribute('style');
+      if (!style) return;
+      style = style.replace(new RegExp('(^|;)\\s*' + prop + '\\s*:\\s*[^;]*', 'g'), '$1')
+        .replace(/;{2,}/g, ';').replace(/^;+/, '').replace(/;\s*$/, '');
+      if (style) el.setAttribute('style', style); else el.removeAttribute('style');
+    }
+
+    // The paint an element actually renders with, including values inherited
+    // from an ancestor <g> or coming from a CSS rule in the file.
+    function computedPaint(el, type) {
+      var cs;
+      try { cs = window.getComputedStyle(el); } catch (e) { return null; }
+      if (!cs) return null;
+      var c = normalizeColor(cs.getPropertyValue(type));
+      if (!c) return null;
+      var rgba = c.match(/^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)$/);
+      if (rgba) {
+        if (parseFloat(rgba[4]) === 0) return null;
+        c = '#' + parseInt(rgba[1],10).toString(16).padStart(2,'0')
+              + parseInt(rgba[2],10).toString(16).padStart(2,'0')
+              + parseInt(rgba[3],10).toString(16).padStart(2,'0');
+      }
+      return /^#[0-9a-f]{6}$/.test(c) ? c : null;
+    }
+
     function getOriginalOpacity(el, type) {
       // type is 'fill' or 'stroke' -> look for fill-opacity or stroke-opacity
       var opacityProp = type + '-opacity';
@@ -312,7 +381,7 @@
       return null; // means default (1.0)
     }
 
-    function extractColors(el) {
+    function extractColors(el, includeInherited) {
       var results = [];
       var fill = el.getAttribute('fill');
       var nf = normalizeColor(fill);
@@ -333,6 +402,24 @@
         if (strokeMatch) {
           var nsc = normalizeColor(strokeMatch[1]);
           if (nsc) results.push({ color: nsc, type: 'stroke', prop: 'style', origOpacity: getOriginalOpacity(el, 'stroke') });
+        }
+      }
+
+      if (includeInherited) {
+        var haveFill = false, haveStroke = false;
+        for (var i = 0; i < results.length; i++) {
+          if (results[i].type === 'fill') haveFill = true;
+          if (results[i].type === 'stroke') haveStroke = true;
+        }
+        // Inherited paint has to be overridden with an inline style: a
+        // presentation attribute loses to any CSS rule in the document.
+        if (!haveFill) {
+          var cf = computedPaint(el, 'fill');
+          if (cf) results.push({ color: cf, type: 'fill', prop: 'style', inherited: true, origOpacity: getOriginalOpacity(el, 'fill') });
+        }
+        if (!haveStroke) {
+          var cs = computedPaint(el, 'stroke');
+          if (cs) results.push({ color: cs, type: 'stroke', prop: 'style', inherited: true, origOpacity: getOriginalOpacity(el, 'stroke') });
         }
       }
       return results;
@@ -379,14 +466,86 @@
       }
     }
 
+    // Outset: stroke a shape in its own fill color so it grows outward by half
+    // the stroke width, closing thin gaps against neighbouring shapes.
+    var STROKE_PROPS = ['stroke', 'stroke-width', 'stroke-linejoin', 'stroke-linecap', 'stroke-opacity'];
+    var outsetOrig = new WeakMap();
+
+    function snapshotStroke(el) {
+      var snap = { attrs: {}, styles: {} };
+      var style = el.getAttribute('style') || '';
+      for (var i = 0; i < STROKE_PROPS.length; i++) {
+        var p = STROKE_PROPS[i];
+        snap.attrs[p] = el.hasAttribute(p) ? el.getAttribute(p) : null;
+        var m = style.match(new RegExp('(^|;)\\s*' + p + '\\s*:\\s*([^;]*)'));
+        snap.styles[p] = m ? m[2].trim() : null;
+      }
+      return snap;
+    }
+
+    function restoreStroke(el, snap) {
+      for (var i = 0; i < STROKE_PROPS.length; i++) {
+        var p = STROKE_PROPS[i];
+        if (snap.attrs[p] === null) el.removeAttribute(p);
+        else el.setAttribute(p, snap.attrs[p]);
+        if (snap.styles[p] === null) removeStyleProp(el, p);
+        else setStyleProp(el, p, snap.styles[p]);
+      }
+    }
+
+    function currentFillColor(el) {
+      var colors = extractColors(el, true);
+      for (var i = 0; i < colors.length; i++) {
+        if (colors[i].type === 'fill') return colors[i].color;
+      }
+      return null;
+    }
+
+    function applyOutset(el, width) {
+      if (!outsetOrig.has(el)) outsetOrig.set(el, snapshotStroke(el));
+      restoreStroke(el, outsetOrig.get(el));
+      if (!(width > 0)) return;
+      setStyleProp(el, 'stroke', currentFillColor(el) || '#000000');
+      setStyleProp(el, 'stroke-width', width * 2);
+      setStyleProp(el, 'stroke-linejoin', 'round');
+      setStyleProp(el, 'stroke-linecap', 'round');
+      var fillOp = getOriginalOpacity(el, 'fill');
+      if (fillOp) setStyleProp(el, 'stroke-opacity', fillOp);
+    }
+
+    function getOutset(el) {
+      var key = getElKey(el);
+      if (!key || !pathEdits[key]) return 0;
+      return parseFloat(pathEdits[key].outset) || 0;
+    }
+
+    function setOutset(el, width) {
+      applyOutset(el, width);
+      var key = getElKey(el);
+      if (key) {
+        if (width > 0) {
+          if (!pathEdits[key]) pathEdits[key] = {};
+          pathEdits[key].outset = width;
+        } else if (pathEdits[key]) {
+          delete pathEdits[key].outset;
+          if (!Object.keys(pathEdits[key]).length) delete pathEdits[key];
+        }
+      }
+      saveState();
+    }
+
+    function maxOutset() {
+      var w = svgEl ? parseFloat(svgEl.getAttribute('width')) || 0 : 0;
+      var h = svgEl ? parseFloat(svgEl.getAttribute('height')) || 0 : 0;
+      return Math.max(20, Math.round(Math.max(w, h) / 40));
+    }
+
     function resetOpacity(el, type, origOpacity) {
       var opacityProp = type + '-opacity';
       if (origOpacity === null) {
         // Remove it
         el.removeAttribute(opacityProp);
-        var style = el.getAttribute('style') || '';
-        var regex = new RegExp(';?\\s*' + opacityProp + '\\s*:\\s*[^;]+');
-        el.setAttribute('style', style.replace(regex, ''));
+        removeStyleProp(el, opacityProp);
       } else {
         setOpacity(el, type, origOpacity);
       }
@@ -429,6 +588,7 @@
 
     function handleRemapInput(origColor, inputEl, swatchEl) {
       var val = inputEl.value.trim().toLowerCase();
+      var before = snapshot();
       if (!val) {
         delete remapColors[origColor];
         inputEl.classList.remove('remapped');
@@ -444,6 +604,7 @@
           return; // invalid, do nothing
         }
       }
+      pushSnapshot(before);
       applyAllRemaps();
       saveState();
     }
@@ -528,6 +689,7 @@
         opInput.addEventListener('change', (function(c) {
           return function(e) {
             var v = e.target.value.trim();
+            var before = snapshot();
             if (!v) {
               delete remapOpacities[c];
               e.target.classList.remove('remapped');
@@ -540,6 +702,7 @@
                 return;
               }
             }
+            pushSnapshot(before);
             applyAllRemaps();
             saveState();
           };
@@ -564,6 +727,7 @@
     }
 
     function toggleColor(color) {
+      pushHistory();
       if (hiddenColors[color]) delete hiddenColors[color];
       else hiddenColors[color] = true;
       applyColorVisibility();
@@ -572,6 +736,7 @@
     }
 
     function showAllColors() {
+      pushHistory();
       hiddenColors = {};
       applyColorVisibility();
       renderColorList();
@@ -579,6 +744,7 @@
     }
 
     function hideAllColors() {
+      pushHistory();
       var keys = Object.keys(colorMap);
       for (var i = 0; i < keys.length; i++) hiddenColors[keys[i]] = true;
       applyColorVisibility();
@@ -587,6 +753,7 @@
     }
 
     function resetRemaps() {
+      pushHistory();
       var origColors = Object.keys(colorMap);
       for (var i = 0; i < origColors.length; i++) {
         var origColor = origColors[i];
@@ -608,25 +775,81 @@
       saveState();
     }
 
-    function exportSvg() {
-      if (!svgEl) return;
-      // Clone the SVG so we can remove hidden elements without affecting the live DOM
+    function serializeSvg() {
+      // Clone so we can drop editor-only nodes without touching the live DOM
       var clone = svgEl.cloneNode(true);
-      // Remove selection overlay if present
-      var overlays = clone.querySelectorAll('[stroke-dasharray="8 4"]');
+      var overlays = clone.querySelectorAll('[data-editor-overlay]');
       for (var i = 0; i < overlays.length; i++) overlays[i].remove();
-      // Remove all visibility:hidden elements
+      var keyed = clone.querySelectorAll('[data-svgv-key]');
+      for (var i = 0; i < keyed.length; i++) keyed[i].removeAttribute('data-svgv-key');
       var hidden = clone.querySelectorAll('[visibility="hidden"]');
       for (var i = 0; i < hidden.length; i++) hidden[i].remove();
-      var serializer = new XMLSerializer();
-      var svgStr = serializer.serializeToString(clone);
-      var blob = new Blob([svgStr], { type: 'image/svg+xml' });
+      return new XMLSerializer().serializeToString(clone);
+    }
+
+    function downloadSvg(name) {
+      var blob = new Blob([serializeSvg()], { type: 'image/svg+xml' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
-      a.download = 'remapped_shirt.svg';
+      a.download = name;
       a.click();
       URL.revokeObjectURL(url);
+    }
+
+    function exportSvg() {
+      if (!svgEl) return;
+      downloadSvg(currentFileName);
+    }
+
+    function flashSaved(msg) {
+      var btn = document.getElementById('btn-save');
+      if (!btn) return;
+      var old = btn.textContent;
+      btn.textContent = msg;
+      setTimeout(function () { btn.textContent = old; }, 1200);
+    }
+
+    // Write straight back to the file that was dropped in, when the browser
+    // gave us a writable handle for it; otherwise fall back to a download.
+    function saveSvg() {
+      if (!svgEl) return;
+      if (!fileHandle) { saveSvgAs(); return; }
+      fileHandle.requestPermission({ mode: 'readwrite' }).then(function (perm) {
+        if (perm !== 'granted') { flashSaved('Denied'); return; }
+        return fileHandle.createWritable().then(function (w) {
+          return w.write(serializeSvg()).then(function () { return w.close(); });
+        }).then(function () {
+          originalSvgText = serializeSvg();
+          // The file now carries these edits, and its element order has moved
+          // on from what the keys were derived from, so drop the replay state
+          // rather than let it reapply to the wrong elements on next load.
+          pathEdits = {};
+          saveState();
+          flashSaved('Saved');
+        });
+      }).catch(function (err) {
+        console.error(err);
+        flashSaved('Failed');
+      });
+    }
+
+    function saveSvgAs() {
+      if (!svgEl) return;
+      if (!window.showSaveFilePicker) { downloadSvg(currentFileName); return; }
+      window.showSaveFilePicker({
+        suggestedName: currentFileName,
+        types: [{ description: 'SVG', accept: { 'image/svg+xml': ['.svg'] } }]
+      }).then(function (handle) {
+        fileHandle = handle;
+        currentFileName = handle.name;
+        STORAGE_KEY = 'svg-viewer-' + currentFileName;
+        saveSvg();
+      }).catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        console.error(err);
+        downloadSvg(currentFileName);
+      });
     }
 
     function applyColorVisibility() {
@@ -659,112 +882,109 @@
       }
     }
 
-    // Undo for path edits
-    function pushUndo(el, type, prop) {
-      var oldColor = null;
-      var oldOpacity = null;
-      if (prop === 'attr') {
-        oldColor = el.getAttribute(type);
-      } else {
-        var style = el.getAttribute('style') || '';
-        var m = style.match(new RegExp(type + '\\s*:\\s*([^;]+)'));
-        if (m) oldColor = m[1].trim();
-      }
-      var opProp = type + '-opacity';
-      var styleStr = el.getAttribute('style') || '';
-      var opMatch = styleStr.match(new RegExp(opProp + '\\s*:\\s*([^;]+)'));
-      if (opMatch) oldOpacity = opMatch[1].trim();
-      else if (el.hasAttribute(opProp)) oldOpacity = el.getAttribute(opProp);
+    // ---- Undo / redo ------------------------------------------------------
+    //
+    // One mechanism for everything: before any change, snapshot the SVG markup
+    // plus the derived state. Undo restores a snapshot wholesale, so every
+    // edit -- colors, opacity, remaps, hidden colors, outset, deletions, point
+    // moves -- is undoable by construction and nothing can drift out of sync.
 
-      undoStack.push({ el: el, type: type, prop: prop, oldColor: oldColor, oldOpacity: oldOpacity });
-      redoStack = []; // clear redo on new action
+    var HISTORY_LIMIT = 200;
+
+    function snapshotMarkup() {
+      var clone = svgEl.cloneNode(true);
+      var overlays = clone.querySelectorAll('[data-editor-overlay]');
+      for (var i = 0; i < overlays.length; i++) overlays[i].remove();
+      return clone.outerHTML;
     }
 
-    function captureCurrentState(el, type, prop) {
-      var curColor = null;
-      var curOpacity = null;
-      if (prop === 'attr') {
-        curColor = el.getAttribute(type);
-      } else {
-        var style = el.getAttribute('style') || '';
-        var m = style.match(new RegExp(type + '\\s*:\\s*([^;]+)'));
-        if (m) curColor = m[1].trim();
-      }
-      var opProp = type + '-opacity';
-      var styleStr = el.getAttribute('style') || '';
-      var opMatch = styleStr.match(new RegExp(opProp + '\\s*:\\s*([^;]+)'));
-      if (opMatch) curOpacity = opMatch[1].trim();
-      else if (el.hasAttribute(opProp)) curOpacity = el.getAttribute(opProp);
-      return { el: el, type: type, prop: prop, oldColor: curColor, oldOpacity: curOpacity };
+    function snapshot() {
+      if (!svgEl) return null;
+      return {
+        svg: snapshotMarkup(),
+        state: JSON.stringify({
+          remapColors: remapColors,
+          remapOpacities: remapOpacities,
+          hiddenColors: hiddenColors,
+          pathEdits: pathEdits
+        }),
+        selectedKey: selectedEl ? getElKey(selectedEl) : null,
+        selectedAnchor: selectedAnchor
+      };
     }
 
-    function restoreEntry(entry) {
-      var el = entry.el;
-      if (entry.oldColor !== null) {
-        if (entry.prop === 'attr') {
-          el.setAttribute(entry.type, entry.oldColor);
-        } else {
-          var style = el.getAttribute('style') || '';
-          var regex = new RegExp('(' + entry.type + '\\s*:\\s*)([^;]+)');
-          el.setAttribute('style', style.replace(regex, '$1' + entry.oldColor));
+    function pushSnapshot(snap) {
+      if (!snap) return;
+      undoStack.push(snap);
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+      redoStack = [];
+      updateHistoryButtons();
+    }
+
+    // Call before mutating anything
+    function pushHistory() {
+      pushSnapshot(snapshot());
+    }
+
+    function restoreSnapshot(snap) {
+      deselectPath();
+      canvas.innerHTML = snap.svg;
+      svgEl = canvas.querySelector('svg');
+      if (!svgEl) return;
+
+      var st = JSON.parse(snap.state);
+      remapColors = st.remapColors || {};
+      remapOpacities = st.remapOpacities || {};
+      hiddenColors = st.hiddenColors || {};
+      pathEdits = st.pathEdits || {};
+
+      buildElKeys(svgEl);
+      buildColorMap(svgEl);
+      renderColorList();
+      saveState();
+
+      // The markup already carries every edit, so nothing is re-applied here
+      if (snap.selectedKey && elKeyMap[snap.selectedKey]) {
+        selectPath(elKeyMap[snap.selectedKey]);
+        if (snap.selectedAnchor >= 0 && pathSegs && snap.selectedAnchor < pathSegs.length) {
+          selectedAnchor = snap.selectedAnchor;
+          drawHandles(selectedEl);
         }
-      }
-      if (entry.oldOpacity !== null) {
-        setOpacity(el, entry.type, entry.oldOpacity);
-      }
-      // Sync pathEdits
-      var key = getElKey(el);
-      if (key) {
-        var colors = extractColors(el);
-        var found = false;
-        for (var i = 0; i < colors.length; i++) {
-          if (colors[i].type === entry.type) {
-            if (!pathEdits[key]) pathEdits[key] = {};
-            pathEdits[key][entry.type] = colors[i].color;
-            pathEdits[key][entry.type + '-opacity'] = colors[i].origOpacity || '1';
-            found = true;
-          }
-        }
-        if (!found && pathEdits[key]) delete pathEdits[key];
       }
     }
 
     function undoPathEdit() {
-      if (undoStack.length === 0) return;
-      var entry = undoStack.pop();
-      // Capture current state for redo before restoring
-      var redoEntry = captureCurrentState(entry.el, entry.type, entry.prop);
-      redoStack.push(redoEntry);
-      restoreEntry(entry);
-      saveState();
-      if (selectedEl === entry.el) selectPath(entry.el);
+      if (!undoStack.length) return;
+      var current = snapshot();
+      restoreSnapshot(undoStack.pop());
+      if (current) redoStack.push(current);
+      updateHistoryButtons();
     }
 
     function redoPathEdit() {
-      if (redoStack.length === 0) return;
-      var entry = redoStack.pop();
-      // Capture current state for undo before restoring
-      var undoEntry = captureCurrentState(entry.el, entry.type, entry.prop);
-      undoStack.push(undoEntry);
-      restoreEntry(entry);
-      saveState();
-      if (selectedEl === entry.el) selectPath(entry.el);
+      if (!redoStack.length) return;
+      var current = snapshot();
+      restoreSnapshot(redoStack.pop());
+      if (current) undoStack.push(current);
+      updateHistoryButtons();
+    }
+
+    function updateHistoryButtons() {
+      var u = document.getElementById('btn-undo');
+      var r = document.getElementById('btn-redo');
+      if (u) u.disabled = !undoStack.length;
+      if (r) r.disabled = !redoStack.length;
     }
 
     function resetAll() {
       if (!confirm('Reset ALL changes? This will clear all color remaps, opacity changes, path edits, and hidden colors.')) return;
       localStorage.removeItem(STORAGE_KEY);
-      // Re-serialize from original if we have the SVG, or re-fetch default
-      if (currentFileName === 'final_shirt.svg') {
-        fetch('final_shirt.svg')
-          .then(function(r) { return r.text(); })
-          .then(function(text) { loadSvgText(text, currentFileName); });
-      } else {
-        // For dropped files we can't re-fetch, so just clear state and reload from DOM
-        // Best we can do: strip all modifications by re-parsing
-        var serializer = new XMLSerializer();
-        var text = serializer.serializeToString(svgEl);
-        loadSvgText(text, currentFileName);
+      // Reload the file exactly as it was dropped, so deletions and outsets
+      // don't get baked in by re-serializing the edited DOM
+      if (originalSvgText) {
+        loadSvgText(originalSvgText, currentFileName);
+      } else if (svgEl) {
+        loadSvgText(new XMLSerializer().serializeToString(svgEl), currentFileName);
       }
     }
 
@@ -778,43 +998,19 @@
       deselectPath();
       selectedEl = el;
 
-      // Create an SVG overlay that traces the path
-      var clone = el.cloneNode(false);
-      clone.removeAttribute('id');
-      clone.setAttribute('fill', 'none');
-      clone.setAttribute('stroke', '#ff0');
-      clone.setAttribute('stroke-width', '3');
-      clone.setAttribute('stroke-dasharray', '8 4');
-      clone.setAttribute('pointer-events', 'none');
-      clone.setAttribute('opacity', '1');
-      // Remove any style fill/stroke and replace
-      var cloneStyle = clone.getAttribute('style') || '';
-      cloneStyle = cloneStyle
-        .replace(/fill\s*:\s*[^;]+;?/g, '')
-        .replace(/stroke\s*:\s*[^;]+;?/g, '')
-        .replace(/stroke-opacity\s*:\s*[^;]+;?/g, '')
-        .replace(/fill-opacity\s*:\s*[^;]+;?/g, '')
-        .replace(/stroke-width\s*:\s*[^;]+;?/g, '')
-        .replace(/opacity\s*:\s*[^;]+;?/g, '');
-      cloneStyle += ';fill:none;stroke:#ff0;stroke-width:3;stroke-dasharray:8 4;stroke-opacity:1;opacity:1';
-      clone.setAttribute('style', cloneStyle);
-      clone.removeAttribute('visibility');
-      // Insert after the selected element
-      if (el.parentNode) {
-        el.parentNode.insertBefore(clone, el.nextSibling);
-      }
-      selectionOverlay = clone;
-
+      // Point handles are the selection indicator, so paths get no outline
       pathEditor.classList.add('open');
 
       peTag.textContent = '<' + el.tagName + '>' + (el.id ? ' #' + el.id : '');
       peRows.innerHTML = '';
 
       // Show fill if present
-      var colors = extractColors(el);
+      var colors = extractColors(el, true);
       if (colors.length === 0) {
-        peRows.innerHTML = '<div style="color:#999;font-size:12px">No fill or stroke on this element</div>';
-        return;
+        var note = document.createElement('div');
+        note.className = 'pe-note';
+        note.textContent = 'No fill or stroke on this element';
+        peRows.appendChild(note);
       }
 
       for (var i = 0; i < colors.length; i++) {
@@ -823,8 +1019,9 @@
         row.className = 'pe-row';
 
         var lbl = document.createElement('span');
-        lbl.className = 'pe-label';
+        lbl.className = 'pe-label' + (c.inherited ? ' pe-inherited' : '');
         lbl.textContent = c.type;
+        if (c.inherited) lbl.title = 'inherited from a parent group or a CSS rule';
 
         var sw = document.createElement('div');
         sw.className = 'pe-swatch';
@@ -851,16 +1048,16 @@
             var val = e.target.value.trim().toLowerCase();
             if (val && val[0] !== '#') val = '#' + val;
             if (/^#[0-9a-f]{6}$/.test(val) || /^#[0-9a-f]{3}$/.test(val)) {
-              pushUndo(element, type, prop);
+              pushHistory();
               if (prop === 'attr') {
                 element.setAttribute(type, val);
               } else {
-                var style = element.getAttribute('style') || '';
-                var regex = new RegExp('(' + type + '\\s*:\\s*)([^;]+)');
-                element.setAttribute('style', style.replace(regex, '$1' + val));
+                setStyleProp(element, type, val);
               }
               swatch.style.background = val;
               recordPathEdit(element, type, val);
+              // An active outset is painted in the fill color, so follow it
+              if (type === 'fill' && getOutset(element) > 0) applyOutset(element, getOutset(element));
             }
           };
         })(el, c.type, c.prop, sw));
@@ -869,7 +1066,7 @@
           return function(e) {
             var v = parseFloat(e.target.value.trim());
             if (!isNaN(v) && v >= 0 && v <= 1) {
-              pushUndo(element, type, prop);
+              pushHistory();
               setOpacity(element, type, v);
               recordPathEdit(element, type + '-opacity', '' + v);
             }
@@ -883,19 +1080,711 @@
         row.appendChild(opInp);
         peRows.appendChild(row);
       }
+
+      buildOutsetRow(el);
+      buildPointsRow(el);
+      setPointsMode(isEditablePath(el)); // points are editable straight away
+    }
+
+    function buildPointsRow(el) {
+      var sep = document.createElement('div');
+      sep.className = 'pe-sep';
+      peRows.appendChild(sep);
+
+      var row = document.createElement('div');
+      row.className = 'pe-row';
+
+      var lbl = document.createElement('span');
+      lbl.className = 'pe-label';
+      lbl.textContent = 'points';
+      row.appendChild(lbl);
+
+      var note = document.createElement('span');
+      note.className = 'pe-note';
+      note.id = 'pe-points-note';
+      note.textContent = isEditablePath(el)
+        ? 'drag to move, double-click the path to add, Delete to remove'
+        : 'only <path> elements have editable points';
+      row.appendChild(note);
+      peRows.appendChild(row);
+    }
+
+    // Grow the shape outward to close a gap against its neighbours
+    function buildOutsetRow(el) {
+      var sep = document.createElement('div');
+      sep.className = 'pe-sep';
+      peRows.appendChild(sep);
+
+      var row = document.createElement('div');
+      row.className = 'pe-row';
+
+      var lbl = document.createElement('span');
+      lbl.className = 'pe-label';
+      lbl.textContent = 'outset';
+      lbl.title = 'grow the shape outward, in SVG user units, to close gaps';
+
+      var cur = getOutset(el);
+      var before = cur;
+
+      var slider = document.createElement('input');
+      slider.className = 'pe-slider';
+      slider.type = 'range';
+      slider.min = '0';
+      slider.max = '' + maxOutset();
+      slider.step = '0.5';
+      slider.value = '' + cur;
+
+      var num = document.createElement('input');
+      num.className = 'pe-opacity-input';
+      num.type = 'text';
+      num.value = '' + cur;
+
+      function commit(val) {
+        if (val === before) return;
+        // the slider previews live, so the pre-drag snapshot is the one to keep
+        pushSnapshot(dragSnapshot || snapshot());
+        dragSnapshot = null;
+        setOutset(el, val);
+        before = val;
+      }
+
+      var dragSnapshot = null;
+      slider.addEventListener('mousedown', function () {
+        dragSnapshot = snapshot(); // taken before the live preview starts
+      });
+      slider.addEventListener('input', function () {
+        num.value = slider.value;
+        applyOutset(el, parseFloat(slider.value)); // live preview, not recorded
+      });
+      slider.addEventListener('change', function () {
+        commit(parseFloat(slider.value) || 0);
+      });
+      slider.addEventListener('click', function (e) { e.stopPropagation(); });
+
+      num.addEventListener('change', function () {
+        var v = parseFloat(num.value.trim());
+        if (isNaN(v) || v < 0) { num.value = '' + before; return; }
+        slider.value = '' + Math.min(v, parseFloat(slider.max));
+        commit(v);
+      });
+      num.addEventListener('click', function (e) { e.stopPropagation(); });
+
+      row.appendChild(lbl);
+      row.appendChild(slider);
+      row.appendChild(num);
+      peRows.appendChild(row);
+    }
+
+    function deleteSelected() {
+      if (!selectedEl) return;
+      var el = selectedEl;
+      deselectPath(); // drops the outline clone so nextSibling is the real one
+      var parent = el.parentNode;
+      if (!parent) return;
+      var key = getElKey(el);
+
+      function remove() {
+        if (el.parentNode) el.parentNode.removeChild(el);
+        if (key) {
+          if (!pathEdits[key]) pathEdits[key] = {};
+          pathEdits[key].deleted = true;
+        }
+        saveState();
+      }
+      pushHistory();
+      remove();
+    }
+
+    // ---- Path geometry editing -------------------------------------------
+
+    var ARG_COUNT = { M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, A: 7, Z: 0 };
+
+    function parsePathData(d) {
+      var i = 0, len = d.length, segs = [];
+      function skipSep() { while (i < len && (d[i] === ' ' || d[i] === ',' || d[i] === '\n' || d[i] === '\r' || d[i] === '\t')) i++; }
+      function readNumber() {
+        skipSep();
+        var start = i;
+        if (d[i] === '+' || d[i] === '-') i++;
+        while (i < len && d[i] >= '0' && d[i] <= '9') i++;
+        if (d[i] === '.') { i++; while (i < len && d[i] >= '0' && d[i] <= '9') i++; }
+        if (d[i] === 'e' || d[i] === 'E') {
+          i++;
+          if (d[i] === '+' || d[i] === '-') i++;
+          while (i < len && d[i] >= '0' && d[i] <= '9') i++;
+        }
+        if (start === i) return NaN;
+        return parseFloat(d.slice(start, i));
+      }
+      // Arc flags may be written without separators ("a5 5 0 0110 10"), so they
+      // have to be read one character at a time.
+      function readFlag() {
+        skipSep();
+        if (d[i] === '0' || d[i] === '1') { var v = d[i] === '1' ? 1 : 0; i++; return v; }
+        return NaN;
+      }
+
+      var cmd = null;
+      while (i < len) {
+        skipSep();
+        if (i >= len) break;
+        var ch = d[i];
+        if (/[MmLlHhVvCcSsQqTtAaZz]/.test(ch)) {
+          cmd = ch;
+          i++;
+        } else if (cmd === null) {
+          throw new Error('Bad path data: expected a command at index ' + i + ' of "' + d + '"');
+        } else if (cmd === 'M') {
+          cmd = 'L'; // implicit lineto after a moveto
+        } else if (cmd === 'm') {
+          cmd = 'l';
+        }
+        var up = cmd.toUpperCase();
+        var n = ARG_COUNT[up];
+        if (n === 0) { segs.push([cmd]); skipSep(); continue; }
+        var args = [];
+        for (var k = 0; k < n; k++) {
+          var v = (up === 'A' && (k === 3 || k === 4)) ? readFlag() : readNumber();
+          if (isNaN(v)) throw new Error('Bad path data near index ' + i + ' of "' + d + '"');
+          args.push(v);
+        }
+        segs.push([cmd].concat(args));
+        skipSep();
+      }
+      return segs;
+    }
+
+    // Rewrite any path into absolute M/L/C/Q/A/Z, which is the same shape but
+    // lets every point be moved independently.
+    function normalizePathData(d) {
+      var segs = parsePathData(d);
+      var out = [];
+      var cx = 0, cy = 0, sx = 0, sy = 0;
+      var lastCubicCtrl = null, lastQuadCtrl = null;
+
+      for (var i = 0; i < segs.length; i++) {
+        var s = segs[i];
+        var c = s[0];
+        var up = c.toUpperCase();
+        var rel = c !== up;
+        var ox = rel ? cx : 0, oy = rel ? cy : 0;
+        var x, y, x1, y1, x2, y2;
+
+        if (up === 'M') {
+          x = s[1] + ox; y = s[2] + oy;
+          out.push(['M', x, y]);
+          cx = sx = x; cy = sy = y;
+          lastCubicCtrl = lastQuadCtrl = null;
+        } else if (up === 'L') {
+          x = s[1] + ox; y = s[2] + oy;
+          out.push(['L', x, y]);
+          cx = x; cy = y;
+          lastCubicCtrl = lastQuadCtrl = null;
+        } else if (up === 'H') {
+          x = s[1] + ox;
+          out.push(['L', x, cy]);
+          cx = x;
+          lastCubicCtrl = lastQuadCtrl = null;
+        } else if (up === 'V') {
+          y = s[1] + oy;
+          out.push(['L', cx, y]);
+          cy = y;
+          lastCubicCtrl = lastQuadCtrl = null;
+        } else if (up === 'C') {
+          x1 = s[1] + ox; y1 = s[2] + oy;
+          x2 = s[3] + ox; y2 = s[4] + oy;
+          x = s[5] + ox; y = s[6] + oy;
+          out.push(['C', x1, y1, x2, y2, x, y]);
+          cx = x; cy = y;
+          lastCubicCtrl = [x2, y2]; lastQuadCtrl = null;
+        } else if (up === 'S') {
+          x2 = s[1] + ox; y2 = s[2] + oy;
+          x = s[3] + ox; y = s[4] + oy;
+          x1 = lastCubicCtrl ? 2 * cx - lastCubicCtrl[0] : cx;
+          y1 = lastCubicCtrl ? 2 * cy - lastCubicCtrl[1] : cy;
+          out.push(['C', x1, y1, x2, y2, x, y]);
+          cx = x; cy = y;
+          lastCubicCtrl = [x2, y2]; lastQuadCtrl = null;
+        } else if (up === 'Q') {
+          x1 = s[1] + ox; y1 = s[2] + oy;
+          x = s[3] + ox; y = s[4] + oy;
+          out.push(['Q', x1, y1, x, y]);
+          cx = x; cy = y;
+          lastQuadCtrl = [x1, y1]; lastCubicCtrl = null;
+        } else if (up === 'T') {
+          x = s[1] + ox; y = s[2] + oy;
+          x1 = lastQuadCtrl ? 2 * cx - lastQuadCtrl[0] : cx;
+          y1 = lastQuadCtrl ? 2 * cy - lastQuadCtrl[1] : cy;
+          out.push(['Q', x1, y1, x, y]);
+          cx = x; cy = y;
+          lastQuadCtrl = [x1, y1]; lastCubicCtrl = null;
+        } else if (up === 'A') {
+          x = s[6] + ox; y = s[7] + oy;
+          out.push(['A', s[1], s[2], s[3], s[4], s[5], x, y]);
+          cx = x; cy = y;
+          lastCubicCtrl = lastQuadCtrl = null;
+        } else if (up === 'Z') {
+          out.push(['Z']);
+          cx = sx; cy = sy;
+          lastCubicCtrl = lastQuadCtrl = null;
+        }
+      }
+      return out;
+    }
+
+    function round(n) {
+      return Math.round(n * 1000) / 1000;
+    }
+
+    function serializePathData(segs) {
+      var parts = [];
+      for (var i = 0; i < segs.length; i++) {
+        var s = segs[i];
+        var nums = [];
+        for (var k = 1; k < s.length; k++) nums.push(round(s[k]));
+        parts.push(s[0] + (nums.length ? nums.join(' ') : ''));
+      }
+      return parts.join(' ');
+    }
+
+    // Index of the endpoint coordinates within a segment, or -1 for Z
+    function endpointIndex(seg) {
+      if (seg[0] === 'Z') return -1;
+      return seg.length - 2;
+    }
+
+    // Control points of a segment, as [indexOfX, ownerEnd] pairs
+    function controlIndices(seg) {
+      if (seg[0] === 'C') return [1, 3];
+      if (seg[0] === 'Q') return [1];
+      return [];
+    }
+
+    function subpathStartPoint(segs, i) {
+      for (var k = i; k >= 0; k--) {
+        if (segs[k][0] === 'M') return [segs[k][1], segs[k][2]];
+      }
+      return [0, 0];
+    }
+
+    // A straight segment has no curve handles to grab, so it gets ghost ones at
+    // the thirds. Touching one turns the segment into a cubic of the exact same
+    // shape, and the ghost becomes the real control point.
+    function ghostControls(segs, i) {
+      var seg = segs[i];
+      var p0 = segStart(segs, i);
+      var p3;
+      if (seg[0] === 'L') p3 = [seg[1], seg[2]];
+      else if (seg[0] === 'Z') p3 = subpathStartPoint(segs, i);
+      else return null;
+      if (p0[0] === p3[0] && p0[1] === p3[1]) return null; // zero length
+      return {
+        p0: p0,
+        p3: p3,
+        g1: [p0[0] + (p3[0] - p0[0]) / 3, p0[1] + (p3[1] - p0[1]) / 3],
+        g2: [p0[0] + 2 * (p3[0] - p0[0]) / 3, p0[1] + 2 * (p3[1] - p0[1]) / 3]
+      };
+    }
+
+    // Returns the index of the cubic segment to drag, or -1
+    function convertToCubic(segs, i) {
+      var g = ghostControls(segs, i);
+      if (!g) return -1;
+      var cubic = ['C', g.g1[0], g.g1[1], g.g2[0], g.g2[1], g.p3[0], g.p3[1]];
+      if (segs[i][0] === 'Z') {
+        segs.splice(i, 0, cubic); // curve up to the start point, then still close
+      } else {
+        segs[i] = cubic;
+      }
+      return i;
+    }
+
+    // Where a segment starts, following Z back to the subpath's opening M
+    function segStart(segs, i) {
+      var sx = 0, sy = 0, cx = 0, cy = 0;
+      for (var k = 0; k < i; k++) {
+        var s = segs[k];
+        if (s[0] === 'M') { cx = sx = s[1]; cy = sy = s[2]; }
+        else if (s[0] === 'Z') { cx = sx; cy = sy; }
+        else { var e = endpointIndex(s); cx = s[e]; cy = s[e + 1]; }
+      }
+      return [cx, cy];
+    }
+
+    var pathSegs = null;       // normalized segments of the selected path
+    var handleLayer = null;    // <g> holding the drag handles
+    var handleScale = 1;
+    var selectedAnchor = -1;   // index into pathSegs of the selected anchor
+    var pointsMode = false;
+
+    function isEditablePath(el) {
+      return !!(el && el.tagName && el.tagName.toLowerCase() === 'path' && el.getAttribute('d'));
+    }
+
+    function ctmScaleOf(el) {
+      var m = el.getScreenCTM();
+      if (!m) return 1;
+      var s = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c));
+      return s || 1;
+    }
+
+    function screenToUser(el, clientX, clientY) {
+      var m = el.getScreenCTM();
+      if (!m) return { x: clientX, y: clientY };
+      var p = svgEl.createSVGPoint();
+      p.x = clientX; p.y = clientY;
+      return p.matrixTransform(m.inverse());
+    }
+
+    // `before` is a snapshot taken ahead of the edit (drags mutate as you go)
+    function commitPathData(el, before, newD) {
+      pushSnapshot(before);
+      var key = getElKey(el);
+      el.setAttribute('d', newD);
+      if (key) {
+        if (!pathEdits[key]) pathEdits[key] = {};
+        pathEdits[key].d = newD;
+      }
+      saveState();
+      if (pointsMode && selectedEl === el) {
+        pathSegs = normalizePathData(newD);
+        drawHandles(el);
+      }
+    }
+
+    function svgNode(name) {
+      return document.createElementNS('http://www.w3.org/2000/svg', name);
+    }
+
+    // Note: the anchor selection outlives a redraw, so it is cleared by the
+    // callers that actually end point editing, not here.
+    function clearHandles() {
+      if (handleLayer && handleLayer.parentNode) handleLayer.parentNode.removeChild(handleLayer);
+      handleLayer = null;
+    }
+
+    function drawHandles(el) {
+      clearHandles();
+      if (!pathSegs) return;
+
+      handleScale = ctmScaleOf(el);
+      var r = 5 / handleScale;
+      var layer = svgNode('g');
+      layer.setAttribute('data-editor-overlay', 'points');
+      // Live at the root, transformed into the path's own coordinate space, so
+      // no shape drawn later in the file can paint over the handles or eat
+      // their clicks.
+      var ctm = el.getCTM();
+      if (ctm) {
+        layer.setAttribute('transform',
+          'matrix(' + [ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f].join(' ') + ')');
+      }
+
+      function handleDot(x, y, radius, fill, data, strokeColor) {
+        var g = svgNode('g');
+        // an oversized transparent disc, so small handles are still easy to grab
+        var hit = svgNode('circle');
+        hit.setAttribute('cx', x);
+        hit.setAttribute('cy', y);
+        hit.setAttribute('r', radius * 2.2);
+        hit.setAttribute('cursor', 'move');
+        hit.setAttribute('style', 'fill:transparent!important;stroke:none!important;pointer-events:all');
+        var dot = svgNode('circle');
+        dot.setAttribute('cx', x);
+        dot.setAttribute('cy', y);
+        dot.setAttribute('r', radius);
+        // inline style, so a CSS rule in the file can't restyle the handles
+        dot.setAttribute('style', 'fill:' + fill + '!important;stroke:' +
+          (strokeColor || '#000') + '!important;stroke-width:' +
+          (1 / handleScale) + ';opacity:1;visibility:visible;pointer-events:none');
+        for (var k in data) { hit.dataset[k] = data[k]; dot.dataset[k] = data[k]; }
+        g.appendChild(hit);
+        g.appendChild(dot);
+        return g;
+      }
+
+      for (var i = 0; i < pathSegs.length; i++) {
+        var seg = pathSegs[i];
+
+        // Straight segments show hollow handles at the thirds, ready to be
+        // pulled out into a curve.
+        var ghosts = ghostControls(pathSegs, i);
+        if (ghosts) {
+          var pairs = [[ghosts.g1, ghosts.p0, 1], [ghosts.g2, ghosts.p3, 3]];
+          for (var gi = 0; gi < pairs.length; gi++) {
+            var gp = pairs[gi][0], anchor = pairs[gi][1];
+            var gline = svgNode('line');
+            gline.setAttribute('x1', anchor[0]);
+            gline.setAttribute('y1', anchor[1]);
+            gline.setAttribute('x2', gp[0]);
+            gline.setAttribute('y2', gp[1]);
+            gline.setAttribute('stroke-dasharray', (2 / handleScale) + ' ' + (2 / handleScale));
+            gline.setAttribute('style', 'stroke:#4a9eff!important;stroke-width:' +
+              (1 / handleScale) + '!important;opacity:0.5;visibility:visible;pointer-events:none');
+            layer.appendChild(gline);
+            layer.appendChild(handleDot(gp[0], gp[1], r * 0.7, 'none',
+              { seg: i, ghost: pairs[gi][2] }, '#4a9eff'));
+          }
+        }
+
+        var e = endpointIndex(seg);
+        if (e < 0) continue;
+
+        // control points, tethered to the anchors they belong to
+        var ctrls = controlIndices(seg);
+        for (var c = 0; c < ctrls.length; c++) {
+          var ci = ctrls[c];
+          var from = (ci === 1) ? segStart(pathSegs, i) : [seg[e], seg[e + 1]];
+          var line = svgNode('line');
+          line.setAttribute('x1', from[0]);
+          line.setAttribute('y1', from[1]);
+          line.setAttribute('x2', seg[ci]);
+          line.setAttribute('y2', seg[ci + 1]);
+          line.setAttribute('style', 'stroke:#4a9eff!important;stroke-width:' +
+            (1 / handleScale) + ';opacity:1;visibility:visible;pointer-events:none');
+          layer.appendChild(line);
+
+          layer.appendChild(handleDot(seg[ci], seg[ci + 1], r * 0.75, '#4a9eff', { seg: i, ctrl: ci }));
+        }
+
+        layer.appendChild(handleDot(seg[e], seg[e + 1], r,
+          i === selectedAnchor ? '#ff5f57' : '#fff', { seg: i, anchor: '1' }));
+      }
+
+      svgEl.appendChild(layer);
+      handleLayer = layer;
+    }
+
+    function refreshHandleScale() {
+      if (pointsMode && selectedEl && handleLayer) drawHandles(selectedEl);
+    }
+
+    // Every handle moves on its own. Hold Shift on an anchor to bring the
+    // curve handles hanging off it along for the ride.
+    function moveAnchor(segs, i, dx, dy, withControls) {
+      var seg = segs[i];
+      var e = endpointIndex(seg);
+      if (e < 0) return;
+      seg[e] += dx; seg[e + 1] += dy;
+      if (!withControls) return;
+      if (seg[0] === 'C') { seg[3] += dx; seg[4] += dy; }
+      var next = segs[i + 1];
+      if (next && next[0] === 'C') { next[1] += dx; next[2] += dy; }
+      // Keep a closed subpath's opening M and its Z in step
+      if (seg[0] === 'M' && withControls) {
+        for (var k = i + 1; k < segs.length; k++) {
+          if (segs[k][0] === 'M') break;
+          if (segs[k][0] === 'Z') {
+            var after = segs[k + 1];
+            if (after && after[0] === 'C') { after[1] += dx; after[2] += dy; }
+            break;
+          }
+        }
+      }
+    }
+
+    function startHandleDrag(e) {
+      if (!pointsMode || !selectedEl || !handleLayer) return;
+      var t = e.target;
+      if (!t.dataset || t.dataset.seg === undefined) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      var el = selectedEl;
+      var segIdx = parseInt(t.dataset.seg, 10);
+      var ctrlIdx = t.dataset.ctrl !== undefined ? parseInt(t.dataset.ctrl, 10) : -1;
+      var before = snapshot();
+      var start = screenToUser(el, e.clientX, e.clientY);
+      var moved = false;
+
+      // Grabbing a ghost handle turns the straight segment into an identical
+      // cubic first, so there is a real control point to drag.
+      if (t.dataset.ghost !== undefined) {
+        if (convertToCubic(pathSegs, segIdx) < 0) return;
+        ctrlIdx = parseInt(t.dataset.ghost, 10);
+      }
+
+      if (ctrlIdx < 0) {
+        selectedAnchor = segIdx;
+        drawHandles(el);
+      }
+
+      function onMove(ev) {
+        var p = screenToUser(el, ev.clientX, ev.clientY);
+        var dx = p.x - start.x, dy = p.y - start.y;
+        if (!moved && Math.abs(dx) * handleScale < 2 && Math.abs(dy) * handleScale < 2) return;
+        moved = true;
+        if (ctrlIdx >= 0) {
+          pathSegs[segIdx][ctrlIdx] += dx;
+          pathSegs[segIdx][ctrlIdx + 1] += dy;
+        } else {
+          moveAnchor(pathSegs, segIdx, dx, dy, ev.shiftKey);
+        }
+        start = p;
+        var d = serializePathData(pathSegs);
+        el.setAttribute('d', d);
+        drawHandles(el);
+      }
+      function onUp() {
+        window.removeEventListener('mousemove', onMove, true);
+        window.removeEventListener('mouseup', onUp, true);
+        if (moved) {
+          commitPathData(el, before, serializePathData(pathSegs));
+        } else {
+          // a click that went nowhere leaves no trace, including any
+          // straight-to-cubic conversion staged on mousedown
+          pathSegs = normalizePathData(el.getAttribute('d'));
+          drawHandles(el);
+        }
+      }
+      window.addEventListener('mousemove', onMove, true);
+      window.addEventListener('mouseup', onUp, true);
+    }
+
+    function pointOnSeg(segs, i, t) {
+      var seg = segs[i];
+      var p0 = segStart(segs, i);
+      var e = endpointIndex(seg);
+      if (e < 0) return p0;
+      var p3 = [seg[e], seg[e + 1]];
+      if (seg[0] === 'C') {
+        var mt = 1 - t;
+        return [
+          mt*mt*mt*p0[0] + 3*mt*mt*t*seg[1] + 3*mt*t*t*seg[3] + t*t*t*p3[0],
+          mt*mt*mt*p0[1] + 3*mt*mt*t*seg[2] + 3*mt*t*t*seg[4] + t*t*t*p3[1]
+        ];
+      }
+      if (seg[0] === 'Q') {
+        var m = 1 - t;
+        return [
+          m*m*p0[0] + 2*m*t*seg[1] + t*t*p3[0],
+          m*m*p0[1] + 2*m*t*seg[2] + t*t*p3[1]
+        ];
+      }
+      return [p0[0] + (p3[0] - p0[0]) * t, p0[1] + (p3[1] - p0[1]) * t];
+    }
+
+    // Split the segment nearest to a point, giving it a new anchor there
+    function insertPointNear(el, ux, uy) {
+      var best = null;
+      for (var i = 1; i < pathSegs.length; i++) {
+        var seg = pathSegs[i];
+        if (seg[0] === 'M') continue;
+        for (var s = 1; s < 24; s++) {
+          var t = s / 24;
+          var p = (seg[0] === 'Z') ? null : pointOnSeg(pathSegs, i, t);
+          if (!p) continue;
+          var dist = (p[0] - ux) * (p[0] - ux) + (p[1] - uy) * (p[1] - uy);
+          if (!best || dist < best.dist) best = { dist: dist, i: i, t: t };
+        }
+      }
+      if (!best) return false;
+
+      var seg = pathSegs[best.i];
+      var t = best.t;
+      var p0 = segStart(pathSegs, best.i);
+      var e = endpointIndex(seg);
+      var p3 = [seg[e], seg[e + 1]];
+      var before = snapshot();
+      var mid, left, right;
+
+      if (seg[0] === 'L') {
+        mid = pointOnSeg(pathSegs, best.i, t);
+        pathSegs.splice(best.i, 1, ['L', mid[0], mid[1]], ['L', p3[0], p3[1]]);
+      } else if (seg[0] === 'C') {
+        // de Casteljau, so the curve keeps its exact shape
+        var p1 = [seg[1], seg[2]], p2 = [seg[3], seg[4]];
+        var a = lerp(p0, p1, t), b = lerp(p1, p2, t), c = lerp(p2, p3, t);
+        var d1 = lerp(a, b, t), e1 = lerp(b, c, t);
+        mid = lerp(d1, e1, t);
+        left = ['C', a[0], a[1], d1[0], d1[1], mid[0], mid[1]];
+        right = ['C', e1[0], e1[1], c[0], c[1], p3[0], p3[1]];
+        pathSegs.splice(best.i, 1, left, right);
+      } else if (seg[0] === 'Q') {
+        var q1 = [seg[1], seg[2]];
+        var qa = lerp(p0, q1, t), qb = lerp(q1, p3, t);
+        mid = lerp(qa, qb, t);
+        pathSegs.splice(best.i, 1, ['Q', qa[0], qa[1], mid[0], mid[1]], ['Q', qb[0], qb[1], p3[0], p3[1]]);
+      } else {
+        return false; // arcs and Z can't be split without changing the shape
+      }
+
+      commitPathData(el, before, serializePathData(pathSegs));
+      return true;
+    }
+
+    function lerp(a, b, t) {
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    }
+
+    function deleteSelectedPoint() {
+      if (!pointsMode || !selectedEl || selectedAnchor < 0 || !pathSegs) return false;
+      var i = selectedAnchor;
+      var seg = pathSegs[i];
+      if (!seg) return false;
+      var before = snapshot();
+      var copy = pathSegs.slice();
+
+      if (seg[0] === 'M') {
+        // Promote the next drawing segment to be the subpath's new start
+        var next = copy[i + 1];
+        if (!next || next[0] === 'M' || next[0] === 'Z') {
+          copy.splice(i, 1);
+          if (copy[i] && copy[i][0] === 'Z') copy.splice(i, 1);
+        } else {
+          var e = endpointIndex(next);
+          copy.splice(i, 2, ['M', next[e], next[e + 1]]);
+        }
+      } else {
+        copy.splice(i, 1);
+      }
+      if (!copy.length) return false;
+
+      pathSegs = copy;
+      selectedAnchor = -1;
+      commitPathData(selectedEl, before, serializePathData(pathSegs));
+      return true;
+    }
+
+    function setPointsMode(on) {
+      pointsMode = on;
+      selectedAnchor = -1;
+      if (!on || !selectedEl) { clearHandles(); pathSegs = null; return; }
+      pathSegs = normalizePathData(selectedEl.getAttribute('d'));
+      drawHandles(selectedEl);
+      var note = document.getElementById('pe-points-note');
+      if (note) note.textContent = pathSegs.length +
+        ' points - drag to move, double-click the path to add, Delete to remove';
     }
 
     function deselectPath() {
-      if (selectionOverlay && selectionOverlay.parentNode) {
-        selectionOverlay.parentNode.removeChild(selectionOverlay);
-      }
-      selectionOverlay = null;
+      clearHandles();
+      pathSegs = null;
+      pointsMode = false;
+      selectedAnchor = -1;
       selectedEl = null;
       pathEditor.classList.remove('open');
     }
 
     // Keyboard shortcuts
     window.addEventListener('keydown', function(e) {
+      var ae = document.activeElement;
+      var typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA');
+      if (e.key === 'Escape') {
+        deselectPath();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        if (e.shiftKey) saveSvgAs(); else saveSvg();
+        return;
+      }
+      if (!typing && selectedEl && (e.key === 'Delete' || e.key === 'Backspace')) {
+        e.preventDefault();
+        if (deleteSelectedPoint()) return; // a point is selected: drop that instead
+        deleteSelected();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'z') {
         e.preventDefault();
         redoPathEdit();
@@ -923,9 +1812,23 @@
       applyTransform();
     }, { passive: false });
 
+    // Point handles take precedence over panning and selection
+    viewport.addEventListener('mousedown', startHandleDrag, true);
+
+    viewport.addEventListener('dblclick', function(e) {
+      if (!pointsMode || !selectedEl || !pathSegs) return;
+      if (e.target !== selectedEl && !(handleLayer && handleLayer.contains(e.target))) return;
+      e.preventDefault();
+      var p = screenToUser(selectedEl, e.clientX, e.clientY);
+      if (!insertPointNear(selectedEl, p.x, p.y)) {
+        flashSaved('No split');
+      }
+    });
+
     var dragMoved = false;
     viewport.addEventListener('mousedown', function(e) {
       if (e.target.closest('#controls') || e.target.closest('#color-panel') || e.target.closest('#path-editor')) return;
+      if (handleLayer && handleLayer.contains(e.target)) return;
       isDragging = true;
       dragMoved = false;
       dragStartX = e.clientX;
@@ -948,6 +1851,8 @@
         var target = e.target;
         if (target.closest('#controls') || target.closest('#color-panel') || target.closest('#path-editor')) {
           // ignore
+        } else if (handleLayer && handleLayer.contains(target)) {
+          // ignore: clicking a point handle must not reselect
         } else if (svgEl && svgEl.contains(target) && target !== svgEl) {
           selectPath(target);
         } else {
@@ -958,8 +1863,11 @@
     });
 
     var currentFileName = 'final_shirt.svg';
+    var originalSvgText = null;
+    var fileHandle = null; // writable handle for the dropped file, when available
 
     function loadSvgText(text, fileName) {
+      originalSvgText = text;
       // Reset all state for the new file
       deselectPath();
       remapColors = {};
@@ -968,6 +1876,7 @@
       pathEdits = {};
       undoStack = [];
       redoStack = [];
+      updateHistoryButtons();
 
       currentFileName = fileName || 'dropped.svg';
       STORAGE_KEY = 'svg-viewer-' + currentFileName;
@@ -1035,11 +1944,22 @@
       viewport.style.outline = '';
       var file = e.dataTransfer.files[0];
       if (!file || !file.name.toLowerCase().endsWith('.svg')) return;
-      var reader = new FileReader();
-      reader.onload = function(ev) {
-        loadSvgText(ev.target.result, file.name);
-      };
-      reader.readAsText(file);
+
+      // Grab a writable handle for the dropped file if the browser offers one,
+      // so Save can overwrite it in place rather than downloading a copy.
+      var item = e.dataTransfer.items && e.dataTransfer.items[0];
+      var handlePromise = (item && item.getAsFileSystemHandle)
+        ? item.getAsFileSystemHandle().catch(function () { return null; })
+        : Promise.resolve(null);
+
+      handlePromise.then(function (handle) {
+        var reader = new FileReader();
+        reader.onload = function(ev) {
+          fileHandle = (handle && handle.kind === 'file') ? handle : null;
+          loadSvgText(ev.target.result, file.name);
+        };
+        reader.readAsText(file);
+      });
     });
 
     // No default SVG - wait for drag and drop

@@ -3,6 +3,9 @@ Description=Ox Alpha headless task runner
 Documentation=file:%h/ox-runner/README.md
 After=network-online.target
 Wants=network-online.target
+# If it crash-loops, back off rather than hammering the API.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -12,9 +15,6 @@ Environment=OX_HOME=%h/ox-runner
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
 Restart=always
 RestartSec=5
-# If it crash-loops, back off rather than hammering the API.
-StartLimitIntervalSec=300
-StartLimitBurst=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ox-runner

@@ -1,4 +1,0 @@
-(module badlib)
-(import "primitive.coil" :as primitive)
-(defn bad [] (-> i64) (primitive/iadd nope 1))
-(export bad)

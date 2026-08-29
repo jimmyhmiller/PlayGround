@@ -1,6 +1,0 @@
-(module app)
-(import "primitive.coil" :as primitive)
-(import "always.coil" :use *)
-(checker always-ok)
-(defn compute [(x :i64)] (-> :i64) (primitive/iadd x 1))
-(defn main [] (-> :i64) (compute 41))
