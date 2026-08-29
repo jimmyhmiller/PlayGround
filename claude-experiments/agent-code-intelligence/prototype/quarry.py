@@ -558,9 +558,41 @@ def load_index(ws, store=None):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(idx, f)
         os.replace(tmp, cache_file)
+        _prune(os.path.dirname(cache_file), keep=128,
+               max_bytes=256 * 1024 * 1024)
+        _prune(os.path.join(sdir, "objects"), keep=8192)
     except OSError:
         pass
     return snap, idx
+
+
+def _prune(dirpath, keep, max_bytes=None):
+    """Bound a store directory to the newest `keep` entries (by mtime)
+    and, when max_bytes is set, to a cumulative byte budget. Under agent
+    storms every distinct snapshot mints an assembled index; the worktree
+    stress test measured 938 MB of assemblies in 2 minutes without the
+    byte cap. Deleting an entry only costs a rebuild, so pruning is
+    always safe."""
+    try:
+        entries = []
+        for n in os.listdir(dirpath):
+            p = os.path.join(dirpath, n)
+            try:
+                st = os.stat(p)
+                entries.append((st.st_mtime, st.st_size, p))
+            except OSError:
+                pass
+        entries.sort(reverse=True)
+        total = 0
+        for i, (_, size, p) in enumerate(entries):
+            total += size
+            if i >= keep or (max_bytes is not None and total > max_bytes):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- envelope

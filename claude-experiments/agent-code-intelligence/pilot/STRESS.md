@@ -92,3 +92,44 @@ are contractual: in LSP deployments each harness reinvents it (and the
 46%/1.5 GB/hang numbers are what the defaults give you); in Quarry the
 same guarantees are the protocol's conformance surface, checked by the
 suite.
+
+## T6 — The worktree storm (16 trees, 40 threads, exact oracle)
+
+`stress_worktrees.py`: one git repo, 16 worktrees sharing one store.
+15 oracle trees whose editors toggle 3 marker files each between known
+contents — all 8 legal states per tree pinned beforehand, so every storm
+response is scored with zero tolerance: its (snapshot id, answer) pair
+must be one of the precomputed pairs, or the status must be an honestly
+disclosed instability. One chaos tree receives novel timestamped content
+on every edit. Editors use deliberately non-atomic writes; assembled
+caches are dropped after precompute so the storm exercises assembly from
+shards under contention; roaming workers mix path/describe/resolve/
+search across trees; overlay workers query through overlays whose only
+legal outcomes under churn are SNAPSHOT_GONE or the exact pinned answer.
+
+120-second storm, 40 threads:
+
+| metric | result |
+|---|---|
+| edits performed | 6,369 (52/s across 16 trees) |
+| queries | 1,548 (12.7/s) |
+| oracle-verified exact | 1,151 |
+| **torn-view violations** | **0** |
+| unstable-disclosed | 0 (the 3-retry atomic load always converged) |
+| roaming / transport errors | 0 / 0 |
+| overlay outcomes | 32 exact, 128 SNAPSHOT_GONE, 0 wrong |
+| chaos shard builds during storm | 97 |
+| latency p50 / p95 / max | 1.31 s / 3.29 s / 5.19 s (CPU-saturated, 23 concurrent processes) |
+| resident memory between calls | 0 (peak transient 1.06 GB across 23 in-flight calls) |
+
+The storm also caught a real operational bug before it shipped: the
+assembled-index cache grew without bound under snapshot churn (938 MB in
+two minutes — every distinct tree state mints an assembly). Fixed with a
+byte-budgeted mtime prune (256 MB default; deleting an entry only costs
+a rebuild), verified by a follow-up storm holding the store at 260 MB
+with correctness still clean, and conformance stayed 50/50 throughout.
+
+For contrast, the equivalent LSP topology is 16 resident servers at
+220–370 MB each (≈4–6 GB, permanent) — each with the un-notified-edit
+staleness behavior measured in T3/T4 — versus one bounded store and
+zero resident processes here.
